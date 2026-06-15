@@ -26,7 +26,7 @@ public sealed class UsersController(IUserService userService) : BaseApiControlle
     /// <summary>
     /// 分页查询用户积分明细。
     /// </summary>
-    [Permission("System.User.View")]
+
     [HttpGet("{id:long}/point-details")]
     public async Task<IActionResult> GetPointDetails(long id, [FromQuery] PageQuery query, CancellationToken cancellationToken)
     {
@@ -87,7 +87,7 @@ public sealed class UsersController(IUserService userService) : BaseApiControlle
     /// <summary>
     /// 修改用户昵称。
     /// </summary>
-    [Permission("System.User.Update")]
+    
     [HttpPut("{id:long}/nickname")]
     public async Task<IActionResult> UpdateNickName(long id, [FromBody] UpdateUserNickNameRequest request, CancellationToken cancellationToken)
     {

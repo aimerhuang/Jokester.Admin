@@ -14,6 +14,12 @@ DotEnvConfiguration.LoadToEnvironment(
 var builder = WebApplication.CreateBuilder(args);
 const string CorsPolicyName = "DefaultCors";
 
+// 允许最大 100MB 的请求体，防止 IIS 反向代理或 Kestrel 层面返回 413
+builder.WebHost.ConfigureKestrel(options =>
+{
+    options.Limits.MaxRequestBodySize = 100 * 1024 * 1024; // 100 MB
+});
+
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole();
 builder.Logging.AddDebug();

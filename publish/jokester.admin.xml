@@ -1,0 +1,2287 @@
+<?xml version="1.0"?>
+<doc>
+    <assembly>
+        <name>jokester.admin</name>
+    </assembly>
+    <members>
+        <member name="T:jokester.admin.Application.DTOs.Auth.LoginRequest">
+            <summary>
+            登录请求。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.LoginRequest.UserName">
+            <summary>
+            登录用户名。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.LoginRequest.Password">
+            <summary>
+            登录密码。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Auth.RefreshTokenRequest">
+            <summary>
+            刷新令牌请求。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.RefreshTokenRequest.RefreshToken">
+            <summary>
+            RefreshToken。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Auth.SendRegisterEmailCodeRequest">
+            <summary>
+            发送注册邮箱验证码请求。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.SendRegisterEmailCodeRequest.Email">
+            <summary>
+            注册邮箱。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Auth.RegisterRequest">
+            <summary>
+            邮箱验证码注册请求。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.RegisterRequest.UserName">
+            <summary>
+            登录用户名。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.RegisterRequest.NickName">
+            <summary>
+            用户昵称。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.RegisterRequest.Password">
+            <summary>
+            登录密码。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.RegisterRequest.Email">
+            <summary>
+            注册邮箱。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.RegisterRequest.EmailCode">
+            <summary>
+            邮箱验证码。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Auth.RegisterResponse">
+            <summary>
+            注册结果。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.RegisterResponse.UserId">
+            <summary>
+            用户 ID。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Auth.LoginResponse">
+            <summary>
+            登录结果。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.LoginResponse.AccessToken">
+            <summary>
+            AccessToken。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.LoginResponse.RefreshToken">
+            <summary>
+            RefreshToken。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.LoginResponse.AccessTokenExpiresAt">
+            <summary>
+            AccessToken 过期时间。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.LoginResponse.User">
+            <summary>
+            当前用户信息。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.LoginResponse.Sites">
+            <summary>
+            可访问站点列表。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.LoginResponse.Permissions">
+            <summary>
+            权限码列表。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Auth.UserProfileDto">
+            <summary>
+            当前用户资料。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.UserProfileDto.Id">
+            <summary>
+            用户 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.UserProfileDto.UserName">
+            <summary>
+            登录用户名。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.UserProfileDto.NickName">
+            <summary>
+            用户昵称。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.UserProfileDto.AvatarUrl">
+            <summary>
+            头像地址。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.UserProfileDto.Signature">
+            <summary>
+            个性签名。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.UserProfileDto.PointBalance">
+            <summary>
+            当前积分余额。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.UserProfileDto.IsSuperAdmin">
+            <summary>
+            是否超级管理员。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Auth.SiteAccessDto">
+            <summary>
+            可访问站点。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.SiteAccessDto.Id">
+            <summary>
+            站点 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.SiteAccessDto.SiteCode">
+            <summary>
+            站点编码。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.SiteAccessDto.SiteName">
+            <summary>
+            站点名称。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Blog.BlogArticleQuery">
+            <summary>
+            博客文章分页查询参数。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogArticleQuery.Status">
+            <summary>
+            文章状态：0=草稿，1=已发布，2=隐藏。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogArticleQuery.Keyword">
+            <summary>
+            关键词，匹配标题或摘要。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Blog.BlogArticleDto">
+            <summary>
+            博客文章信息。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogArticleDto.Id">
+            <summary>
+            文章 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogArticleDto.SiteId">
+            <summary>
+            站点 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogArticleDto.Title">
+            <summary>
+            文章标题。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogArticleDto.Summary">
+            <summary>
+            文章摘要。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogArticleDto.Content">
+            <summary>
+            文章正文。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogArticleDto.CoverUrl">
+            <summary>
+            封面图地址。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogArticleDto.ThumbnailUrl">
+            <summary>
+            缩略图地址。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogArticleDto.Status">
+            <summary>
+            文章状态：0=草稿，1=已发布，2=隐藏。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Blog.SaveBlogArticleRequest">
+            <summary>
+            保存博客文章请求。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.SaveBlogArticleRequest.Title">
+            <summary>
+            文章标题。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.SaveBlogArticleRequest.Summary">
+            <summary>
+            文章摘要。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.SaveBlogArticleRequest.Content">
+            <summary>
+            文章正文。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.SaveBlogArticleRequest.CoverUrl">
+            <summary>
+            封面图地址。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.SaveBlogArticleRequest.Tags">
+            <summary>
+            标签，多个标签用逗号分隔。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.SaveBlogArticleRequest.Status">
+            <summary>
+            文章状态：0=草稿，1=已发布，2=隐藏。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Blog.BlogCaptchaDto">
+            <summary>
+            博客评论验证码。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogCaptchaDto.CaptchaId">
+            <summary>
+            验证码 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogCaptchaDto.ImageBase64">
+            <summary>
+            Base64 编码的验证码图片。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogCaptchaDto.MimeType">
+            <summary>
+            图片 MIME 类型。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogCaptchaDto.ExpiresInSeconds">
+            <summary>
+            有效期，单位秒。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Blog.BlogCommentQuery">
+            <summary>
+            博客评论后台分页查询参数。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogCommentQuery.ArticleId">
+            <summary>
+            文章 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogCommentQuery.ParentId">
+            <summary>
+            父评论 ID，空表示一级评论。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogCommentQuery.Status">
+            <summary>
+            评论状态：0=待审核，1=已通过，2=已拒绝，3=垃圾评论。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogCommentQuery.Keyword">
+            <summary>
+            关键词，匹配评论内容或评论者信息。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Blog.PublicBlogCommentQuery">
+            <summary>
+            博客评论公开分页查询参数。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.PublicBlogCommentQuery.ArticleId">
+            <summary>
+            文章 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.PublicBlogCommentQuery.ParentId">
+            <summary>
+            父评论 ID，空表示一级评论。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Blog.BlogCommentDto">
+            <summary>
+            博客评论后台信息。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogCommentDto.Id">
+            <summary>
+            评论 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogCommentDto.ArticleId">
+            <summary>
+            文章 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogCommentDto.ParentId">
+            <summary>
+            父评论 ID，空表示一级评论。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogCommentDto.AuthorName">
+            <summary>
+            评论者昵称。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogCommentDto.AuthorEmail">
+            <summary>
+            评论者邮箱。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogCommentDto.AuthorWebsite">
+            <summary>
+            评论者网站。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogCommentDto.Content">
+            <summary>
+            评论内容。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogCommentDto.Status">
+            <summary>
+            评论状态：0=待审核，1=已通过，2=已拒绝，3=垃圾评论。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogCommentDto.CreatedAt">
+            <summary>
+            创建时间。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogCommentDto.ReviewedAt">
+            <summary>
+            审核时间。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogCommentDto.ReviewedBy">
+            <summary>
+            审核人用户 ID。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Blog.PublicBlogCommentDto">
+            <summary>
+            博客评论公开信息。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.PublicBlogCommentDto.Id">
+            <summary>
+            评论 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.PublicBlogCommentDto.ArticleId">
+            <summary>
+            文章 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.PublicBlogCommentDto.ParentId">
+            <summary>
+            父评论 ID，空表示一级评论。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.PublicBlogCommentDto.AuthorName">
+            <summary>
+            评论者昵称。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.PublicBlogCommentDto.AuthorWebsite">
+            <summary>
+            评论者网站。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.PublicBlogCommentDto.Content">
+            <summary>
+            评论内容。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.PublicBlogCommentDto.CreatedAt">
+            <summary>
+            创建时间。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Blog.CreateBlogCommentRequest">
+            <summary>
+            公开提交博客评论请求。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.CreateBlogCommentRequest.ArticleId">
+            <summary>
+            文章 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.CreateBlogCommentRequest.ParentId">
+            <summary>
+            父评论 ID，空表示一级评论。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.CreateBlogCommentRequest.AuthorName">
+            <summary>
+            评论者昵称。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.CreateBlogCommentRequest.AuthorEmail">
+            <summary>
+            评论者邮箱。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.CreateBlogCommentRequest.AuthorWebsite">
+            <summary>
+            评论者网站。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.CreateBlogCommentRequest.Content">
+            <summary>
+            评论内容。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.CreateBlogCommentRequest.CaptchaId">
+            <summary>
+            验证码 ID，由获取评论验证码接口返回。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.CreateBlogCommentRequest.CaptchaAnswer">
+            <summary>
+            验证码答案。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Blog.ReviewBlogCommentRequest">
+            <summary>
+            审核博客评论请求。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.ReviewBlogCommentRequest.Status">
+            <summary>
+            审核状态：1=已通过，2=已拒绝，3=垃圾评论。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Blog.CreateBlogCommentResult">
+            <summary>
+            公开提交博客评论结果。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.CreateBlogCommentResult.Id">
+            <summary>
+            评论 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.CreateBlogCommentResult.Status">
+            <summary>
+            评论状态，默认 0=待审核。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Blog.BlogDashboardStatsDto">
+            <summary>
+            博客仪表盘统计。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogDashboardStatsDto.Articles">
+            <summary>
+            文章统计。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogDashboardStatsDto.Comments">
+            <summary>
+            评论统计。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogDashboardStatsDto.Media">
+            <summary>
+            媒体统计。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogDashboardStatsDto.RecentPendingComments">
+            <summary>
+            最近待审核评论列表。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Blog.BlogArticleStatsDto">
+            <summary>
+            博客文章统计。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogArticleStatsDto.Total">
+            <summary>
+            文章总数。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogArticleStatsDto.Draft">
+            <summary>
+            草稿数量。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogArticleStatsDto.Published">
+            <summary>
+            已发布数量。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogArticleStatsDto.Hidden">
+            <summary>
+            隐藏数量。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogArticleStatsDto.ViewCount">
+            <summary>
+            浏览量总数。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Blog.BlogCommentStatsDto">
+            <summary>
+            博客评论统计。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogCommentStatsDto.Total">
+            <summary>
+            评论总数。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogCommentStatsDto.Pending">
+            <summary>
+            待审核数量。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogCommentStatsDto.Approved">
+            <summary>
+            已通过数量。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogCommentStatsDto.Rejected">
+            <summary>
+            已拒绝数量。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogCommentStatsDto.Spam">
+            <summary>
+            垃圾评论数量。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogCommentStatsDto.Today">
+            <summary>
+            今日新增评论数量。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Blog.BlogMediaStatsDto">
+            <summary>
+            博客媒体统计。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogMediaStatsDto.Total">
+            <summary>
+            媒体总数。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogMediaStatsDto.TotalBytes">
+            <summary>
+            文件总大小，单位字节。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Blog.BlogMediaQuery">
+            <summary>
+            博客媒体分页查询参数。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogMediaQuery.MimeType">
+            <summary>
+            媒体 MIME 类型。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Blog.BlogMediaDto">
+            <summary>
+            博客媒体信息。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogMediaDto.Id">
+            <summary>
+            媒体 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogMediaDto.SiteId">
+            <summary>
+            站点 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogMediaDto.FileName">
+            <summary>
+            文件名。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogMediaDto.Url">
+            <summary>
+            文件访问地址。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogMediaDto.MimeType">
+            <summary>
+            MIME 类型。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogMediaDto.FileSize">
+            <summary>
+            文件大小，单位字节。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogMediaDto.Width">
+            <summary>
+            图片宽度，单位像素。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogMediaDto.Height">
+            <summary>
+            图片高度，单位像素。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogMediaDto.StorageProvider">
+            <summary>
+            存储提供方。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogMediaDto.CreatedAt">
+            <summary>
+            创建时间。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Blog.UploadMediaResponse">
+            <summary>
+            上传媒体结果。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.UploadMediaResponse.Id">
+            <summary>
+            媒体 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.UploadMediaResponse.Url">
+            <summary>
+            文件访问地址。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.UploadMediaResponse.FileName">
+            <summary>
+            文件名。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.UploadMediaResponse.MimeType">
+            <summary>
+            MIME 类型。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.UploadMediaResponse.FileSize">
+            <summary>
+            文件大小，单位字节。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.UploadMediaResponse.Width">
+            <summary>
+            图片宽度，单位像素。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.UploadMediaResponse.Height">
+            <summary>
+            图片高度，单位像素。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Blog.UploadMediaRequest">
+            <summary>
+            上传媒体请求。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.UploadMediaRequest.File">
+            <summary>
+            媒体文件。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Common.PageQuery">
+            <summary>
+            分页查询参数。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Common.PageQuery.PageIndex">
+            <summary>
+            当前页码，从 1 开始。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Common.PageQuery.PageSize">
+            <summary>
+            每页数据条数。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Logs.LoginLogQuery">
+            <summary>
+            登录日志分页查询参数。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Logs.LoginLogQuery.UserName">
+            <summary>
+            登录用户名。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Logs.LoginLogQuery.LoginStatus">
+            <summary>
+            登录状态：1=成功，0=失败。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Logs.LoginLogQuery.Ip">
+            <summary>
+            登录 IP。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Logs.OperationLogQuery">
+            <summary>
+            操作日志分页查询参数。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Logs.OperationLogQuery.ModuleName">
+            <summary>
+            模块名称。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Logs.OperationLogQuery.ActionName">
+            <summary>
+            操作名称。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Logs.OperationLogQuery.RequestMethod">
+            <summary>
+            请求方法。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Logs.OperationLogQuery.UserId">
+            <summary>
+            操作用户 ID。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Logs.LoginLogDto">
+            <summary>
+            登录日志。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Logs.LoginLogDto.Id">
+            <summary>
+            日志 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Logs.LoginLogDto.UserId">
+            <summary>
+            用户 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Logs.LoginLogDto.UserName">
+            <summary>
+            登录用户名。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Logs.LoginLogDto.Ip">
+            <summary>
+            登录 IP。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Logs.LoginLogDto.UserAgent">
+            <summary>
+            User-Agent。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Logs.LoginLogDto.LoginStatus">
+            <summary>
+            登录状态：1=成功，0=失败。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Logs.LoginLogDto.ErrorMessage">
+            <summary>
+            错误信息。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Logs.LoginLogDto.CreatedAt">
+            <summary>
+            创建时间。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Logs.OperationLogDto">
+            <summary>
+            操作日志。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Logs.OperationLogDto.Id">
+            <summary>
+            日志 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Logs.OperationLogDto.UserId">
+            <summary>
+            用户 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Logs.OperationLogDto.ModuleName">
+            <summary>
+            模块名称。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Logs.OperationLogDto.ActionName">
+            <summary>
+            操作名称。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Logs.OperationLogDto.RequestMethod">
+            <summary>
+            请求方法。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Logs.OperationLogDto.RequestUrl">
+            <summary>
+            请求地址。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Logs.OperationLogDto.RequestData">
+            <summary>
+            请求数据。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Logs.OperationLogDto.ResponseData">
+            <summary>
+            响应数据。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Logs.OperationLogDto.Ip">
+            <summary>
+            操作 IP。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Logs.OperationLogDto.ExecutionMs">
+            <summary>
+            执行耗时，单位毫秒。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Logs.OperationLogDto.CreatedAt">
+            <summary>
+            创建时间。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Logs.DeleteLogsRequest">
+            <summary>
+            批量删除日志请求。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Logs.DeleteLogsRequest.Ids">
+            <summary>
+            日志 ID 列表。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Menus.MenuTreeNodeDto">
+            <summary>
+            菜单树节点。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuTreeNodeDto.Id">
+            <summary>
+            菜单 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuTreeNodeDto.SiteId">
+            <summary>
+            所属站点 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuTreeNodeDto.ParentId">
+            <summary>
+            父级菜单 ID，0 表示根节点。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuTreeNodeDto.MenuName">
+            <summary>
+            菜单名称。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuTreeNodeDto.MenuCode">
+            <summary>
+            菜单编码。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuTreeNodeDto.PermissionCode">
+            <summary>
+            权限码。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuTreeNodeDto.MenuType">
+            <summary>
+            菜单类型：1=目录，2=菜单，3=按钮，4=接口权限。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuTreeNodeDto.RoutePath">
+            <summary>
+            前端路由路径。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuTreeNodeDto.Component">
+            <summary>
+            前端组件路径。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuTreeNodeDto.Icon">
+            <summary>
+            图标。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuTreeNodeDto.Sort">
+            <summary>
+            排序值。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuTreeNodeDto.Visible">
+            <summary>
+            是否显示。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuTreeNodeDto.Status">
+            <summary>
+            状态：1=启用，0=禁用。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuTreeNodeDto.KeepAlive">
+            <summary>
+            是否缓存页面。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuTreeNodeDto.IsExternal">
+            <summary>
+            是否外链。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuTreeNodeDto.Remark">
+            <summary>
+            备注。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuTreeNodeDto.Children">
+            <summary>
+            子菜单列表。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Menus.SaveMenuRequest">
+            <summary>
+            保存菜单请求。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.SaveMenuRequest.SiteId">
+            <summary>
+            所属站点 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.SaveMenuRequest.ParentId">
+            <summary>
+            父级菜单 ID，0 表示根节点。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.SaveMenuRequest.MenuName">
+            <summary>
+            菜单名称。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.SaveMenuRequest.MenuCode">
+            <summary>
+            菜单编码。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.SaveMenuRequest.MenuType">
+            <summary>
+            菜单类型：1=目录，2=菜单，3=按钮，4=接口权限。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.SaveMenuRequest.RoutePath">
+            <summary>
+            前端路由路径。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.SaveMenuRequest.Component">
+            <summary>
+            前端组件路径。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.SaveMenuRequest.PermissionCode">
+            <summary>
+            权限码。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.SaveMenuRequest.Icon">
+            <summary>
+            图标。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.SaveMenuRequest.Sort">
+            <summary>
+            排序值。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.SaveMenuRequest.Visible">
+            <summary>
+            是否显示。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.SaveMenuRequest.Status">
+            <summary>
+            状态：1=启用，0=禁用。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.SaveMenuRequest.KeepAlive">
+            <summary>
+            是否缓存页面。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.SaveMenuRequest.IsExternal">
+            <summary>
+            是否外链。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.SaveMenuRequest.Remark">
+            <summary>
+            备注。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Menus.MenuQuery">
+            <summary>
+            菜单分页查询参数。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuQuery.SiteId">
+            <summary>
+            站点 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuQuery.ParentId">
+            <summary>
+            父级菜单 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuQuery.Keyword">
+            <summary>
+            关键词，匹配菜单名称、编码或权限码。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuQuery.MenuType">
+            <summary>
+            菜单类型：1=目录，2=菜单，3=按钮，4=接口权限。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuQuery.Status">
+            <summary>
+            状态：1=启用，0=禁用。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Menus.MenuListItemDto">
+            <summary>
+            菜单列表项。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuListItemDto.Id">
+            <summary>
+            菜单 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuListItemDto.SiteId">
+            <summary>
+            所属站点 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuListItemDto.ParentId">
+            <summary>
+            父级菜单 ID，0 表示根节点。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuListItemDto.MenuName">
+            <summary>
+            菜单名称。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuListItemDto.MenuCode">
+            <summary>
+            菜单编码。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuListItemDto.PermissionCode">
+            <summary>
+            权限码。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuListItemDto.MenuType">
+            <summary>
+            菜单类型：1=目录，2=菜单，3=按钮，4=接口权限。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuListItemDto.RoutePath">
+            <summary>
+            前端路由路径。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuListItemDto.Component">
+            <summary>
+            前端组件路径。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuListItemDto.Icon">
+            <summary>
+            图标。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuListItemDto.Sort">
+            <summary>
+            排序值。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuListItemDto.Visible">
+            <summary>
+            是否显示。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuListItemDto.Status">
+            <summary>
+            状态：1=启用，0=禁用。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuListItemDto.KeepAlive">
+            <summary>
+            是否缓存页面。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuListItemDto.IsExternal">
+            <summary>
+            是否外链。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.MenuListItemDto.Remark">
+            <summary>
+            备注。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Menus.UpdateMenuStatusRequest">
+            <summary>
+            修改菜单状态请求。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Menus.UpdateMenuStatusRequest.Status">
+            <summary>
+            状态：1=启用，0=禁用。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Roles.RoleDto">
+            <summary>
+            角色信息。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Roles.RoleDto.Id">
+            <summary>
+            角色 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Roles.RoleDto.RoleName">
+            <summary>
+            角色名称。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Roles.RoleDto.RoleCode">
+            <summary>
+            角色编码。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Roles.RoleDto.Status">
+            <summary>
+            状态：1=启用，0=禁用。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Roles.RoleDto.Remark">
+            <summary>
+            备注。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Roles.RoleDto.MenuIds">
+            <summary>
+            已分配菜单 ID 列表。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Roles.RoleQuery">
+            <summary>
+            角色分页查询参数。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Roles.RoleQuery.Keyword">
+            <summary>
+            关键词，匹配角色名称或编码。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Roles.RoleQuery.Status">
+            <summary>
+            状态：1=启用，0=禁用。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Roles.SaveRoleRequest">
+            <summary>
+            保存角色请求。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Roles.SaveRoleRequest.RoleName">
+            <summary>
+            角色名称。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Roles.SaveRoleRequest.RoleCode">
+            <summary>
+            角色编码。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Roles.SaveRoleRequest.Status">
+            <summary>
+            状态：1=启用，0=禁用。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Roles.SaveRoleRequest.Remark">
+            <summary>
+            备注。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Roles.AssignRoleMenusRequest">
+            <summary>
+            分配角色菜单请求。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Roles.AssignRoleMenusRequest.MenuIds">
+            <summary>
+            菜单 ID 列表。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Roles.UpdateRoleStatusRequest">
+            <summary>
+            修改角色状态请求。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Roles.UpdateRoleStatusRequest.Status">
+            <summary>
+            状态：1=启用，0=禁用。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Sites.SiteDto">
+            <summary>
+            站点信息。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Sites.SiteDto.Id">
+            <summary>
+            站点 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Sites.SiteDto.SiteName">
+            <summary>
+            站点名称。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Sites.SiteDto.SiteCode">
+            <summary>
+            站点编码。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Sites.SiteDto.Domain">
+            <summary>
+            站点域名。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Sites.SiteDto.Status">
+            <summary>
+            状态：1=启用，0=禁用。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Sites.SiteDto.Description">
+            <summary>
+            站点描述。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Sites.SiteDto.Sort">
+            <summary>
+            排序值。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Sites.SiteQuery">
+            <summary>
+            站点分页查询参数。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Sites.SiteQuery.Keyword">
+            <summary>
+            关键词，匹配站点名称或编码。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Sites.SiteQuery.Status">
+            <summary>
+            状态：1=启用，0=禁用。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Sites.SaveSiteRequest">
+            <summary>
+            保存站点请求。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Sites.SaveSiteRequest.SiteName">
+            <summary>
+            站点名称。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Sites.SaveSiteRequest.SiteCode">
+            <summary>
+            站点编码。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Sites.SaveSiteRequest.Domain">
+            <summary>
+            站点域名。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Sites.SaveSiteRequest.Status">
+            <summary>
+            状态：1=启用，0=禁用。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Sites.SaveSiteRequest.Description">
+            <summary>
+            站点描述。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Sites.SaveSiteRequest.Sort">
+            <summary>
+            排序值。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Sites.UpdateSiteStatusRequest">
+            <summary>
+            修改站点状态请求。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Sites.UpdateSiteStatusRequest.Status">
+            <summary>
+            状态：1=启用，0=禁用。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Users.UserPermissionTreeNodeDto">
+            <summary>
+            用户授权菜单树节点。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPermissionTreeNodeDto.Id">
+            <summary>
+            菜单 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPermissionTreeNodeDto.SiteId">
+            <summary>
+            所属站点 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPermissionTreeNodeDto.ParentId">
+            <summary>
+            父级菜单 ID，0 表示根节点。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPermissionTreeNodeDto.MenuName">
+            <summary>
+            菜单名称。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPermissionTreeNodeDto.MenuCode">
+            <summary>
+            菜单编码。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPermissionTreeNodeDto.PermissionCode">
+            <summary>
+            权限码。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPermissionTreeNodeDto.MenuType">
+            <summary>
+            菜单类型：1=目录，2=菜单，3=按钮，4=接口权限。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPermissionTreeNodeDto.RoutePath">
+            <summary>
+            前端路由路径。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPermissionTreeNodeDto.Component">
+            <summary>
+            前端组件路径。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPermissionTreeNodeDto.Icon">
+            <summary>
+            图标。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPermissionTreeNodeDto.Sort">
+            <summary>
+            排序值。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPermissionTreeNodeDto.Visible">
+            <summary>
+            是否显示。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPermissionTreeNodeDto.Status">
+            <summary>
+            状态：1=启用，0=禁用。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPermissionTreeNodeDto.KeepAlive">
+            <summary>
+            是否缓存页面。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPermissionTreeNodeDto.IsExternal">
+            <summary>
+            是否外链。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPermissionTreeNodeDto.Remark">
+            <summary>
+            备注。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPermissionTreeNodeDto.Checked">
+            <summary>
+            当前用户是否已拥有该节点。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPermissionTreeNodeDto.Disabled">
+            <summary>
+            是否禁用勾选。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPermissionTreeNodeDto.Children">
+            <summary>
+            子菜单列表。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Users.UserPermissionTreeDto">
+            <summary>
+            用户授权菜单树。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPermissionTreeDto.UserId">
+            <summary>
+            用户 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPermissionTreeDto.RoleIds">
+            <summary>
+            用户当前角色 ID 列表。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPermissionTreeDto.GrantedMenuIds">
+            <summary>
+            用户当前已拥有菜单 ID 列表。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPermissionTreeDto.Tree">
+            <summary>
+            授权菜单树。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Users.AssignUserMenusRequest">
+            <summary>
+            分配用户菜单权限请求。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.AssignUserMenusRequest.MenuIds">
+            <summary>
+            菜单 ID 列表。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Users.UserListItemDto">
+            <summary>
+            用户列表项。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserListItemDto.Id">
+            <summary>
+            用户 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserListItemDto.UserName">
+            <summary>
+            登录用户名。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserListItemDto.NickName">
+            <summary>
+            用户昵称。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserListItemDto.Email">
+            <summary>
+            邮箱。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserListItemDto.Phone">
+            <summary>
+            手机号。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserListItemDto.AvatarUrl">
+            <summary>
+            头像地址。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserListItemDto.Signature">
+            <summary>
+            个性签名。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserListItemDto.PointBalance">
+            <summary>
+            当前积分余额。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserListItemDto.Status">
+            <summary>
+            状态：1=启用，0=禁用。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserListItemDto.IsSuperAdmin">
+            <summary>
+            是否超级管理员。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserListItemDto.RoleIds">
+            <summary>
+            角色 ID 列表。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserListItemDto.SiteIds">
+            <summary>
+            站点 ID 列表。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Users.SaveUserRequest">
+            <summary>
+            新增用户请求。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.SaveUserRequest.UserName">
+            <summary>
+            登录用户名。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.SaveUserRequest.NickName">
+            <summary>
+            用户昵称。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.SaveUserRequest.Password">
+            <summary>
+            明文密码。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.SaveUserRequest.Email">
+            <summary>
+            邮箱。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.SaveUserRequest.Phone">
+            <summary>
+            手机号。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.SaveUserRequest.Status">
+            <summary>
+            状态：1=启用，0=禁用。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.SaveUserRequest.AvatarUrl">
+            <summary>
+            头像地址。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.SaveUserRequest.Remark">
+            <summary>
+            备注。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.SaveUserRequest.IsSuperAdmin">
+            <summary>
+            是否超级管理员。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.SaveUserRequest.RoleIds">
+            <summary>
+            角色 ID 列表。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.SaveUserRequest.SiteIds">
+            <summary>
+            站点 ID 列表。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Users.UpdateUserInfoRequest">
+            <summary>
+            编辑用户基础信息请求。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UpdateUserInfoRequest.NickName">
+            <summary>
+            用户昵称。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UpdateUserInfoRequest.Email">
+            <summary>
+            邮箱。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UpdateUserInfoRequest.Phone">
+            <summary>
+            手机号。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UpdateUserInfoRequest.Status">
+            <summary>
+            状态：1=启用，0=禁用。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UpdateUserInfoRequest.Remark">
+            <summary>
+            备注。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UpdateUserInfoRequest.IsSuperAdmin">
+            <summary>
+            是否超级管理员。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UpdateUserInfoRequest.RoleIds">
+            <summary>
+            角色 ID 列表。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UpdateUserInfoRequest.SiteIds">
+            <summary>
+            站点 ID 列表。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Users.UpdateUserNickNameRequest">
+            <summary>
+            修改用户昵称请求。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UpdateUserNickNameRequest.NickName">
+            <summary>
+            用户昵称。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Users.UpdateUserPasswordRequest">
+            <summary>
+            修改用户密码请求。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UpdateUserPasswordRequest.Password">
+            <summary>
+            新密码。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Users.UploadUserAvatarRequest">
+            <summary>
+            上传用户头像请求。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UploadUserAvatarRequest.File">
+            <summary>
+            头像文件。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Users.UpdateUserSignatureRequest">
+            <summary>
+            修改用户个性签名请求。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UpdateUserSignatureRequest.Signature">
+            <summary>
+            个性签名。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Users.UpdateUserStatusRequest">
+            <summary>
+            修改用户状态请求。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UpdateUserStatusRequest.Status">
+            <summary>
+            状态：1=启用，0=禁用。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Users.UserPointDetailDto">
+            <summary>
+            用户积分明细。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPointDetailDto.Id">
+            <summary>
+            明细 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPointDetailDto.UserId">
+            <summary>
+            用户 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPointDetailDto.ChangePoints">
+            <summary>
+            积分变动值，正数增加，负数扣减。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPointDetailDto.BalanceAfter">
+            <summary>
+            变动后积分余额。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPointDetailDto.ChangeType">
+            <summary>
+            变动类型。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPointDetailDto.Source">
+            <summary>
+            来源。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPointDetailDto.Remark">
+            <summary>
+            备注。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Users.UserPointDetailDto.CreatedAt">
+            <summary>
+            创建时间。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Common.ApiResponse">
+            <summary>
+            通用接口响应。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Common.ApiResponse.Code">
+            <summary>
+            业务状态码，0 表示成功。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Common.ApiResponse.Message">
+            <summary>
+            响应消息。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Common.ApiResponse`1">
+            <summary>
+            带数据的通用接口响应。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Common.ApiResponse`1.Data">
+            <summary>
+            响应数据。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Common.PagedResult`1">
+            <summary>
+            分页结果。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Common.PagedResult`1.Total">
+            <summary>
+            总记录数。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Common.PagedResult`1.PageIndex">
+            <summary>
+            当前页码。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Common.PagedResult`1.PageSize">
+            <summary>
+            每页数据条数。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Common.PagedResult`1.Items">
+            <summary>
+            当前页数据列表。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.AiImagesController.GetPage(jokester.admin.Application.DTOs.AiImages.AiImageQuery,System.Threading.CancellationToken)">
+            <summary>
+            分页查询 GPT Image2 图片任务
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.AiImagesController.GetModels(System.Threading.CancellationToken)">
+            <summary>
+            获取启用的 AI 图片模型列表
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.AiImagesController.GetParameters(System.Threading.CancellationToken)">
+            <summary>
+            获取 GPT Image2 图片参数选项
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.AiImagesController.GetPricingOptions(System.Threading.CancellationToken)">
+            <summary>
+            获取 AI 图片积分定价列表
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.AiImagesController.ResolveParameters(jokester.admin.Application.DTOs.AiImages.ResolveAiImageParametersRequest,System.Threading.CancellationToken)">
+            <summary>
+            解析 GPT Image2 图片参数为实际宽高
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.AiImagesController.GetById(System.Int64,System.Threading.CancellationToken)">
+            <summary>
+            获取 GPT Image2 图片任务详情
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.AiImagesController.Generate(jokester.admin.Application.DTOs.AiImages.GenerateAiImageRequest,System.Threading.CancellationToken)">
+            <summary>
+            直接生成 GPT Image2 图片
+            </summary>
+            <remarks>
+            调用配置的 GPT Image2 图片模型并返回 Base64 图片数据。
+            </remarks>
+        </member>
+        <member name="M:jokester.admin.Controllers.AiImagesController.GenerateNanoBananaImage(jokester.admin.Application.DTOs.NanoBananaImages.GenerateNanoBananaImageRequest,System.Threading.CancellationToken)">
+            <summary>
+            直接生成 Nano Banana2 图片
+            </summary>
+            <remarks>
+            不传 imageUrls 时执行文生图；传 imageUrls 时执行图生图。
+            </remarks>
+        </member>
+        <member name="M:jokester.admin.Controllers.AiImagesController.CreateNanoBananaImage(jokester.admin.Application.DTOs.NanoBananaImages.CreateNanoBananaImageTaskRequest,System.Threading.CancellationToken)">
+            <summary>
+            创建 Nano Banana2 图片生成任务
+            </summary>
+            <remarks>
+            不传 imageUrls 时执行文生图；传 imageUrls 时执行图生图。返回任务 id，前端可轮询 GET /api/ai/images/{id}。
+            </remarks>
+        </member>
+        <member name="M:jokester.admin.Controllers.AiImagesController.Upload(jokester.admin.Application.DTOs.AiImages.UploadAiImageRequest,System.Threading.CancellationToken)">
+            <summary>
+            上传 AI 图片引用文件
+            </summary>
+            <remarks>
+            使用 multipart/form-data 上传图片，登录用户即可调用，返回服务器访问路径。
+            </remarks>
+        </member>
+        <member name="M:jokester.admin.Controllers.AiImagesController.Create(jokester.admin.Application.DTOs.AiImages.CreateAiImageTaskRequest,System.Threading.CancellationToken)">
+            <summary>
+            创建 GPT Image2 图片生成任务
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.AiImagesController.SetFavorite(System.Int64,jokester.admin.Application.DTOs.AiImages.FavoriteAiImageRequest,System.Threading.CancellationToken)">
+            <summary>
+            收藏或取消收藏 GPT Image2 结果图片
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.AiImagesController.Delete(System.Int64,System.Threading.CancellationToken)">
+            <summary>
+            删除 GPT Image2 图片任务
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.AuthController.SendRegisterEmailCode(jokester.admin.Application.DTOs.Auth.SendRegisterEmailCodeRequest,System.Threading.CancellationToken)">
+            <summary>
+            发送注册邮箱验证码。
+            </summary>
+            <remarks>
+            请求体只需要传 email；验证码用于邮箱注册。
+            </remarks>
+        </member>
+        <member name="M:jokester.admin.Controllers.AuthController.Register(jokester.admin.Application.DTOs.Auth.RegisterRequest,System.Threading.CancellationToken)">
+            <summary>
+            邮箱验证码注册。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.AuthController.Login(jokester.admin.Application.DTOs.Auth.LoginRequest,System.Threading.CancellationToken)">
+            <summary>
+            用户登录。
+            </summary>
+            <remarks>
+            登录成功返回 AccessToken、RefreshToken、用户信息、可访问站点和权限码。
+            </remarks>
+        </member>
+        <member name="M:jokester.admin.Controllers.AuthController.Refresh(jokester.admin.Application.DTOs.Auth.RefreshTokenRequest,System.Threading.CancellationToken)">
+            <summary>
+            刷新访问令牌。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.AuthController.Logout(System.Threading.CancellationToken)">
+            <summary>
+            用户登出。
+            </summary>
+            <remarks>
+            RefreshToken 可通过 X-Refresh-Token 请求头或 refreshToken 查询参数传入。
+            </remarks>
+        </member>
+        <member name="M:jokester.admin.Controllers.AuthController.Profile(System.Threading.CancellationToken)">
+            <summary>
+            获取当前登录用户信息。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.BlogArticlesController.GetPage(jokester.admin.Application.DTOs.Blog.BlogArticleQuery,System.Threading.CancellationToken)">
+            <summary>
+            分页查询博客文章。
+            </summary>
+            <remarks>
+            公开接口；博客文章固定归属 siteCode=blog，可按状态和关键词筛选。
+            </remarks>
+        </member>
+        <member name="M:jokester.admin.Controllers.BlogArticlesController.GetById(System.Int64,System.Threading.CancellationToken)">
+            <summary>
+            获取博客文章详情。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.BlogArticlesController.Create(jokester.admin.Application.DTOs.Blog.SaveBlogArticleRequest,System.Threading.CancellationToken)">
+            <summary>
+            新增博客文章。
+            </summary>
+            <remarks>
+            博客文章固定归属 siteCode=blog；可通过 status 设置草稿、发布或隐藏状态。
+            </remarks>
+        </member>
+        <member name="M:jokester.admin.Controllers.BlogArticlesController.Update(System.Int64,jokester.admin.Application.DTOs.Blog.SaveBlogArticleRequest,System.Threading.CancellationToken)">
+            <summary>
+            编辑博客文章。
+            </summary>
+            <remarks>
+            可修改标题、摘要、正文、封面、标签和文章状态。
+            </remarks>
+        </member>
+        <member name="M:jokester.admin.Controllers.BlogArticlesController.Delete(System.Int64,System.Threading.CancellationToken)">
+            <summary>
+            删除博客文章。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.BlogArticlesController.Publish(System.Int64,System.Threading.CancellationToken)">
+            <summary>
+            发布博客文章。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.BlogCommentsController.Captcha(System.Threading.CancellationToken)">
+            <summary>
+            获取博客评论验证码。
+            </summary>
+            <remarks>
+            返回 captchaId 和验证码图片 Base64；提交评论时传回 captchaId 与图片中的答案。验证码校验后会一次性失效。
+            </remarks>
+        </member>
+        <member name="M:jokester.admin.Controllers.BlogCommentsController.CreatePublic(jokester.admin.Application.DTOs.Blog.CreateBlogCommentRequest,System.Threading.CancellationToken)">
+            <summary>
+            公开提交评论。
+            </summary>
+            <remarks>
+            评论固定写入 blog 站点；新评论默认 status=0 待审核，不会立即出现在公开评论列表。
+            </remarks>
+        </member>
+        <member name="M:jokester.admin.Controllers.BlogCommentsController.GetPublicPage(jokester.admin.Application.DTOs.Blog.PublicBlogCommentQuery,System.Threading.CancellationToken)">
+            <summary>
+            公开查询已审核评论。
+            </summary>
+            <remarks>
+            仅返回 status=1 已通过评论；可用 articleId 和 parentId 分页查询评论树。
+            </remarks>
+        </member>
+        <member name="M:jokester.admin.Controllers.BlogCommentsController.GetPage(jokester.admin.Application.DTOs.Blog.BlogCommentQuery,System.Threading.CancellationToken)">
+            <summary>
+            后台分页查询评论。
+            </summary>
+            <remarks>
+            状态：0=待审核，1=已通过，2=已拒绝，3=垃圾评论。
+            </remarks>
+        </member>
+        <member name="M:jokester.admin.Controllers.BlogCommentsController.Review(System.Int64,jokester.admin.Application.DTOs.Blog.ReviewBlogCommentRequest,System.Threading.CancellationToken)">
+            <summary>
+            审核评论。
+            </summary>
+            <remarks>
+            status 只能提交 1=已通过、2=已拒绝、3=垃圾评论。
+            </remarks>
+        </member>
+        <member name="M:jokester.admin.Controllers.BlogCommentsController.Delete(System.Int64,System.Threading.CancellationToken)">
+            <summary>
+            删除评论。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.BlogDashboardController.Stats(System.Threading.CancellationToken)">
+            <summary>
+            获取博客仪表盘统计。
+            </summary>
+            <remarks>
+            统计固定读取 blog 站点，包含文章、评论、媒体数量，以及最近 10 条待审核评论。
+            </remarks>
+        </member>
+        <member name="M:jokester.admin.Controllers.BlogMediaController.Upload(jokester.admin.Application.DTOs.Blog.UploadMediaRequest,System.Threading.CancellationToken)">
+            <summary>
+            上传博客媒体文件。
+            </summary>
+            <remarks>
+            使用 multipart/form-data 上传文件；媒体固定归属 siteCode=blog。
+            </remarks>
+        </member>
+        <member name="M:jokester.admin.Controllers.BlogMediaController.GetPage(jokester.admin.Application.DTOs.Blog.BlogMediaQuery,System.Threading.CancellationToken)">
+            <summary>
+            分页查询博客媒体。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.BlogMediaController.Delete(System.Int64,System.Threading.CancellationToken)">
+            <summary>
+            删除博客媒体。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.LogsController.GetLoginLogs(jokester.admin.Application.DTOs.Logs.LoginLogQuery,System.Threading.CancellationToken)">
+            <summary>
+            分页查询登录日志。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.LogsController.GetOperationLogs(jokester.admin.Application.DTOs.Logs.OperationLogQuery,System.Threading.CancellationToken)">
+            <summary>
+            分页查询操作日志。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.LogsController.DeleteLoginLogs(jokester.admin.Application.DTOs.Logs.DeleteLogsRequest,System.Threading.CancellationToken)">
+            <summary>
+            批量删除登录日志。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.LogsController.DeleteOperationLogs(jokester.admin.Application.DTOs.Logs.DeleteLogsRequest,System.Threading.CancellationToken)">
+            <summary>
+            批量删除操作日志。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.MenusController.GetTree(System.Nullable{System.Int64},System.Threading.CancellationToken)">
+            <summary>
+            查询菜单树。
+            </summary>
+            <remarks>
+            可按站点 ID 过滤，返回菜单、按钮和接口权限节点的树形结构。
+            </remarks>
+        </member>
+        <member name="M:jokester.admin.Controllers.MenusController.GetPage(jokester.admin.Application.DTOs.Menus.MenuQuery,System.Threading.CancellationToken)">
+            <summary>
+            分页查询菜单。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.MenusController.Create(jokester.admin.Application.DTOs.Menus.SaveMenuRequest,System.Threading.CancellationToken)">
+            <summary>
+            新增菜单。
+            </summary>
+            <remarks>
+            menuType：1=目录，2=菜单，3=按钮，4=接口权限。
+            </remarks>
+        </member>
+        <member name="M:jokester.admin.Controllers.MenusController.Update(System.Int64,jokester.admin.Application.DTOs.Menus.SaveMenuRequest,System.Threading.CancellationToken)">
+            <summary>
+            编辑菜单。
+            </summary>
+            <remarks>
+            menuType：1=目录，2=菜单，3=按钮，4=接口权限。
+            </remarks>
+        </member>
+        <member name="M:jokester.admin.Controllers.MenusController.Delete(System.Int64,System.Threading.CancellationToken)">
+            <summary>
+            删除菜单。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.MenusController.UpdateStatus(System.Int64,jokester.admin.Application.DTOs.Menus.UpdateMenuStatusRequest,System.Threading.CancellationToken)">
+            <summary>
+            修改菜单状态。
+            </summary>
+            <remarks>
+            状态：1=启用，0=禁用。
+            </remarks>
+        </member>
+        <member name="M:jokester.admin.Controllers.PointsController.GetBalance(System.Threading.CancellationToken)">
+            <summary>
+            查询当前用户积分余额和今日签到状态
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.PointsController.SignIn(System.Threading.CancellationToken)">
+            <summary>
+            每日签到领取积分
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.RolesController.GetPage(jokester.admin.Application.DTOs.Roles.RoleQuery,System.Threading.CancellationToken)">
+            <summary>
+            分页查询角色。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.RolesController.Create(jokester.admin.Application.DTOs.Roles.SaveRoleRequest,System.Threading.CancellationToken)">
+            <summary>
+            新增角色。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.RolesController.Update(System.Int64,jokester.admin.Application.DTOs.Roles.SaveRoleRequest,System.Threading.CancellationToken)">
+            <summary>
+            编辑角色。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.RolesController.AssignMenus(System.Int64,jokester.admin.Application.DTOs.Roles.AssignRoleMenusRequest,System.Threading.CancellationToken)">
+            <summary>
+            分配角色菜单和权限。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.RolesController.UpdateStatus(System.Int64,jokester.admin.Application.DTOs.Roles.UpdateRoleStatusRequest,System.Threading.CancellationToken)">
+            <summary>
+            修改角色状态。
+            </summary>
+            <remarks>
+            状态：1=启用，0=禁用。
+            </remarks>
+        </member>
+        <member name="M:jokester.admin.Controllers.RolesController.Delete(System.Int64,System.Threading.CancellationToken)">
+            <summary>
+            删除角色。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.SitesController.GetAll(System.Threading.CancellationToken)">
+            <summary>
+            获取所有站点编码。
+            </summary>
+            <remarks>
+            公开接口，不需要登录；返回所有未删除站点及启用状态。
+            </remarks>
+        </member>
+        <member name="M:jokester.admin.Controllers.SitesController.GetPage(jokester.admin.Application.DTOs.Sites.SiteQuery,System.Threading.CancellationToken)">
+            <summary>
+            分页查询站点。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.SitesController.Create(jokester.admin.Application.DTOs.Sites.SaveSiteRequest,System.Threading.CancellationToken)">
+            <summary>
+            新增站点。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.SitesController.Update(System.Int64,jokester.admin.Application.DTOs.Sites.SaveSiteRequest,System.Threading.CancellationToken)">
+            <summary>
+            编辑站点。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.SitesController.UpdateStatus(System.Int64,jokester.admin.Application.DTOs.Sites.UpdateSiteStatusRequest,System.Threading.CancellationToken)">
+            <summary>
+            修改站点状态。
+            </summary>
+            <remarks>
+            状态：1=启用，0=禁用。
+            </remarks>
+        </member>
+        <member name="M:jokester.admin.Controllers.SitesController.Delete(System.Int64,System.Threading.CancellationToken)">
+            <summary>
+            删除站点。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.UsersController.GetPage(jokester.admin.Application.DTOs.Common.PageQuery,System.Threading.CancellationToken)">
+            <summary>
+            分页查询用户。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.UsersController.GetPointDetails(System.Int64,jokester.admin.Application.DTOs.Common.PageQuery,System.Threading.CancellationToken)">
+            <summary>
+            分页查询用户积分明细。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.UsersController.GetPermissionTree(System.Int64,System.Nullable{System.Int64},System.Threading.CancellationToken)">
+            <summary>
+            查询用户授权菜单树。
+            </summary>
+            <remarks>
+            可按站点 ID 过滤，返回菜单、按钮和接口权限节点的树形结构，并标记当前用户已拥有的节点。
+            </remarks>
+        </member>
+        <member name="M:jokester.admin.Controllers.UsersController.Create(jokester.admin.Application.DTOs.Users.SaveUserRequest,System.Threading.CancellationToken)">
+            <summary>
+            新增用户。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.UsersController.Update(System.Int64,jokester.admin.Application.DTOs.Users.UpdateUserInfoRequest,System.Threading.CancellationToken)">
+            <summary>
+            编辑用户基础信息。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.UsersController.AssignMenus(System.Int64,jokester.admin.Application.DTOs.Users.AssignUserMenusRequest,System.Threading.CancellationToken)">
+            <summary>
+            分配用户菜单权限。
+            </summary>
+            <remarks>
+            通过用户专属授权角色保存菜单、按钮和接口权限；不会覆盖用户已有业务角色。
+            </remarks>
+        </member>
+        <member name="M:jokester.admin.Controllers.UsersController.UpdateNickName(System.Int64,jokester.admin.Application.DTOs.Users.UpdateUserNickNameRequest,System.Threading.CancellationToken)">
+            <summary>
+            修改用户昵称。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.UsersController.UpdatePassword(System.Int64,jokester.admin.Application.DTOs.Users.UpdateUserPasswordRequest,System.Threading.CancellationToken)">
+            <summary>
+            修改用户密码。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.UsersController.UploadAvatar(System.Int64,jokester.admin.Application.DTOs.Users.UploadUserAvatarRequest,System.Threading.CancellationToken)">
+            <summary>
+            上传用户头像。
+            </summary>
+            <remarks>
+            使用 multipart/form-data 上传头像文件，返回头像访问地址。
+            </remarks>
+        </member>
+        <member name="M:jokester.admin.Controllers.UsersController.UpdateSignature(System.Int64,jokester.admin.Application.DTOs.Users.UpdateUserSignatureRequest,System.Threading.CancellationToken)">
+            <summary>
+            修改用户个性签名。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.UsersController.UpdateStatus(System.Int64,jokester.admin.Application.DTOs.Users.UpdateUserStatusRequest,System.Threading.CancellationToken)">
+            <summary>
+            修改用户状态。
+            </summary>
+            <remarks>
+            状态：1=启用，0=禁用。
+            </remarks>
+        </member>
+        <member name="M:jokester.admin.Controllers.UsersController.Delete(System.Int64,System.Threading.CancellationToken)">
+            <summary>
+            删除用户。
+            </summary>
+        </member>
+        <member name="T:Program">
+            <summary>
+            Auto-generated public partial Program class for top-level statement apps.
+            </summary>
+        </member>
+    </members>
+</doc>
