@@ -12,6 +12,7 @@ public sealed class AiImageTaskProcessor(ISqlSugarClient db, IAiImageService aiI
 {
     private const int MinutesPerImage = 3;
     private const int MaxTaskTimeoutMinutes = 10;
+    private const string GenericGenerationFailureMessage = "图片生成服务暂时不可用，请稍后重试。";
 
     public async Task ProcessAsync(long taskId, CancellationToken cancellationToken)
     {
@@ -154,7 +155,7 @@ public sealed class AiImageTaskProcessor(ISqlSugarClient db, IAiImageService aiI
 
     private async Task MarkFailedAsync(AiImageTaskEntity task, Exception ex, IReadOnlyList<string> results, CancellationToken cancellationToken)
     {
-        var message = ex is AppException ? ex.Message : ex.Message;
+        var message = SanitizeFailureMessage(ex);
         if (message.Length > 1000)
         {
             message = message[..1000];
@@ -211,6 +212,18 @@ public sealed class AiImageTaskProcessor(ISqlSugarClient db, IAiImageService aiI
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Take(int.MaxValue)
             .ToArray();
+    }
+
+    private static string SanitizeFailureMessage(Exception ex)
+    {
+        return ex switch
+        {
+            AppException { Code: ErrorCodes.BadRequest } => GenericGenerationFailureMessage,
+            HttpRequestException => GenericGenerationFailureMessage,
+            TimeoutException => GenericGenerationFailureMessage,
+            TaskCanceledException => GenericGenerationFailureMessage,
+            _ => string.IsNullOrWhiteSpace(ex.Message) ? GenericGenerationFailureMessage : ex.Message
+        };
     }
 
     private async Task<int> ResolveTaskCostAsync(AiImageTaskEntity task, int imageCount, CancellationToken cancellationToken)
