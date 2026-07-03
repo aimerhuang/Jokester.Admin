@@ -459,13 +459,23 @@ public sealed class AiImageService(
         }
 
         var firstImage = data[0];
-        if (!firstImage.TryGetProperty("b64_json", out var b64Json) || string.IsNullOrWhiteSpace(b64Json.GetString()))
+        string base64;
+        string url;
+        if (firstImage.TryGetProperty("b64_json", out var b64Json) && !string.IsNullOrWhiteSpace(b64Json.GetString()))
         {
-            throw new AppException(ErrorCodes.BadRequest, "Image generation response did not contain base64 image data");
+            base64 = b64Json.GetString()!;
+            url = await SaveImageAsync(base64, cancellationToken);
         }
-
-        var base64 = b64Json.GetString()!;
-        var url = await SaveImageAsync(base64, cancellationToken);
+        else if (firstImage.TryGetProperty("url", out var imageUrl) && !string.IsNullOrWhiteSpace(imageUrl.GetString()))
+        {
+            var downloaded = await DownloadImageAsBase64Async(imageUrl.GetString()!, cancellationToken);
+            base64 = downloaded.Base64;
+            url = downloaded.Url;
+        }
+        else
+        {
+            throw new AppException(ErrorCodes.BadRequest, "Image generation response did not contain image data");
+        }
         return new GenerateAiImageResponse
         {
             TaskId = 0,
@@ -836,6 +846,29 @@ public sealed class AiImageService(
             throw new AppException(ErrorCodes.BadRequest, "Image generation returned invalid base64 image data");
         }
 
+        return await SaveImageBytesAsync(bytes, cancellationToken);
+    }
+
+    private async Task<(string Base64, string Url)> DownloadImageAsBase64Async(string imageUrl, CancellationToken cancellationToken)
+    {
+        using var response = await httpClient.GetAsync(imageUrl, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new AppException(ErrorCodes.BadRequest, "Image generation returned an image URL that could not be downloaded");
+        }
+
+        var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
+        if (bytes.Length == 0)
+        {
+            throw new AppException(ErrorCodes.BadRequest, "Image generation returned empty image data");
+        }
+
+        var url = await SaveImageBytesAsync(bytes, cancellationToken);
+        return (Convert.ToBase64String(bytes), url);
+    }
+
+    private async Task<string> SaveImageBytesAsync(byte[] bytes, CancellationToken cancellationToken)
+    {
         var storageKey = $"ai-images/{DateTime.UtcNow:yyyyMM}/{Guid.NewGuid():N}.png";
         var webRootPath = environment.WebRootPath
             ?? Path.Combine(environment.ContentRootPath, "wwwroot");
@@ -977,8 +1010,7 @@ public sealed class AiImageService(
                 prompt,
                 size = parameters.Size,
                 quality = parameters.ProviderQuality,
-                n = 1,
-                response_format = "b64_json"
+                n = 1
             })
         };
 
@@ -993,8 +1025,7 @@ public sealed class AiImageService(
             { new StringContent(prompt), "prompt" },
             { new StringContent(parameters.Size), "size" },
             { new StringContent(parameters.ProviderQuality), "quality" },
-            { new StringContent("1"), "n" },
-            { new StringContent("b64_json"), "response_format" }
+            { new StringContent("1"), "n" }
         };
 
         foreach (var referenceImageUrl in referenceImageUrls)
