@@ -10,7 +10,8 @@ namespace jokester.admin.Application.Services;
 
 public sealed class AiImageTaskProcessor(ISqlSugarClient db, IAiImageService aiImageService, INanoBananaImageService nanoBananaImageService, IPointService pointService) : IAiImageTaskProcessor
 {
-    private static readonly TimeSpan TaskTimeout = TimeSpan.FromMinutes(5);
+    private const int MinutesPerImage = 3;
+    private const int MaxTaskTimeoutMinutes = 10;
 
     public async Task ProcessAsync(long taskId, CancellationToken cancellationToken)
     {
@@ -22,18 +23,18 @@ public sealed class AiImageTaskProcessor(ISqlSugarClient db, IAiImageService aiI
             return;
         }
 
+        var results = DeserializeImageUrls(task.ResultUrls).ToList();
         try
         {
             using var taskTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            taskTimeout.CancelAfter(TaskTimeout);
+            taskTimeout.CancelAfter(ResolveTaskTimeout(task.ImageCount));
             var taskToken = taskTimeout.Token;
 
-            var results = new List<string>(task.ImageCount);
             var modelCode = AiImageModelConfigService.NormalizeModelCode(task.ModelName);
             if (AiImageModelConfigService.IsNanoBananaModel(modelCode))
             {
                 var imageUrls = DeserializeReferenceImageUrls(task.ReferenceImageUrls);
-                for (var i = 0; i < task.ImageCount; i++)
+                for (var i = results.Count; i < task.ImageCount; i++)
                 {
                     var response = await nanoBananaImageService.GenerateFromTaskAsync(
                         task.Prompt,
@@ -44,11 +45,13 @@ public sealed class AiImageTaskProcessor(ISqlSugarClient db, IAiImageService aiI
                         imageUrls,
                         taskToken);
                     results.Add(response.Url);
+                    await PersistPartialResultsAsync(taskId, results, CancellationToken.None);
                 }
             }
             else
             {
-                for (var i = 0; i < task.ImageCount; i++)
+                var referenceImageUrls = DeserializeReferenceImageUrls(task.ReferenceImageUrls);
+                for (var i = results.Count; i < task.ImageCount; i++)
                 {
                     var response = await aiImageService.GenerateFromResolvedAsync(
                         task.Prompt,
@@ -63,10 +66,11 @@ public sealed class AiImageTaskProcessor(ISqlSugarClient db, IAiImageService aiI
                             Size = task.Size,
                             ProviderQuality = task.Quality
                         },
-                        DeserializeReferenceImageUrls(task.ReferenceImageUrls),
+                        referenceImageUrls,
                         task.MaskImageUrl,
                         taskToken);
                     results.Add(response.Url);
+                    await PersistPartialResultsAsync(taskId, results, CancellationToken.None);
                 }
             }
 
@@ -78,17 +82,40 @@ public sealed class AiImageTaskProcessor(ISqlSugarClient db, IAiImageService aiI
                     ErrorMessage = null,
                     UpdatedAt = DateTime.UtcNow
                 })
-                .Where(x => x.Id == taskId && !x.IsDeleted)
-                .ExecuteCommandAsync();
+                .Where(x => x.Id == taskId && !x.IsDeleted && x.Status == 0)
+                .ExecuteCommandAsync(CancellationToken.None);
         }
         catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
         {
-            await MarkFailedAsync(task, new TimeoutException("AI image generation timed out after 5 minutes.", ex), CancellationToken.None);
+            await MarkFailedAsync(task, new TimeoutException($"AI image generation timed out after {ResolveTaskTimeout(task.ImageCount).TotalMinutes:0} minutes.", ex), results, CancellationToken.None);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            await MarkFailedAsync(task, ex, cancellationToken);
+            await MarkFailedAsync(task, ex, results, cancellationToken);
         }
+    }
+
+    public static TimeSpan ResolveTaskTimeout(int imageCount)
+    {
+        var minutes = Math.Min(Math.Max(imageCount, 1) * MinutesPerImage, MaxTaskTimeoutMinutes);
+        return TimeSpan.FromMinutes(minutes);
+    }
+
+    private async Task PersistPartialResultsAsync(long taskId, IReadOnlyList<string> results, CancellationToken cancellationToken)
+    {
+        if (results.Count == 0)
+        {
+            return;
+        }
+
+        await db.Updateable<AiImageTaskEntity>()
+            .SetColumns(x => new AiImageTaskEntity
+            {
+                ResultUrls = JsonSerializer.Serialize(results),
+                UpdatedAt = DateTime.UtcNow
+            })
+            .Where(x => x.Id == taskId && !x.IsDeleted && x.Status == 0)
+            .ExecuteCommandAsync(cancellationToken);
     }
 
     private static IReadOnlyList<string> DeserializeReferenceImageUrls(string? referenceImageUrls)
@@ -108,7 +135,24 @@ public sealed class AiImageTaskProcessor(ISqlSugarClient db, IAiImageService aiI
         }
     }
 
-    private async Task MarkFailedAsync(AiImageTaskEntity task, Exception ex, CancellationToken cancellationToken)
+    private static IReadOnlyList<string> DeserializeImageUrls(string? imageUrls)
+    {
+        if (string.IsNullOrWhiteSpace(imageUrls))
+        {
+            return [];
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<IReadOnlyList<string>>(imageUrls) ?? [];
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+    }
+
+    private async Task MarkFailedAsync(AiImageTaskEntity task, Exception ex, IReadOnlyList<string> results, CancellationToken cancellationToken)
     {
         var message = ex is AppException ? ex.Message : ex.Message;
         if (message.Length > 1000)
@@ -116,22 +160,66 @@ public sealed class AiImageTaskProcessor(ISqlSugarClient db, IAiImageService aiI
             message = message[..1000];
         }
 
-        await db.Updateable<AiImageTaskEntity>()
-            .SetColumns(x => new AiImageTaskEntity
-            {
-                Status = 2,
-                ErrorMessage = message,
-                UpdatedAt = DateTime.UtcNow
-            })
-            .Where(x => x.Id == task.Id && !x.IsDeleted)
-            .ExecuteCommandAsync();
+        var latestTask = await db.Queryable<AiImageTaskEntity>()
+            .FirstAsync(x => x.Id == task.Id && !x.IsDeleted, cancellationToken);
+        if (latestTask is null || latestTask.Status != 0)
+        {
+            return;
+        }
 
-        var refundPoints = await ResolveTaskCostAsync(task, cancellationToken);
+        var mergedResults = MergeImageUrls(DeserializeImageUrls(latestTask.ResultUrls), results);
+        var affected = mergedResults.Count > 0
+            ? await db.Updateable<AiImageTaskEntity>()
+                .SetColumns(x => new AiImageTaskEntity
+                {
+                    Status = 2,
+                    ErrorMessage = message,
+                    ResultUrls = JsonSerializer.Serialize(mergedResults),
+                    UpdatedAt = DateTime.UtcNow
+                })
+                .Where(x => x.Id == task.Id && !x.IsDeleted && x.Status == 0)
+                .ExecuteCommandAsync(cancellationToken)
+            : await db.Updateable<AiImageTaskEntity>()
+                .SetColumns(x => new AiImageTaskEntity
+                {
+                    Status = 2,
+                    ErrorMessage = message,
+                    UpdatedAt = DateTime.UtcNow
+                })
+                .Where(x => x.Id == task.Id && !x.IsDeleted && x.Status == 0)
+                .ExecuteCommandAsync(cancellationToken);
+        if (affected == 0)
+        {
+            return;
+        }
+
+        var failedImageCount = Math.Max(0, task.ImageCount - mergedResults.Count);
+        if (failedImageCount == 0)
+        {
+            return;
+        }
+
+        var refundPoints = await ResolveTaskCostAsync(task, failedImageCount, cancellationToken);
         await pointService.RefundForImageAsync(task.UserId, task.Id, refundPoints, cancellationToken);
     }
 
-    private async Task<int> ResolveTaskCostAsync(AiImageTaskEntity task, CancellationToken cancellationToken)
+    private static IReadOnlyList<string> MergeImageUrls(params IReadOnlyList<string>[] urlLists)
     {
+        return urlLists
+            .SelectMany(x => x)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(int.MaxValue)
+            .ToArray();
+    }
+
+    private async Task<int> ResolveTaskCostAsync(AiImageTaskEntity task, int imageCount, CancellationToken cancellationToken)
+    {
+        if (imageCount <= 0)
+        {
+            return 0;
+        }
+
         var modelCode = AiImageModelConfigService.NormalizeModelCode(task.ModelName);
         var isNanoBananaModel = AiImageModelConfigService.IsNanoBananaModel(modelCode);
         if (isNanoBananaModel)
@@ -144,7 +232,7 @@ public sealed class AiImageTaskProcessor(ISqlSugarClient db, IAiImageService aiI
             {
                 try
                 {
-                    return await pointService.GetImageGenerateCostAsync(modelCode, resolutionCode, string.Empty, task.ImageCount, cancellationToken);
+                    return await pointService.GetImageGenerateCostAsync(modelCode, resolutionCode, string.Empty, imageCount, cancellationToken);
                 }
                 catch (AppException ex) when (ex.Code == ErrorCodes.BadRequest)
                 {
@@ -154,6 +242,6 @@ public sealed class AiImageTaskProcessor(ISqlSugarClient db, IAiImageService aiI
             return 0;
         }
 
-        return await pointService.GetImageGenerateCostAsync(modelCode, task.ResolutionCode, task.QualityCode, task.ImageCount, cancellationToken);
+        return await pointService.GetImageGenerateCostAsync(modelCode, task.ResolutionCode, task.QualityCode, imageCount, cancellationToken);
     }
 }
