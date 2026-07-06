@@ -6,6 +6,7 @@ using jokester.admin.Domain.Entities;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using SqlSugar;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -424,58 +425,19 @@ public sealed class AiImageService(
 
         httpClient.DefaultRequestHeaders.Authorization = null;
 
-        using var httpRequest = normalizedReferenceImageUrls.Count == 0
-            ? BuildGenerationRequest(modelConfig, normalizedPrompt, parameters)
-            : BuildEditRequest(modelConfig, normalizedPrompt, parameters, normalizedReferenceImageUrls, normalizedMaskImageUrl);
-        httpRequest.Headers.Remove("Authorization");
-        httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", modelConfig.ApiKey);
-
-        logger.LogInformation(
-            "Sending AI image request. Endpoint={Endpoint}, Mode={Mode}, ModelCode={ModelCode}, ProviderModel={ProviderModel}, Size={Size}, Quality={Quality}, ReferenceImageCount={ReferenceImageCount}, ReferenceImageUrls={ReferenceImageUrls}, MaskImageUrl={MaskImageUrl}, Prompt={Prompt}",
-            httpRequest.RequestUri,
-            normalizedReferenceImageUrls.Count == 0 ? "generations" : "edits",
-            modelConfig.ModelCode,
-            modelConfig.ProviderModel,
-            parameters.Size,
-            parameters.ProviderQuality,
-            normalizedReferenceImageUrls.Count,
+        using var document = await SendImageRequestWithFallbackAsync(
+            modelConfig,
+            normalizedPrompt,
+            parameters,
             normalizedReferenceImageUrls,
             normalizedMaskImageUrl,
-            normalizedPrompt);
+            cancellationToken);
 
-        using var response = await httpClient.SendAsync(httpRequest, cancellationToken);
-        await using var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken);
-        using var document = await JsonDocument.ParseAsync(responseStream, cancellationToken: cancellationToken);
+        var firstImage = ReadFirstOpenAiImage(document.RootElement);
+        var (base64, url) = string.IsNullOrWhiteSpace(firstImage.Base64)
+            ? await DownloadImageAsBase64Async(firstImage.Url!, cancellationToken)
+            : (firstImage.Base64!, await SaveImageAsync(firstImage.Base64!, cancellationToken));
 
-        if (!response.IsSuccessStatusCode)
-        {
-            throw new AppException(ErrorCodes.BadRequest, $"Image generation failed: {ReadOpenAiError(document.RootElement)}");
-        }
-
-        var data = document.RootElement.GetProperty("data");
-        if (data.ValueKind != JsonValueKind.Array || data.GetArrayLength() == 0)
-        {
-            throw new AppException(ErrorCodes.BadRequest, "Image generation returned no image data");
-        }
-
-        var firstImage = data[0];
-        string base64;
-        string url;
-        if (firstImage.TryGetProperty("b64_json", out var b64Json) && !string.IsNullOrWhiteSpace(b64Json.GetString()))
-        {
-            base64 = b64Json.GetString()!;
-            url = await SaveImageAsync(base64, cancellationToken);
-        }
-        else if (firstImage.TryGetProperty("url", out var imageUrl) && !string.IsNullOrWhiteSpace(imageUrl.GetString()))
-        {
-            var downloaded = await DownloadImageAsBase64Async(imageUrl.GetString()!, cancellationToken);
-            base64 = downloaded.Base64;
-            url = downloaded.Url;
-        }
-        else
-        {
-            throw new AppException(ErrorCodes.BadRequest, "Image generation response did not contain image data");
-        }
         return new GenerateAiImageResponse
         {
             TaskId = 0,
@@ -497,8 +459,110 @@ public sealed class AiImageService(
             DataUrl = $"data:{MimeType};base64,{base64}",
             MaskImageUrl = normalizedMaskImageUrl,
             ReferenceImageUrls = normalizedReferenceImageUrls,
-            RevisedPrompt = TryGetString(firstImage, "revised_prompt")
+            RevisedPrompt = firstImage.RevisedPrompt
         };
+    }
+
+    private async Task<JsonDocument> SendImageRequestWithFallbackAsync(
+        ResolvedAiImageModelConfig modelConfig,
+        string prompt,
+        ResolveAiImageParametersResponse parameters,
+        IReadOnlyList<string> referenceImageUrls,
+        string? maskImageUrl,
+        CancellationToken cancellationToken)
+    {
+        var mode = referenceImageUrls.Count == 0 ? "generations" : "edits";
+        var primaryImageFieldName = referenceImageUrls.Count == 0 ? null : "image[]";
+        var response = await SendImageRequestAsync(modelConfig, prompt, parameters, referenceImageUrls, maskImageUrl, primaryImageFieldName, cancellationToken);
+        if (response.IsSuccess)
+        {
+            return response.Document;
+        }
+
+        if (referenceImageUrls.Count > 0)
+        {
+            logger.LogWarning(
+                "AI image request failed; retrying with alternate multipart image field. Endpoint={Endpoint}, Mode={Mode}, ModelCode={ModelCode}, ProviderModel={ProviderModel}, ImageFieldName={ImageFieldName}, StatusCode={StatusCode}, ResponseBody={ResponseBody}",
+                response.Endpoint,
+                mode,
+                modelConfig.ModelCode,
+                modelConfig.ProviderModel,
+                primaryImageFieldName,
+                response.StatusCode,
+                TruncateForLog(response.Body));
+            response.Document.Dispose();
+
+            var retryResponse = await SendImageRequestAsync(modelConfig, prompt, parameters, referenceImageUrls, maskImageUrl, "image", cancellationToken);
+            if (retryResponse.IsSuccess)
+            {
+                return retryResponse.Document;
+            }
+
+            LogProviderFailure(retryResponse, mode, modelConfig, "image");
+            var retryMessage = ReadProviderErrorSafely(retryResponse.Document.RootElement, retryResponse.Body);
+            retryResponse.Document.Dispose();
+            throw new AppException(ErrorCodes.BadRequest, $"Image generation failed: {retryMessage}");
+        }
+
+        LogProviderFailure(response, mode, modelConfig, primaryImageFieldName);
+        var message = ReadProviderErrorSafely(response.Document.RootElement, response.Body);
+        response.Document.Dispose();
+        throw new AppException(ErrorCodes.BadRequest, $"Image generation failed: {message}");
+    }
+
+    private async Task<ImageProviderResponse> SendImageRequestAsync(
+        ResolvedAiImageModelConfig modelConfig,
+        string prompt,
+        ResolveAiImageParametersResponse parameters,
+        IReadOnlyList<string> referenceImageUrls,
+        string? maskImageUrl,
+        string? imageFieldName,
+        CancellationToken cancellationToken)
+    {
+        using var httpRequest = referenceImageUrls.Count == 0
+            ? BuildGenerationRequest(modelConfig, prompt, parameters)
+            : BuildEditRequest(modelConfig, prompt, parameters, referenceImageUrls, maskImageUrl, imageFieldName ?? "image[]");
+        httpRequest.Headers.Remove("Authorization");
+        httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", modelConfig.ApiKey);
+
+        logger.LogInformation(
+            "Sending AI image request. Endpoint={Endpoint}, Mode={Mode}, ModelCode={ModelCode}, ProviderModel={ProviderModel}, Size={Size}, Quality={Quality}, ReferenceImageCount={ReferenceImageCount}, ImageFieldName={ImageFieldName}, ReferenceImageUrls={ReferenceImageUrls}, MaskImageUrl={MaskImageUrl}, Prompt={Prompt}",
+            httpRequest.RequestUri,
+            referenceImageUrls.Count == 0 ? "generations" : "edits",
+            modelConfig.ModelCode,
+            modelConfig.ProviderModel,
+            parameters.Size,
+            parameters.ProviderQuality,
+            referenceImageUrls.Count,
+            imageFieldName,
+            referenceImageUrls,
+            maskImageUrl,
+            prompt);
+
+        using var response = await httpClient.SendAsync(httpRequest, cancellationToken);
+        var body = await response.Content.ReadAsStringAsync(cancellationToken);
+        JsonDocument document;
+        try
+        {
+            document = JsonDocument.Parse(body);
+        }
+        catch (JsonException ex)
+        {
+            logger.LogError(
+                ex,
+                "AI image provider returned non-JSON response. Endpoint={Endpoint}, StatusCode={StatusCode}, Body={Body}",
+                httpRequest.RequestUri,
+                response.StatusCode,
+                TruncateForLog(body));
+            throw new AppException(ErrorCodes.BadRequest, "Image generation failed: provider returned invalid JSON");
+        }
+
+        return new ImageProviderResponse(
+            response.IsSuccessStatusCode,
+            response.StatusCode,
+            httpRequest.RequestUri?.ToString() ?? string.Empty,
+            body,
+            document);
     }
 
     private async Task<AiImageTaskDto> WaitForGeneratedTaskAsync(long taskId, CancellationToken cancellationToken)
@@ -1017,7 +1081,7 @@ public sealed class AiImageService(
         return request;
     }
 
-    private HttpRequestMessage BuildEditRequest(ResolvedAiImageModelConfig config, string prompt, ResolveAiImageParametersResponse parameters, IReadOnlyList<string> referenceImageUrls, string? maskImageUrl)
+    private HttpRequestMessage BuildEditRequest(ResolvedAiImageModelConfig config, string prompt, ResolveAiImageParametersResponse parameters, IReadOnlyList<string> referenceImageUrls, string? maskImageUrl, string imageFieldName)
     {
         var content = new MultipartFormDataContent
         {
@@ -1034,7 +1098,7 @@ public sealed class AiImageService(
             var stream = File.OpenRead(file.Path);
             var imageContent = new StreamContent(stream);
             imageContent.Headers.ContentType = new MediaTypeHeaderValue(file.MimeType);
-            content.Add(imageContent, "image[]", file.FileName);
+            content.Add(imageContent, imageFieldName, file.FileName);
         }
 
         if (!string.IsNullOrWhiteSpace(maskImageUrl))
@@ -1211,6 +1275,126 @@ public sealed class AiImageService(
     }
 
     private sealed record ReferenceImageFile(string Path, string FileName, string MimeType);
+
+    private sealed record OpenAiImageResult(string? Base64, string? Url, string? RevisedPrompt);
+
+    private sealed record ImageProviderResponse(bool IsSuccess, HttpStatusCode StatusCode, string Endpoint, string Body, JsonDocument Document);
+
+    private void LogProviderFailure(ImageProviderResponse response, string mode, ResolvedAiImageModelConfig modelConfig, string? imageFieldName)
+    {
+        logger.LogError(
+            "AI image provider request failed. Endpoint={Endpoint}, Mode={Mode}, ModelCode={ModelCode}, ProviderModel={ProviderModel}, ImageFieldName={ImageFieldName}, StatusCode={StatusCode}, ResponseBody={ResponseBody}",
+            response.Endpoint,
+            mode,
+            modelConfig.ModelCode,
+            modelConfig.ProviderModel,
+            imageFieldName,
+            response.StatusCode,
+            TruncateForLog(response.Body));
+    }
+
+    private static OpenAiImageResult ReadFirstOpenAiImage(JsonElement root)
+    {
+        if (TryReadOpenAiImage(root, out var image))
+        {
+            return image;
+        }
+
+        throw new AppException(ErrorCodes.BadRequest, "Image generation response did not contain image data");
+    }
+
+    private static bool TryReadOpenAiImage(JsonElement element, out OpenAiImageResult image)
+    {
+        image = default!;
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Object:
+                if (TryReadImageObject(element, out image))
+                {
+                    return true;
+                }
+
+                foreach (var propertyName in new[] { "data", "images", "result", "response", "output" })
+                {
+                    if (element.TryGetProperty(propertyName, out var child) && TryReadOpenAiImage(child, out image))
+                    {
+                        return true;
+                    }
+                }
+
+                break;
+
+            case JsonValueKind.Array:
+                foreach (var child in element.EnumerateArray())
+                {
+                    if (TryReadOpenAiImage(child, out image))
+                    {
+                        return true;
+                    }
+                }
+
+                break;
+        }
+
+        return false;
+    }
+
+    private static bool TryReadImageObject(JsonElement element, out OpenAiImageResult image)
+    {
+        image = default!;
+        var base64 = TryGetFirstString(element, "b64_json", "base64", "imageBase64", "image_base64", "data");
+        var url = TryGetFirstString(element, "url", "imageUrl", "image_url");
+
+        if (string.IsNullOrWhiteSpace(base64) && !string.IsNullOrWhiteSpace(url) && url.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
+        {
+            base64 = ExtractBase64FromDataUrl(url);
+            url = null;
+        }
+
+        if (string.IsNullOrWhiteSpace(base64) && string.IsNullOrWhiteSpace(url))
+        {
+            return false;
+        }
+
+        image = new OpenAiImageResult(base64, url, TryGetFirstString(element, "revised_prompt", "revisedPrompt"));
+        return true;
+    }
+
+    private static string ReadProviderErrorSafely(JsonElement root, string body)
+    {
+        var message = ReadOpenAiError(root);
+        return string.IsNullOrWhiteSpace(message) ? body : message;
+    }
+
+    private static string? TryGetFirstString(JsonElement element, params string[] propertyNames)
+    {
+        foreach (var propertyName in propertyNames)
+        {
+            if (TryGetString(element, propertyName) is { } value && !string.IsNullOrWhiteSpace(value))
+            {
+                return value;
+            }
+        }
+
+        return null;
+    }
+
+    private static string? ExtractBase64FromDataUrl(string value)
+    {
+        var markerIndex = value.IndexOf(";base64,", StringComparison.OrdinalIgnoreCase);
+        return markerIndex < 0 ? null : value[(markerIndex + ";base64,".Length)..];
+    }
+
+    private static string TruncateForLog(string? value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return string.Empty;
+        }
+
+        const int maxLength = 4000;
+        return value.Length <= maxLength ? value : value[..maxLength];
+    }
 
     private static string ReadOpenAiError(JsonElement root)
     {

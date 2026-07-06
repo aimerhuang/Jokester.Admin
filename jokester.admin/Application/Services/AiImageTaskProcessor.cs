@@ -8,7 +8,12 @@ using SqlSugar;
 
 namespace jokester.admin.Application.Services;
 
-public sealed class AiImageTaskProcessor(ISqlSugarClient db, IAiImageService aiImageService, INanoBananaImageService nanoBananaImageService, IPointService pointService) : IAiImageTaskProcessor
+public sealed class AiImageTaskProcessor(
+    ISqlSugarClient db,
+    IAiImageService aiImageService,
+    INanoBananaImageService nanoBananaImageService,
+    IPointService pointService,
+    ILogger<AiImageTaskProcessor> logger) : IAiImageTaskProcessor
 {
     private const int MinutesPerImage = 3;
     private const int MaxTaskTimeoutMinutes = 10;
@@ -155,6 +160,21 @@ public sealed class AiImageTaskProcessor(ISqlSugarClient db, IAiImageService aiI
 
     private async Task MarkFailedAsync(AiImageTaskEntity task, Exception ex, IReadOnlyList<string> results, CancellationToken cancellationToken)
     {
+        logger.LogError(
+            ex,
+            "AI image task failed. TaskId={TaskId}, UserId={UserId}, ModelName={ModelName}, ResolutionCode={ResolutionCode}, QualityCode={QualityCode}, AspectRatioCode={AspectRatioCode}, Size={Size}, ImageCount={ImageCount}, CompletedImageCount={CompletedImageCount}, ReferenceImageUrls={ReferenceImageUrls}, MaskImageUrl={MaskImageUrl}",
+            task.Id,
+            task.UserId,
+            task.ModelName,
+            task.ResolutionCode,
+            task.QualityCode,
+            task.AspectRatioCode,
+            task.Size,
+            task.ImageCount,
+            results.Count,
+            task.ReferenceImageUrls,
+            task.MaskImageUrl);
+
         var message = SanitizeFailureMessage(ex);
         if (message.Length > 1000)
         {
