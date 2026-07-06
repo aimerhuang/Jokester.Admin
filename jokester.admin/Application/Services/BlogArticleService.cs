@@ -21,23 +21,26 @@ public sealed class BlogArticleService(ISqlSugarClient db, ICurrentUser currentU
         var siteId = await GetBlogSiteIdAsync(cancellationToken);
         RefAsync<int> total = 0;
         var dbQuery = db.Queryable<BlogArticleEntity>()
-            .Where(x => !x.IsDeleted && x.SiteId == siteId)
-            .WhereIF(query.Status.HasValue, x => x.Status == query.Status!.Value)
+            .LeftJoin<BlogCategoryEntity>((article, category) => article.CategoryId == category.Id && !category.IsDeleted)
+            .Where((article, category) => !article.IsDeleted && article.SiteId == siteId)
+            .WhereIF(query.Status.HasValue, (article, category) => article.Status == query.Status!.Value)
             .WhereIF(!string.IsNullOrWhiteSpace(query.Keyword),
-                x => x.Title.Contains(query.Keyword!) || (x.Summary != null && x.Summary.Contains(query.Keyword!)))
-            .OrderByDescending(x => x.CreatedAt)
-            .OrderByDescending(x => x.Id);
+                (article, category) => article.Title.Contains(query.Keyword!) || (article.Summary != null && article.Summary.Contains(query.Keyword!)))
+            .OrderByDescending((article, category) => article.CreatedAt)
+            .OrderByDescending((article, category) => article.Id);
 
         var items = await dbQuery
-            .Select(x => new BlogArticleDto
+            .Select((article, category) => new BlogArticleDto
             {
-                Id = x.Id,
-                SiteId = x.SiteId,
-                Title = x.Title,
-                Summary = x.Summary,
-                Content = x.Content,
-                CoverUrl = x.CoverUrl,
-                Status = x.Status
+                Id = article.Id,
+                SiteId = article.SiteId,
+                CategoryId = article.CategoryId,
+                CategoryName = category != null ? category.Name : null,
+                Title = article.Title,
+                Summary = article.Summary,
+                Content = article.Content,
+                CoverUrl = article.CoverUrl,
+                Status = article.Status
             })
             .ToPageListAsync(query.PageIndex, query.PageSize, total);
 
@@ -56,16 +59,19 @@ public sealed class BlogArticleService(ISqlSugarClient db, ICurrentUser currentU
     {
         var siteId = await GetBlogSiteIdAsync(cancellationToken);
         var article = await db.Queryable<BlogArticleEntity>()
-            .Where(x => x.Id == id && x.SiteId == siteId && !x.IsDeleted)
-            .Select(x => new BlogArticleDto
+            .LeftJoin<BlogCategoryEntity>((article, category) => article.CategoryId == category.Id && !category.IsDeleted)
+            .Where((article, category) => article.Id == id && article.SiteId == siteId && !article.IsDeleted)
+            .Select((article, category) => new BlogArticleDto
             {
-                Id = x.Id,
-                SiteId = x.SiteId,
-                Title = x.Title,
-                Summary = x.Summary,
-                Content = x.Content,
-                CoverUrl = x.CoverUrl,
-                Status = x.Status
+                Id = article.Id,
+                SiteId = article.SiteId,
+                CategoryId = article.CategoryId,
+                CategoryName = category != null ? category.Name : null,
+                Title = article.Title,
+                Summary = article.Summary,
+                Content = article.Content,
+                CoverUrl = article.CoverUrl,
+                Status = article.Status
             })
             .FirstAsync(cancellationToken);
 
@@ -82,6 +88,7 @@ public sealed class BlogArticleService(ISqlSugarClient db, ICurrentUser currentU
         ValidateRequest(request);
         var status = NormalizeStatus(request.Status);
         var siteId = await GetBlogSiteIdAsync(cancellationToken);
+        var categoryId = await ResolveCategoryIdAsync(siteId, request.CategoryId, cancellationToken);
 
         var entity = new BlogArticleEntity
         {
@@ -90,6 +97,7 @@ public sealed class BlogArticleService(ISqlSugarClient db, ICurrentUser currentU
             Summary = Normalize(request.Summary),
             Content = request.Content.Trim(),
             CoverUrl = Normalize(request.CoverUrl),
+            CategoryId = categoryId,
             Tags = Normalize(request.Tags),
             Status = status,
             ViewCount = 0,
@@ -114,11 +122,13 @@ public sealed class BlogArticleService(ISqlSugarClient db, ICurrentUser currentU
         }
 
         ValidateRequest(request);
+        var categoryId = await ResolveCategoryIdAsync(siteId, request.CategoryId, cancellationToken);
 
         entity.Title = request.Title.Trim();
         entity.Summary = Normalize(request.Summary);
         entity.Content = request.Content.Trim();
         entity.CoverUrl = Normalize(request.CoverUrl);
+        entity.CategoryId = categoryId;
         entity.Tags = Normalize(request.Tags);
         entity.Status = NormalizeStatus(request.Status);
         entity.UpdatedAt = DateTime.Now;
@@ -164,6 +174,23 @@ public sealed class BlogArticleService(ISqlSugarClient db, ICurrentUser currentU
         {
             throw new NotFoundException($"文章不存在: {id}");
         }
+    }
+
+    private async Task<long?> ResolveCategoryIdAsync(long siteId, long? categoryId, CancellationToken cancellationToken)
+    {
+        if (!categoryId.HasValue)
+        {
+            return null;
+        }
+
+        var exists = await db.Queryable<BlogCategoryEntity>()
+            .AnyAsync(x => x.Id == categoryId.Value && x.SiteId == siteId && !x.IsDeleted, cancellationToken);
+        if (!exists)
+        {
+            throw new NotFoundException($"分类不存在: {categoryId.Value}");
+        }
+
+        return categoryId.Value;
     }
 
     private static void ValidateRequest(SaveBlogArticleRequest request)

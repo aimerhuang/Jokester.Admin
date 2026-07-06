@@ -34,6 +34,16 @@ public sealed class BlogArticleDto
     public long SiteId { get; init; }
 
     /// <summary>
+    /// 分类 ID。
+    /// </summary>
+    public long? CategoryId { get; init; }
+
+    /// <summary>
+    /// 分类名称。
+    /// </summary>
+    public string? CategoryName { get; set; }
+
+    /// <summary>
     /// 文章标题。
     /// </summary>
     public string Title { get; init; } = string.Empty;
@@ -88,6 +98,11 @@ public sealed class SaveBlogArticleRequest
     /// 封面图地址。
     /// </summary>
     public string? CoverUrl { get; init; }
+
+    /// <summary>
+    /// 分类 ID。
+    /// </summary>
+    public long? CategoryId { get; init; }
 
     /// <summary>
     /// 标签，多个标签用逗号分隔。

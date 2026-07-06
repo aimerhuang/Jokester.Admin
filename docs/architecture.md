@@ -33,8 +33,34 @@
 - 文章和媒体请求不要求调用方传 `siteId`
 - 服务层解析 `blog` 站点 ID 后写入和过滤业务数据
 - `blog_article.site_id`、`blog_media.site_id` 保留，供数据归属和后续多站点扩展使用
+- `blog_category.site_id` 用于按站点隔离分类配置
+- `blog_site_config.build_date` 存放建站时间，网站信息接口据此计算运行天数
 
 公开站点接口 `GET /api/sites/site_code` 不需要登录，用于前端获取所有站点和 `status` 状态。
+
+## 博客首页与分类数据流
+
+相关表：
+
+- `blog_article`：文章主体，`cover_url` 保存显式封面图
+- `blog_comment`：评论主体，公开首页只读取已通过评论
+- `blog_category`：博客分类，支持软删除和按站点配置
+- `blog_site_config`：博客站点配置，保存建站时间
+- `blog_media`：上传媒体资源，`url` 是可访问地址
+- `blog_article_media`：文章与媒体的引用关系
+
+首页聚合接口：
+
+1. `GET /api/blog/summary` 汇总文章数、评论数和浏览量。
+2. `GET /api/blog/titles/latest?n=10` 返回最新 `n` 条已发布文章标题，并带上分类名称。
+3. `GET /api/blog/comments/latest?n=10` 返回最新 `n` 条已通过评论，并关联文章标题。
+4. `GET /api/blog/site/info` 读取建站时间并汇总文章、评论和浏览量。
+
+分类 CRUD：
+
+1. 分类按站点隔离。
+2. 删除仅做逻辑删除，避免历史文章分类丢失。
+3. 创建或更新时由服务层校验同站点分类名唯一。
 
 ## 博客文章缩略图数据流
 

@@ -46,6 +46,34 @@ GET /api/sites/site_code
 curl http://localhost:5049/api/sites/site_code
 ```
 
+## 博客聚合接口
+
+```http
+GET /api/blog/summary
+GET /api/blog/titles/latest?n=10
+GET /api/blog/comments/latest?n=10
+GET /api/blog/site/info
+```
+
+- `GET /api/blog/summary` 返回文章总数、评论总数、浏览量。
+- `GET /api/blog/titles/latest?n=10` 返回最新 `n` 条已发布文章标题，默认 `10`，最大 `50`。
+- `GET /api/blog/comments/latest?n=10` 返回最新 `n` 条已通过评论，默认 `10`，最大 `50`。
+- `GET /api/blog/site/info` 返回建站时间、运行天数、评论总数、文章总数和浏览量；建站时间来自 `blog_site_config`。
+
+## 博客分类
+
+```http
+GET /api/blog/categories
+POST /api/blog/categories
+PUT /api/blog/categories/{id}
+DELETE /api/blog/categories/{id}
+```
+
+- 分类列表公开读取。
+- 新增、编辑、删除需要登录并拥有对应的 `Blog.Category.*` 权限。
+- 删除为软删除，文章历史引用的分类记录会保留。
+- 初始化默认分类为：`技术教程`、`日常笔记`、`好物分享`。
+
 ## 博客文章
 
 ```http

@@ -29,6 +29,8 @@ DROP TABLE IF EXISTS `blog_comment`;
 DROP TABLE IF EXISTS `blog_article_media`;
 DROP TABLE IF EXISTS `blog_media`;
 DROP TABLE IF EXISTS `blog_article`;
+DROP TABLE IF EXISTS `blog_category`;
+DROP TABLE IF EXISTS `blog_site_config`;
 DROP TABLE IF EXISTS `sys_user_point_detail`;
 DROP TABLE IF EXISTS `sys_user_site`;
 DROP TABLE IF EXISTS `sys_role_menu`;
@@ -201,7 +203,40 @@ CREATE TABLE `sys_user_point_detail` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户积分明细表';
 
 -- =====================================================
--- 9. 博客文章表
+-- 9. 博客分类表
+-- =====================================================
+CREATE TABLE `blog_category` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+  `site_id` BIGINT NOT NULL COMMENT '站点ID',
+  `name` VARCHAR(100) NOT NULL COMMENT '分类名称',
+  `sort` INT NOT NULL DEFAULT 0 COMMENT '排序',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `created_by` BIGINT DEFAULT NULL COMMENT '创建人',
+  `updated_at` DATETIME DEFAULT NULL COMMENT '更新时间',
+  `updated_by` BIGINT DEFAULT NULL COMMENT '更新人',
+  `is_deleted` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '逻辑删除：1已删除 0未删除',
+  PRIMARY KEY (`id`),
+  KEY `idx_blog_category_site_sort` (`site_id`, `sort`),
+  CONSTRAINT `fk_blog_category_site` FOREIGN KEY (`site_id`) REFERENCES `sys_site` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='博客分类表';
+
+-- =====================================================
+-- 10. 博客站点配置表
+-- =====================================================
+CREATE TABLE `blog_site_config` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+  `site_id` BIGINT NOT NULL COMMENT '站点ID',
+  `build_date` DATETIME NOT NULL COMMENT '建站时间',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `updated_at` DATETIME DEFAULT NULL COMMENT '更新时间',
+  `is_deleted` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '逻辑删除：1已删除 0未删除',
+  PRIMARY KEY (`id`),
+  KEY `idx_blog_site_config_site` (`site_id`),
+  CONSTRAINT `fk_blog_site_config_site` FOREIGN KEY (`site_id`) REFERENCES `sys_site` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='博客站点配置表';
+
+-- =====================================================
+-- 11. 博客文章表
 -- =====================================================
 CREATE TABLE `blog_article` (
   `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键ID',
@@ -390,7 +425,32 @@ VALUES
 
 
 -- =====================================================
--- 13. 初始化角色数据
+-- 13. 初始化博客默认配置
+-- =====================================================
+INSERT INTO `blog_category` (`site_id`, `name`, `sort`, `created_by`)
+SELECT @blog_site_id, '技术教程', 1, u.`id`
+FROM `sys_user` u
+WHERE u.`user_name` = 'admin'
+LIMIT 1;
+
+INSERT INTO `blog_category` (`site_id`, `name`, `sort`, `created_by`)
+SELECT @blog_site_id, '日常笔记', 2, u.`id`
+FROM `sys_user` u
+WHERE u.`user_name` = 'admin'
+LIMIT 1;
+
+INSERT INTO `blog_category` (`site_id`, `name`, `sort`, `created_by`)
+SELECT @blog_site_id, '好物分享', 3, u.`id`
+FROM `sys_user` u
+WHERE u.`user_name` = 'admin'
+LIMIT 1;
+
+INSERT INTO `blog_site_config` (`site_id`, `build_date`, `created_at`)
+VALUES (@blog_site_id, '2026-06-01 00:00:00', NOW());
+
+
+-- =====================================================
+-- 14. 初始化角色数据
 -- =====================================================
 INSERT INTO `sys_role` (`role_name`, `role_code`, `status`, `remark`)
 VALUES

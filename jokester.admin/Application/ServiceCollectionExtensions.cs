@@ -21,6 +21,8 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IBlogMediaService, BlogMediaService>();
         services.AddScoped<IBlogCommentService, BlogCommentService>();
         services.AddScoped<IBlogDashboardService, BlogDashboardService>();
+        services.AddScoped<IBlogCategoryService, BlogCategoryService>();
+        services.AddScoped<IBlogReadService, BlogReadService>();
         services.AddSingleton<IBlogCaptchaService, BlogCaptchaService>();
         services.AddSingleton<IAiImageTaskQueue, AiImageTaskQueue>();
         services.AddScoped<IAiImageTaskProcessor, AiImageTaskProcessor>();
