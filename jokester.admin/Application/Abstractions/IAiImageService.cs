@@ -24,6 +24,8 @@ public interface IAiImageService
 
     Task<long> CreateAsync(CreateAiImageTaskRequest request, CancellationToken cancellationToken);
 
+    Task<IReadOnlyList<long>> CreateTasksAsync(CreateAiImageTaskRequest request, CancellationToken cancellationToken);
+
     Task SetFavoriteAsync(long id, FavoriteAiImageRequest request, CancellationToken cancellationToken);
 
     Task DeleteAsync(long id, CancellationToken cancellationToken);

@@ -299,7 +299,7 @@ public sealed class AiImageService(
             return null;
         }
 
-        if (IsTaskExpired(entity, DateTime.UtcNow))
+        if (IsTaskExpired(entity, HongKongNow()))
         {
             await ExpireStaleTaskAsync(entity, cancellationToken);
             entity = await db.Queryable<AiImageTaskEntity>()
@@ -318,7 +318,7 @@ public sealed class AiImageService(
 
     public async Task<GenerateAiImageResponse> GenerateAsync(GenerateAiImageRequest request, CancellationToken cancellationToken)
     {
-        var taskId = await CreateAsync(new CreateAiImageTaskRequest
+        var taskIds = await CreateTasksAsync(new CreateAiImageTaskRequest
         {
             Prompt = request.Prompt,
             ModelCode = request.ModelCode,
@@ -332,35 +332,42 @@ public sealed class AiImageService(
             MaskImageUrl = request.MaskImageUrl
         }, cancellationToken);
 
-        var task = await WaitForGeneratedTaskAsync(taskId, cancellationToken);
-        if (task.Status == 2 && task.ResultUrls.Count == 0)
+        var generatedTasks = new List<AiImageTaskDto>(taskIds.Count);
+        foreach (var taskId in taskIds)
         {
-            throw new AppException(ErrorCodes.BadRequest, task.ErrorMessage ?? "AI image generation failed");
+            generatedTasks.Add(await WaitForGeneratedTaskAsync(taskId, cancellationToken));
         }
 
-        if (task.ResultUrls.Count == 0)
+        var resultUrls = generatedTasks.SelectMany(x => x.ResultUrls).ToArray();
+        if (resultUrls.Length == 0 && generatedTasks.All(x => x.Status == 2))
         {
-            throw new AppException(ErrorCodes.ServerError, $"AI image generation timed out after {GenerateWaitTimeout.TotalMinutes:0} minutes. Task {taskId} is still available in history.");
+            throw new AppException(ErrorCodes.BadRequest, generatedTasks.FirstOrDefault(x => !string.IsNullOrWhiteSpace(x.ErrorMessage))?.ErrorMessage ?? "AI image generation failed");
         }
 
+        if (resultUrls.Length == 0)
+        {
+            throw new AppException(ErrorCodes.ServerError, $"AI image generation timed out after {GenerateWaitTimeout.TotalMinutes:0} minutes. Tasks {string.Join(", ", taskIds)} are still available in history.");
+        }
+
+        var firstTask = generatedTasks[0];
         return new GenerateAiImageResponse
         {
-            TaskId = task.Id,
-            ModelName = task.ModelName,
-            ModelCode = task.ModelName,
-            Prompt = task.Prompt,
-            ResolutionCode = task.ResolutionCode,
-            QualityCode = task.QualityCode,
-            AspectRatioCode = task.AspectRatioCode,
-            Width = task.Width,
-            Height = task.Height,
-            Size = task.Size,
-            Quality = task.Quality,
+            TaskId = firstTask.Id,
+            ModelName = firstTask.ModelName,
+            ModelCode = firstTask.ModelName,
+            Prompt = firstTask.Prompt,
+            ResolutionCode = firstTask.ResolutionCode,
+            QualityCode = firstTask.QualityCode,
+            AspectRatioCode = firstTask.AspectRatioCode,
+            Width = firstTask.Width,
+            Height = firstTask.Height,
+            Size = firstTask.Size,
+            Quality = firstTask.Quality,
             MimeType = MimeType,
-            Url = task.ResultUrls[0],
-            Urls = task.ResultUrls,
-            MaskImageUrl = task.MaskImageUrl,
-            ReferenceImageUrls = task.ReferenceImageUrls
+            Url = resultUrls[0],
+            Urls = resultUrls,
+            MaskImageUrl = firstTask.MaskImageUrl,
+            ReferenceImageUrls = firstTask.ReferenceImageUrls
         };
     }
 
@@ -598,6 +605,12 @@ public sealed class AiImageService(
 
     public async Task<long> CreateAsync(CreateAiImageTaskRequest request, CancellationToken cancellationToken)
     {
+        var taskIds = await CreateTasksAsync(request, cancellationToken);
+        return taskIds[0];
+    }
+
+    public async Task<IReadOnlyList<long>> CreateTasksAsync(CreateAiImageTaskRequest request, CancellationToken cancellationToken)
+    {
         var prompt = ValidatePrompt(request.Prompt);
         var modelCode = ResolveRequestModelCode(request.ModelCode, request.ModelName, AiImageModelConfigService.DefaultGptModelCode);
         var imageCount = ValidateImageCount(request.ImageCount, modelCode);
@@ -613,49 +626,55 @@ public sealed class AiImageService(
         var userId = currentUser.UserId ?? throw new AppException(ErrorCodes.Unauthorized, "User is not authenticated");
         var siteId = await ResolveAiImageSiteIdAsync(request.SiteId, cancellationToken);
         var modelConfig = await modelConfigService.ResolveAsync(modelCode, parameters.ResolutionCode, cancellationToken);
-        var pointCost = await pointService.GetImageGenerateCostAsync(modelConfig.ModelCode, parameters.ResolutionCode, parameters.QualityCode, imageCount, cancellationToken);
+        var pointCost = await pointService.GetImageGenerateCostAsync(modelConfig.ModelCode, parameters.ResolutionCode, parameters.QualityCode, 1, cancellationToken);
         await ExpireStaleTasksAsync(userId, cancellationToken);
 
-        var entity = new AiImageTaskEntity
+        var taskIds = new List<long>(imageCount);
+        for (var i = 0; i < imageCount; i++)
         {
-            SiteId = siteId,
-            UserId = userId,
-            Prompt = prompt,
-            NegativePrompt = string.IsNullOrWhiteSpace(request.NegativePrompt) ? null : request.NegativePrompt.Trim(),
-            ModelName = modelConfig.ModelCode,
-            ImageCount = imageCount,
-            ResolutionCode = parameters.ResolutionCode,
-            QualityCode = parameters.QualityCode,
-            AspectRatioCode = parameters.AspectRatioCode,
-            Width = parameters.Width,
-            Height = parameters.Height,
-            Size = parameters.Size,
-            Quality = parameters.ProviderQuality,
-            ReferenceImageUrls = referenceImageUrls.Count == 0 ? null : JsonSerializer.Serialize(referenceImageUrls),
-            MaskImageUrl = maskImageUrl,
-            Status = 0,
-            CreatedAt = DateTime.UtcNow,
-            IsDeleted = false
-        };
+            var entity = new AiImageTaskEntity
+            {
+                SiteId = siteId,
+                UserId = userId,
+                Prompt = prompt,
+                NegativePrompt = string.IsNullOrWhiteSpace(request.NegativePrompt) ? null : request.NegativePrompt.Trim(),
+                ModelName = modelConfig.ModelCode,
+                ImageCount = 1,
+                ResolutionCode = parameters.ResolutionCode,
+                QualityCode = parameters.QualityCode,
+                AspectRatioCode = parameters.AspectRatioCode,
+                Width = parameters.Width,
+                Height = parameters.Height,
+                Size = parameters.Size,
+                Quality = parameters.ProviderQuality,
+                ReferenceImageUrls = referenceImageUrls.Count == 0 ? null : JsonSerializer.Serialize(referenceImageUrls),
+                MaskImageUrl = maskImageUrl,
+                Status = 0,
+                CreatedAt = HongKongNow(),
+                IsDeleted = false
+            };
 
-        entity.Id = await db.Insertable(entity).ExecuteReturnBigIdentityAsync();
-        await pointService.ConsumeForImageAsync(userId, entity.Id, modelConfig.ModelCode, parameters.ResolutionCode, parameters.QualityCode, pointCost, cancellationToken);
-        if (!taskQueue.TryQueue(entity.Id))
-        {
-            await db.Updateable<AiImageTaskEntity>()
-                .SetColumns(x => new AiImageTaskEntity
-                {
-                    Status = 2,
-                    ErrorMessage = "AI image task queue is full",
-                    UpdatedAt = DateTime.UtcNow
-                })
-                .Where(x => x.Id == entity.Id)
-                .ExecuteCommandAsync();
-            await pointService.RefundForImageAsync(userId, entity.Id, pointCost, cancellationToken);
-            throw new AppException(ErrorCodes.ServerError, "AI image task queue is full");
+            entity.Id = await db.Insertable(entity).ExecuteReturnBigIdentityAsync();
+            await pointService.ConsumeForImageAsync(userId, entity.Id, modelConfig.ModelCode, parameters.ResolutionCode, parameters.QualityCode, pointCost, cancellationToken);
+            if (!taskQueue.TryQueue(entity.Id))
+            {
+                await db.Updateable<AiImageTaskEntity>()
+                    .SetColumns(x => new AiImageTaskEntity
+                    {
+                        Status = 2,
+                        ErrorMessage = "AI image task queue is full",
+                        UpdatedAt = HongKongNow()
+                    })
+                    .Where(x => x.Id == entity.Id)
+                    .ExecuteCommandAsync();
+                await pointService.RefundForImageAsync(userId, entity.Id, pointCost, cancellationToken);
+                throw new AppException(ErrorCodes.ServerError, "AI image task queue is full");
+            }
+
+            taskIds.Add(entity.Id);
         }
 
-        return entity.Id;
+        return taskIds;
     }
 
     public async Task SetFavoriteAsync(long id, FavoriteAiImageRequest request, CancellationToken cancellationToken)
@@ -718,7 +737,7 @@ public sealed class AiImageService(
     {
         var currentUserId = currentUser.UserId ?? throw new AppException(ErrorCodes.Unauthorized, "User is not authenticated");
         var affected = await db.Updateable<AiImageTaskEntity>()
-            .SetColumns(x => new AiImageTaskEntity { IsDeleted = true, UpdatedAt = DateTime.UtcNow })
+            .SetColumns(x => new AiImageTaskEntity { IsDeleted = true, UpdatedAt = HongKongNow() })
             .Where(x => x.Id == id && !x.IsDeleted)
             .WhereIF(!currentUser.IsSuperAdmin, x => x.UserId == currentUserId)
             .ExecuteCommandAsync();
@@ -731,7 +750,7 @@ public sealed class AiImageService(
 
     private async Task ExpireStaleTasksAsync(long? userId, CancellationToken cancellationToken)
     {
-        var now = DateTime.UtcNow;
+        var now = HongKongNow();
         var candidates = await db.Queryable<AiImageTaskEntity>()
             .Where(x => !x.IsDeleted && x.Status == 0)
             .WhereIF(userId.HasValue, x => x.UserId == userId!.Value)
@@ -747,7 +766,7 @@ public sealed class AiImageService(
 
     private async Task ExpireStaleTaskAsync(AiImageTaskEntity task, CancellationToken cancellationToken)
     {
-        if (!IsTaskExpired(task, DateTime.UtcNow))
+        if (!IsTaskExpired(task, HongKongNow()))
         {
             return;
         }
@@ -762,7 +781,7 @@ public sealed class AiImageService(
                     Status = 2,
                     ErrorMessage = message,
                     ResultUrls = JsonSerializer.Serialize(resultUrls),
-                    UpdatedAt = DateTime.UtcNow
+                    UpdatedAt = HongKongNow()
                 })
                 .Where(x => x.Id == task.Id && !x.IsDeleted && x.Status == 0)
                 .ExecuteCommandAsync(cancellationToken)
@@ -771,7 +790,7 @@ public sealed class AiImageService(
                 {
                     Status = 2,
                     ErrorMessage = message,
-                    UpdatedAt = DateTime.UtcNow
+                    UpdatedAt = HongKongNow()
                 })
                 .Where(x => x.Id == task.Id && !x.IsDeleted && x.Status == 0)
                 .ExecuteCommandAsync(cancellationToken);
@@ -793,6 +812,11 @@ public sealed class AiImageService(
     private static bool IsTaskExpired(AiImageTaskEntity task, DateTime now)
     {
         return task.Status == 0 && task.CreatedAt.Add(AiImageTaskProcessor.ResolveTaskTimeout(task.ImageCount)) <= now;
+    }
+
+    private static DateTime HongKongNow()
+    {
+        return DateTime.UtcNow.AddHours(8);
     }
 
     private async Task<int> ResolveTaskCostAsync(AiImageTaskEntity task, int imageCount, CancellationToken cancellationToken)

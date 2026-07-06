@@ -150,8 +150,8 @@ public sealed class AiImagesController(
     [HttpPost]
     public async Task<IActionResult> Create([FromBody] CreateAiImageTaskRequest request, CancellationToken cancellationToken)
     {
-        var id = await aiImageService.CreateAsync(request, cancellationToken);
-        return Success(new { id });
+        var ids = await aiImageService.CreateTasksAsync(request, cancellationToken);
+        return Success(new { id = ids[0], ids });
     }
 
     /// <summary>

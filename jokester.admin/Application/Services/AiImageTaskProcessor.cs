@@ -1,22 +1,24 @@
+using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using jokester.admin.Application.Abstractions;
 using jokester.admin.Application.DTOs.AiImages;
 using jokester.admin.Common;
 using jokester.admin.Common.Exceptions;
 using jokester.admin.Domain.Entities;
+using Microsoft.Extensions.DependencyInjection;
 using SqlSugar;
 
 namespace jokester.admin.Application.Services;
 
 public sealed class AiImageTaskProcessor(
     ISqlSugarClient db,
-    IAiImageService aiImageService,
-    INanoBananaImageService nanoBananaImageService,
+    IServiceScopeFactory scopeFactory,
     IPointService pointService,
     ILogger<AiImageTaskProcessor> logger) : IAiImageTaskProcessor
 {
     private const int MinutesPerImage = 3;
     private const int MaxTaskTimeoutMinutes = 10;
+    private const int MaxImageGenerationConcurrency = 4;
     private const string GenericGenerationFailureMessage = "图片生成服务暂时不可用，请稍后重试。";
 
     public async Task ProcessAsync(long taskId, CancellationToken cancellationToken)
@@ -40,44 +42,22 @@ public sealed class AiImageTaskProcessor(
             if (AiImageModelConfigService.IsNanoBananaModel(modelCode))
             {
                 var imageUrls = DeserializeReferenceImageUrls(task.ReferenceImageUrls);
-                for (var i = results.Count; i < task.ImageCount; i++)
-                {
-                    var response = await nanoBananaImageService.GenerateFromTaskAsync(
-                        task.Prompt,
-                        task.ModelName,
-                        task.ResolutionCode,
-                        task.AspectRatioCode,
-                        task.Size,
-                        imageUrls,
-                        taskToken);
-                    results.Add(response.Url);
-                    await PersistPartialResultsAsync(taskId, results, CancellationToken.None);
-                }
+                await GenerateRemainingImagesConcurrentlyAsync(
+                    taskId,
+                    results,
+                    task.ImageCount,
+                    ct => GenerateNanoBananaImageFromTaskAsync(task, imageUrls, ct),
+                    taskToken);
             }
             else
             {
                 var referenceImageUrls = DeserializeReferenceImageUrls(task.ReferenceImageUrls);
-                for (var i = results.Count; i < task.ImageCount; i++)
-                {
-                    var response = await aiImageService.GenerateFromResolvedAsync(
-                        task.Prompt,
-                        task.ModelName,
-                        new ResolveAiImageParametersResponse
-                        {
-                            ResolutionCode = task.ResolutionCode,
-                            QualityCode = task.QualityCode,
-                            AspectRatioCode = task.AspectRatioCode,
-                            Width = task.Width,
-                            Height = task.Height,
-                            Size = task.Size,
-                            ProviderQuality = task.Quality
-                        },
-                        referenceImageUrls,
-                        task.MaskImageUrl,
-                        taskToken);
-                    results.Add(response.Url);
-                    await PersistPartialResultsAsync(taskId, results, CancellationToken.None);
-                }
+                await GenerateRemainingImagesConcurrentlyAsync(
+                    taskId,
+                    results,
+                    task.ImageCount,
+                    ct => GenerateGptImageFromTaskAsync(task, referenceImageUrls, ct),
+                    taskToken);
             }
 
             await db.Updateable<AiImageTaskEntity>()
@@ -86,7 +66,7 @@ public sealed class AiImageTaskProcessor(
                     Status = 1,
                     ResultUrls = JsonSerializer.Serialize(results),
                     ErrorMessage = null,
-                    UpdatedAt = DateTime.UtcNow
+                    UpdatedAt = HongKongNow()
                 })
                 .Where(x => x.Id == taskId && !x.IsDeleted && x.Status == 0)
                 .ExecuteCommandAsync(CancellationToken.None);
@@ -118,10 +98,113 @@ public sealed class AiImageTaskProcessor(
             .SetColumns(x => new AiImageTaskEntity
             {
                 ResultUrls = JsonSerializer.Serialize(results),
-                UpdatedAt = DateTime.UtcNow
+                UpdatedAt = HongKongNow()
             })
             .Where(x => x.Id == taskId && !x.IsDeleted && x.Status == 0)
             .ExecuteCommandAsync(cancellationToken);
+    }
+
+    private async Task GenerateRemainingImagesConcurrentlyAsync(
+        long taskId,
+        List<string> results,
+        int targetImageCount,
+        Func<CancellationToken, Task<string>> generateImageAsync,
+        CancellationToken cancellationToken)
+    {
+        var remainingImageCount = targetImageCount - results.Count;
+        if (remainingImageCount <= 0)
+        {
+            return;
+        }
+
+        using var generationCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        using var semaphore = new SemaphoreSlim(Math.Min(MaxImageGenerationConcurrency, remainingImageCount));
+        var runningTasks = Enumerable.Range(0, remainingImageCount)
+            .Select(_ => GenerateImageWithConcurrencyAsync(generateImageAsync, semaphore, generationCancellation.Token))
+            .ToList();
+
+        Exception? firstException = null;
+        while (runningTasks.Count > 0)
+        {
+            var completedTask = await Task.WhenAny(runningTasks);
+            runningTasks.Remove(completedTask);
+
+            try
+            {
+                var url = await completedTask;
+                if (!string.IsNullOrWhiteSpace(url))
+                {
+                    results.Add(url);
+                    await PersistPartialResultsAsync(taskId, results, CancellationToken.None);
+                }
+            }
+            catch (Exception ex)
+            {
+                firstException ??= ex;
+                await generationCancellation.CancelAsync();
+            }
+        }
+
+        if (firstException is not null)
+        {
+            ExceptionDispatchInfo.Capture(firstException).Throw();
+        }
+    }
+
+    private static async Task<string> GenerateImageWithConcurrencyAsync(
+        Func<CancellationToken, Task<string>> generateImageAsync,
+        SemaphoreSlim semaphore,
+        CancellationToken cancellationToken)
+    {
+        await semaphore.WaitAsync(cancellationToken);
+        try
+        {
+            return await generateImageAsync(cancellationToken);
+        }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+
+    private async Task<string> GenerateGptImageFromTaskAsync(AiImageTaskEntity task, IReadOnlyList<string> referenceImageUrls, CancellationToken cancellationToken)
+    {
+        using var scope = scopeFactory.CreateScope();
+        var aiImageService = scope.ServiceProvider.GetRequiredService<IAiImageService>();
+        var response = await aiImageService.GenerateFromResolvedAsync(
+            task.Prompt,
+            task.ModelName,
+            new ResolveAiImageParametersResponse
+            {
+                ResolutionCode = task.ResolutionCode,
+                QualityCode = task.QualityCode,
+                AspectRatioCode = task.AspectRatioCode,
+                Width = task.Width,
+                Height = task.Height,
+                Size = task.Size,
+                ProviderQuality = task.Quality
+            },
+            referenceImageUrls,
+            task.MaskImageUrl,
+            cancellationToken);
+
+        return response.Url;
+    }
+
+    private async Task<string> GenerateNanoBananaImageFromTaskAsync(AiImageTaskEntity task, IReadOnlyList<string> imageUrls, CancellationToken cancellationToken)
+    {
+        using var scope = scopeFactory.CreateScope();
+        var nanoBananaImageService = scope.ServiceProvider.GetRequiredService<INanoBananaImageService>();
+        var response = await nanoBananaImageService.GenerateFromTaskAsync(
+            task.Prompt,
+            task.ModelName,
+            task.ResolutionCode,
+            task.AspectRatioCode,
+            task.Size,
+            imageUrls,
+            cancellationToken);
+
+        return response.Url;
     }
 
     private static IReadOnlyList<string> DeserializeReferenceImageUrls(string? referenceImageUrls)
@@ -196,7 +279,7 @@ public sealed class AiImageTaskProcessor(
                     Status = 2,
                     ErrorMessage = message,
                     ResultUrls = JsonSerializer.Serialize(mergedResults),
-                    UpdatedAt = DateTime.UtcNow
+                    UpdatedAt = HongKongNow()
                 })
                 .Where(x => x.Id == task.Id && !x.IsDeleted && x.Status == 0)
                 .ExecuteCommandAsync(cancellationToken)
@@ -205,7 +288,7 @@ public sealed class AiImageTaskProcessor(
                 {
                     Status = 2,
                     ErrorMessage = message,
-                    UpdatedAt = DateTime.UtcNow
+                    UpdatedAt = HongKongNow()
                 })
                 .Where(x => x.Id == task.Id && !x.IsDeleted && x.Status == 0)
                 .ExecuteCommandAsync(cancellationToken);
@@ -244,6 +327,11 @@ public sealed class AiImageTaskProcessor(
             TaskCanceledException => GenericGenerationFailureMessage,
             _ => string.IsNullOrWhiteSpace(ex.Message) ? GenericGenerationFailureMessage : ex.Message
         };
+    }
+
+    private static DateTime HongKongNow()
+    {
+        return DateTime.UtcNow.AddHours(8);
     }
 
     private async Task<int> ResolveTaskCostAsync(AiImageTaskEntity task, int imageCount, CancellationToken cancellationToken)

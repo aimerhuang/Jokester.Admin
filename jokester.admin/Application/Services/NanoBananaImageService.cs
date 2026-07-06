@@ -156,7 +156,7 @@ public sealed class NanoBananaImageService(
             Quality = string.Empty,
             ReferenceImageUrls = imageUrls.Count == 0 ? null : JsonSerializer.Serialize(imageUrls),
             Status = 0,
-            CreatedAt = DateTime.UtcNow,
+            CreatedAt = HongKongNow(),
             IsDeleted = false
         };
 
@@ -169,7 +169,7 @@ public sealed class NanoBananaImageService(
                 {
                     Status = 2,
                     ErrorMessage = "Nano Banana2 image task queue is full",
-                    UpdatedAt = DateTime.UtcNow
+                    UpdatedAt = HongKongNow()
                 })
                 .Where(x => x.Id == entity.Id)
                 .ExecuteCommandAsync();
@@ -190,6 +190,11 @@ public sealed class NanoBananaImageService(
             Size = size,
             ImageUrls = imageUrls
         }, cancellationToken);
+    }
+
+    private static DateTime HongKongNow()
+    {
+        return DateTime.UtcNow.AddHours(8);
     }
 
     private async Task<NanoBananaImageCost> GetNanoBananaImageCostAsync(string modelCode, NanoBananaParameters parameters, int imageCount, CancellationToken cancellationToken)
