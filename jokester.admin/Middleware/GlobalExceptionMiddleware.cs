@@ -39,21 +39,27 @@ public sealed class GlobalExceptionMiddleware(RequestDelegate next, ILogger<Glob
         }
         catch (AppException ex)
         {
-            context.Response.StatusCode = MapHttpStatusCode(ex.Code);
-            context.Response.ContentType = "application/json; charset=utf-8";
+            if (!context.Response.HasStarted)
+            {
+                context.Response.StatusCode = MapHttpStatusCode(ex.Code);
+                context.Response.ContentType = "application/json; charset=utf-8";
 
-            var payload = JsonSerializer.Serialize(ApiResponse.Failure(ex.Code, ex.Message));
-            await context.Response.WriteAsync(payload);
+                var payload = JsonSerializer.Serialize(ApiResponse.Failure(ex.Code, ex.Message));
+                await context.Response.WriteAsync(payload);
+            }
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Unhandled exception");
 
-            context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-            context.Response.ContentType = "application/json; charset=utf-8";
+            if (!context.Response.HasStarted)
+            {
+                context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                context.Response.ContentType = "application/json; charset=utf-8";
 
-            var payload = JsonSerializer.Serialize(ApiResponse.Failure(ErrorCodes.ServerError, "Server error"));
-            await context.Response.WriteAsync(payload);
+                var payload = JsonSerializer.Serialize(ApiResponse.Failure(ErrorCodes.ServerError, "Server error"));
+                await context.Response.WriteAsync(payload);
+            }
         }
     }
 
@@ -63,6 +69,7 @@ public sealed class GlobalExceptionMiddleware(RequestDelegate next, ILogger<Glob
         ErrorCodes.Unauthorized => StatusCodes.Status401Unauthorized,
         ErrorCodes.Forbidden => StatusCodes.Status403Forbidden,
         ErrorCodes.NotFound => StatusCodes.Status404NotFound,
+        ErrorCodes.TooManyRequests => StatusCodes.Status429TooManyRequests,
         _ => StatusCodes.Status400BadRequest
     };
 }

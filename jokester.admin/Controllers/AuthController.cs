@@ -2,6 +2,7 @@ using jokester.admin.Application.Abstractions;
 using jokester.admin.Application.DTOs.Auth;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace jokester.admin.Controllers;
 
@@ -17,6 +18,8 @@ public sealed class AuthController(
     /// 请求体只需要传 email；验证码用于邮箱注册。
     /// </remarks>
     [AllowAnonymous]
+    [EnableRateLimiting("AuthAbuseProtection")]
+    [RequestSizeLimit(1 * 1024 * 1024)]
     [HttpPost("register/email-code")]
     public async Task<IActionResult> SendRegisterEmailCode(
         [FromBody] SendRegisterEmailCodeRequest request,
@@ -30,6 +33,8 @@ public sealed class AuthController(
     /// 邮箱验证码注册。
     /// </summary>
     [AllowAnonymous]
+    [EnableRateLimiting("AuthAbuseProtection")]
+    [RequestSizeLimit(1 * 1024 * 1024)]
     [HttpPost("register")]
     public async Task<IActionResult> Register([FromBody] RegisterRequest request, CancellationToken cancellationToken)
     {
@@ -44,6 +49,8 @@ public sealed class AuthController(
     /// 登录成功返回 AccessToken、RefreshToken、用户信息、可访问站点和权限码。
     /// </remarks>
     [AllowAnonymous]
+    [EnableRateLimiting("AuthAbuseProtection")]
+    [RequestSizeLimit(1 * 1024 * 1024)]
     [HttpPost("login")]
     public async Task<IActionResult> Login([FromBody] LoginRequest request, CancellationToken cancellationToken)
     {
@@ -62,6 +69,8 @@ public sealed class AuthController(
     /// <summary>
     /// 刷新访问令牌。
     /// </summary>
+    [EnableRateLimiting("AuthAbuseProtection")]
+    [RequestSizeLimit(1 * 1024 * 1024)]
     [HttpPost("refresh")]
     public async Task<IActionResult> Refresh([FromBody] RefreshTokenRequest request, CancellationToken cancellationToken)
     {

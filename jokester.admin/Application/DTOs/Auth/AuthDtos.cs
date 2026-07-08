@@ -14,6 +14,16 @@ public sealed class LoginRequest
     /// 登录密码。
     /// </summary>
     public string Password { get; init; } = string.Empty;
+
+    /// <summary>
+    /// 验证码 ID。
+    /// </summary>
+    public string? CaptchaId { get; init; }
+
+    /// <summary>
+    /// 验证码答案。
+    /// </summary>
+    public string? CaptchaAnswer { get; init; }
 }
 
 /// <summary>
@@ -36,6 +46,16 @@ public sealed class SendRegisterEmailCodeRequest
     /// 注册邮箱。
     /// </summary>
     public string Email { get; init; } = string.Empty;
+
+    /// <summary>
+    /// 验证码 ID。
+    /// </summary>
+    public string CaptchaId { get; init; } = string.Empty;
+
+    /// <summary>
+    /// 验证码答案。
+    /// </summary>
+    public string CaptchaAnswer { get; init; } = string.Empty;
 }
 
 /// <summary>

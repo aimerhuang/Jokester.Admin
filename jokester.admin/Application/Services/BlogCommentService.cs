@@ -1,3 +1,4 @@
+using System.Web;
 using jokester.admin.Application.Abstractions;
 using jokester.admin.Application.DTOs.Blog;
 using jokester.admin.Common;
@@ -146,7 +147,7 @@ public sealed class BlogCommentService(
             AuthorName = Truncate(Normalize(request.AuthorName) ?? DefaultAuthorName, 80)!,
             AuthorEmail = Normalize(request.AuthorEmail),
             AuthorWebsite = Normalize(request.AuthorWebsite),
-            Content = request.Content.Trim(),
+            Content = HttpUtility.HtmlEncode(request.Content.Trim()),
             IpAddress = Normalize(ipAddress),
             UserAgent = Truncate(Normalize(userAgent), 500),
             Status = PendingStatus,

@@ -11,7 +11,9 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
 {
     private const int SignInGiftPoints = 25;
     private const string SignInSource = "sign_in";
+    private const string SignInExpireSource = "sign_in_expire";
     private const string ImageGenerateSource = "image_generate";
+    private const string ImageRefundSource = "image_refund";
 
     public async Task<PointBalanceDto> GetBalanceAsync(CancellationToken cancellationToken)
     {
@@ -43,6 +45,7 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
         var todayStart = now.Date;
         var tomorrowStart = todayStart.AddDays(1);
         var expireAt = tomorrowStart.AddTicks(-1);
+        var signInKey = BuildSignInBizKey(userId, todayStart);
 
         await db.Ado.BeginTranAsync();
         try
@@ -62,14 +65,18 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
             }
 
             var balanceAfter = user.PointBalance + SignInGiftPoints;
-            await db.Updateable<SysUserEntity>()
+            var affected = await db.Updateable<SysUserEntity>()
                 .SetColumns(x => new SysUserEntity
                 {
                     PointBalance = balanceAfter,
                     UpdatedAt = now
                 })
-                .Where(x => x.Id == userId && !x.IsDeleted)
+                .Where(x => x.Id == userId && !x.IsDeleted && x.PointBalance == user.PointBalance)
                 .ExecuteCommandAsync(cancellationToken);
+            if (affected == 0)
+            {
+                throw new AppException(ErrorCodes.BadRequest, "今日已签到");
+            }
 
             await db.Insertable(new UserPointDetailEntity
             {
@@ -78,6 +85,7 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
                 BalanceAfter = balanceAfter,
                 ChangeType = "gift",
                 Source = SignInSource,
+                BizKey = signInKey,
                 Remark = $"每日签到赠送积分，有效期至 {expireAt:yyyy-MM-dd HH:mm:ss}",
                 CreatedAt = now
             }).ExecuteCommandAsync(cancellationToken);
@@ -108,8 +116,6 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
         var normalizedResolutionCode = NormalizeRequired(resolutionCode, "Resolution code is required");
         var normalizedQualityCode = NormalizeOptional(qualityCode);
 
-        // 部分模型（例如 Nano Banana）官方不支持 quality 参数，quality 仅适用于 gpt-image。
-        // 因此只有在调用方显式传入 quality 时才参与价格匹配；未传时忽略库中 quality 列（无论是 '' 还是 NULL）。
         var matchQuality = !string.IsNullOrEmpty(normalizedQualityCode);
 
         var price = await db.Queryable<AiImagePointPriceEntity>()
@@ -135,6 +141,7 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
         }
 
         var now = DateTime.Now;
+        var bizKey = BuildImageBizKey(ImageGenerateSource, taskId);
         await db.Ado.BeginTranAsync();
         try
         {
@@ -145,6 +152,17 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
                 throw new NotFoundException($"用户不存在: {userId}");
             }
 
+            if (taskId > 0)
+            {
+                var alreadyConsumed = await db.Queryable<UserPointDetailEntity>()
+                    .AnyAsync(x => x.UserId == userId && x.Source == ImageGenerateSource && x.BizKey == bizKey, cancellationToken);
+                if (alreadyConsumed)
+                {
+                    await db.Ado.CommitTranAsync();
+                    return;
+                }
+            }
+
             await ExpirePreviousSignInPointsAsync(user, DateTime.Today, cancellationToken);
             if (user.PointBalance < points)
             {
@@ -152,14 +170,18 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
             }
 
             var balanceAfter = user.PointBalance - points;
-            await db.Updateable<SysUserEntity>()
+            var affected = await db.Updateable<SysUserEntity>()
                 .SetColumns(x => new SysUserEntity
                 {
                     PointBalance = balanceAfter,
                     UpdatedAt = now
                 })
-                .Where(x => x.Id == userId && !x.IsDeleted && x.PointBalance >= points)
+                .Where(x => x.Id == userId && !x.IsDeleted && x.PointBalance == user.PointBalance)
                 .ExecuteCommandAsync(cancellationToken);
+            if (affected == 0)
+            {
+                throw new AppException(ErrorCodes.BadRequest, "积分不足，请刷新后重试");
+            }
 
             await db.Insertable(new UserPointDetailEntity
             {
@@ -168,6 +190,7 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
                 BalanceAfter = balanceAfter,
                 ChangeType = "consume",
                 Source = ImageGenerateSource,
+                BizKey = bizKey,
                 Remark = $"AI 出图扣除积分，任务ID：{taskId}，模型：{modelCode}，分辨率：{resolutionCode}，画质：{qualityCode}",
                 CreatedAt = now
             }).ExecuteCommandAsync(cancellationToken);
@@ -189,6 +212,7 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
         }
 
         var now = DateTime.Now;
+        var bizKey = BuildImageBizKey(ImageRefundSource, taskId);
         await db.Ado.BeginTranAsync();
         try
         {
@@ -199,27 +223,30 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
                 throw new NotFoundException($"用户不存在: {userId}");
             }
 
-            var alreadyRefunded = taskId > 0 && await db.Queryable<UserPointDetailEntity>()
-                .AnyAsync(x => x.UserId == userId
-                    && x.Source == "image_refund"
-                    && x.Remark != null
-                    && x.Remark.Contains($"任务ID：{taskId}"),
-                    cancellationToken);
-            if (alreadyRefunded)
+            if (taskId > 0)
             {
-                await db.Ado.CommitTranAsync();
-                return;
+                var alreadyRefunded = await db.Queryable<UserPointDetailEntity>()
+                    .AnyAsync(x => x.UserId == userId && x.Source == ImageRefundSource && x.BizKey == bizKey, cancellationToken);
+                if (alreadyRefunded)
+                {
+                    await db.Ado.CommitTranAsync();
+                    return;
+                }
             }
 
             var balanceAfter = user.PointBalance + points;
-            await db.Updateable<SysUserEntity>()
+            var affected = await db.Updateable<SysUserEntity>()
                 .SetColumns(x => new SysUserEntity
                 {
                     PointBalance = balanceAfter,
                     UpdatedAt = now
                 })
-                .Where(x => x.Id == userId && !x.IsDeleted)
+                .Where(x => x.Id == userId && !x.IsDeleted && x.PointBalance == user.PointBalance)
                 .ExecuteCommandAsync(cancellationToken);
+            if (affected == 0)
+            {
+                throw new AppException(ErrorCodes.ServerError, "积分返还失败，请重试");
+            }
 
             await db.Insertable(new UserPointDetailEntity
             {
@@ -227,7 +254,8 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
                 ChangePoints = points,
                 BalanceAfter = balanceAfter,
                 ChangeType = "refund",
-                Source = "image_refund",
+                Source = ImageRefundSource,
+                BizKey = bizKey,
                 Remark = $"AI 出图失败返还积分，任务ID：{taskId}",
                 CreatedAt = now
             }).ExecuteCommandAsync(cancellationToken);
@@ -260,7 +288,7 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
         }
 
         var alreadyExpired = await db.Queryable<UserPointDetailEntity>()
-            .AnyAsync(x => x.UserId == user.Id && x.Source == "sign_in_expire" && x.CreatedAt >= todayStart, cancellationToken);
+            .AnyAsync(x => x.UserId == user.Id && x.Source == SignInExpireSource && x.CreatedAt >= todayStart, cancellationToken);
         if (alreadyExpired)
         {
             return;
@@ -277,14 +305,18 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
         }
 
         user.PointBalance -= expirePoints;
-        await db.Updateable<SysUserEntity>()
+        var affected = await db.Updateable<SysUserEntity>()
             .SetColumns(x => new SysUserEntity
             {
                 PointBalance = user.PointBalance,
                 UpdatedAt = DateTime.Now
             })
-            .Where(x => x.Id == user.Id && !x.IsDeleted)
+            .Where(x => x.Id == user.Id && !x.IsDeleted && x.PointBalance >= expirePoints)
             .ExecuteCommandAsync(cancellationToken);
+        if (affected == 0)
+        {
+            throw new AppException(ErrorCodes.ServerError, "积分过期处理失败，请重试");
+        }
 
         await db.Insertable(new UserPointDetailEntity
         {
@@ -292,7 +324,8 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
             ChangePoints = -expirePoints,
             BalanceAfter = user.PointBalance,
             ChangeType = "expire",
-            Source = "sign_in_expire",
+            Source = SignInExpireSource,
+            BizKey = BuildSignInExpireBizKey(user.Id, todayStart),
             Remark = "清除上一日未使用的签到积分",
             CreatedAt = DateTime.Now
         }).ExecuteCommandAsync(cancellationToken);
@@ -307,6 +340,21 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
                 && x.CreatedAt >= todayStart
                 && x.CreatedAt < tomorrowStart,
                 cancellationToken);
+    }
+
+    private static string BuildSignInBizKey(long userId, DateTime todayStart)
+    {
+        return $"sign-in:{userId}:{todayStart:yyyyMMdd}";
+    }
+
+    private static string BuildSignInExpireBizKey(long userId, DateTime todayStart)
+    {
+        return $"sign-in-expire:{userId}:{todayStart:yyyyMMdd}";
+    }
+
+    private static string BuildImageBizKey(string source, long taskId)
+    {
+        return taskId > 0 ? $"{source}:{taskId}" : $"{source}:0";
     }
 
     private static string NormalizeOptional(string? value)
@@ -324,3 +372,4 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
         return value.Trim().ToLowerInvariant();
     }
 }
+

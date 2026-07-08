@@ -195,9 +195,11 @@ CREATE TABLE `sys_user_point_detail` (
   `balance_after` INT NOT NULL COMMENT '变动后积分余额',
   `change_type` VARCHAR(30) NOT NULL COMMENT '变动类型：gift/consume/adjust',
   `source` VARCHAR(50) NOT NULL COMMENT '来源：register 等',
+  `biz_key` VARCHAR(100) DEFAULT NULL COMMENT '业务幂等键',
   `remark` VARCHAR(500) DEFAULT NULL COMMENT '备注',
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_sys_user_point_detail_biz_key` (`biz_key`),
   KEY `idx_sys_user_point_detail_user_created` (`user_id`, `created_at`),
   CONSTRAINT `fk_sys_user_point_detail_user` FOREIGN KEY (`user_id`) REFERENCES `sys_user` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户积分明细表';

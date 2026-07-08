@@ -16,6 +16,7 @@ public sealed class RegistrationService(
     IPasswordHasher passwordHasher,
     IEmailValidationService emailValidationService,
     IEmailSender emailSender,
+    IBlogCaptchaService captchaService,
     IConnectionMultiplexer connectionMultiplexer,
     IOptions<RedisOptions> redisOptions) : IRegistrationService
 {
@@ -29,6 +30,11 @@ public sealed class RegistrationService(
     public async Task SendEmailCodeAsync(SendRegisterEmailCodeRequest request, CancellationToken cancellationToken)
     {
         var email = await emailValidationService.ValidateAndNormalizeAsync(request.Email, cancellationToken);
+        if (!await captchaService.ValidateAsync(request.CaptchaId, request.CaptchaAnswer, cancellationToken))
+        {
+            throw new AppException(ErrorCodes.BadRequest, "验证码无效或已过期");
+        }
+
         var code = RandomNumberGenerator.GetInt32(100000, 1000000).ToString();
         await _redis.StringSetAsync(_emailCodePrefix + email, code, CodeLifetime);
 
@@ -74,6 +80,7 @@ public sealed class RegistrationService(
                 BalanceAfter = RegisterGiftPoints,
                 ChangeType = "gift",
                 Source = "register",
+                BizKey = $"register:{email}",
                 Remark = "注册赠送积分",
                 CreatedAt = DateTime.Now
             }).ExecuteCommandAsync(cancellationToken);

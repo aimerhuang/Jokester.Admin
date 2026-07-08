@@ -5,6 +5,8 @@ namespace jokester.admin.Application.DTOs.Common;
 /// </summary>
 public class PageQuery
 {
+    private int _pageSize = 20;
+
     /// <summary>
     /// 当前页码，从 1 开始。
     /// </summary>
@@ -13,5 +15,9 @@ public class PageQuery
     /// <summary>
     /// 每页数据条数。
     /// </summary>
-    public int PageSize { get; init; } = 20;
+    public int PageSize
+    {
+        get => _pageSize;
+        init => _pageSize = Math.Clamp(value, 1, 100);
+    }
 }
