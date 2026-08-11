@@ -1,3 +1,4 @@
+using System.Threading.RateLimiting;
 using jokester.admin;
 using jokester.admin.Application;
 using jokester.admin.Application.Abstractions;
@@ -5,6 +6,7 @@ using jokester.admin.Configuration;
 using jokester.admin.Infrastructure;
 using jokester.admin.Middleware;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Options;
 using System.Net;
 
@@ -17,6 +19,7 @@ DotEnvConfiguration.LoadToEnvironment(
 
 var builder = WebApplication.CreateBuilder(args);
 const string CorsPolicyName = "DefaultCors";
+const string AuthPolicyName = "AuthAbuseProtection";
 var swaggerEnabled = builder.Environment.IsDevelopment()
     || builder.Configuration.GetValue<bool>("Swagger:Enabled");
 
@@ -54,6 +57,28 @@ builder.Services.AddCors(options =>
         policy.WithOrigins(securityOptions.AllowedOrigins)
             .AllowAnyHeader()
             .AllowAnyMethod();
+    });
+});
+
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.OnRejected = static (context, cancellationToken) =>
+    {
+        context.HttpContext.Response.Headers.RetryAfter = "60";
+        return ValueTask.CompletedTask;
+    };
+
+    options.AddPolicy(AuthPolicyName, context =>
+    {
+        var partitionKey = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        return RateLimitPartition.GetFixedWindowLimiter(partitionKey, _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 10,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true
+        });
     });
 });
 
@@ -101,13 +126,14 @@ if (isAiMediaMigration)
     return;
 }
 
+app.UseMiddleware<GlobalExceptionMiddleware>();
+
 if (swaggerEnabled)
 {
     app.UseSwagger();
     app.UseSwaggerUI();
 }
 
-app.UseMiddleware<GlobalExceptionMiddleware>();
 app.UseForwardedHeaders();
 app.UseMiddleware<SecurityHeadersMiddleware>();
 app.UseHttpsRedirection();
@@ -126,11 +152,12 @@ if (!string.IsNullOrWhiteSpace(promptLibraryOptions.ImageRoot))
     });
 }
 app.UseCors(CorsPolicyName);
+app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();
 app.UseMiddleware<SecurityRateLimitMiddleware>();
-app.UseMiddleware<PermissionMiddleware>();
 app.UseMiddleware<OperationLogMiddleware>();
+app.UseMiddleware<PermissionMiddleware>();
 app.MapControllers();
 
 app.Run();

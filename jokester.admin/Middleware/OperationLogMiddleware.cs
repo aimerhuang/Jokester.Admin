@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Text;
 using jokester.admin.Application.Abstractions;
 using Microsoft.AspNetCore.Mvc.Controllers;
 
@@ -27,10 +26,11 @@ public sealed class OperationLogMiddleware(RequestDelegate next, ILogger<Operati
             try
             {
                 var action = context.GetEndpoint()?.Metadata.GetMetadata<ControllerActionDescriptor>();
+                var interfaceName = BuildInterfaceName(context, action);
                 await auditLogWriter.WriteOperationAsync(
                     currentUser.UserId,
-                    action?.ControllerName,
-                    action?.ActionName,
+                    NormalizeName(action?.ControllerName),
+                    interfaceName,
                     context.Request.Method,
                     context.Request.Path,
                     null,
@@ -55,7 +55,39 @@ public sealed class OperationLogMiddleware(RequestDelegate next, ILogger<Operati
             return false;
         }
 
-        return !context.Request.Path.StartsWithSegments("/swagger");
+        return context.Request.Path.StartsWithSegments("/api")
+            && !context.Request.Path.StartsWithSegments("/swagger");
     }
 
+    private static string BuildInterfaceName(HttpContext context, ControllerActionDescriptor? action)
+    {
+        var routePattern = context.GetEndpoint() is RouteEndpoint routeEndpoint
+            ? $"/{routeEndpoint.RoutePattern.RawText?.TrimStart('/')}"
+            : context.Request.Path.Value;
+
+        var controllerAction = action is null
+            ? null
+            : $"{NormalizeName(action.ControllerName)}.{NormalizeName(action.ActionName)}";
+
+        var name = string.IsNullOrWhiteSpace(controllerAction)
+            ? $"{context.Request.Method} {routePattern}"
+            : $"{context.Request.Method} {routePattern} => {controllerAction}";
+
+        return Truncate(name, 100);
+    }
+
+    private static string? NormalizeName(string? name)
+    {
+        return string.IsNullOrWhiteSpace(name) ? null : name.Trim();
+    }
+
+    private static string Truncate(string value, int maxLength)
+    {
+        if (value.Length <= maxLength)
+        {
+            return value;
+        }
+
+        return $"{value[..maxLength]}...[truncated {value.Length - maxLength} chars]";
+    }
 }

@@ -18,6 +18,7 @@ public sealed class BlogCommentsController(
     /// 返回 captchaId 和验证码图片 Base64；提交评论时传回 captchaId 与图片中的答案。验证码校验后会一次性失效。
     /// </remarks>
     [AllowAnonymous]
+    [RequestSizeLimit(1 * 1024 * 1024)]
     [HttpGet("captcha")]
     public async Task<IActionResult> Captcha(CancellationToken cancellationToken)
     {
@@ -31,6 +32,7 @@ public sealed class BlogCommentsController(
     /// 评论固定写入 blog 站点；新评论默认 status=0 待审核，不会立即出现在公开评论列表。
     /// </remarks>
     [AllowAnonymous]
+    [RequestSizeLimit(1 * 1024 * 1024)]
     [HttpPost("public")]
     public async Task<IActionResult> CreatePublic(
         [FromBody] CreateBlogCommentRequest request,

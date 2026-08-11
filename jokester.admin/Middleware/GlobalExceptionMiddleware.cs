@@ -42,11 +42,14 @@ public sealed class GlobalExceptionMiddleware(RequestDelegate next, ILogger<Glob
         }
         catch (AppException ex)
         {
-            context.Response.StatusCode = MapHttpStatusCode(ex.Code);
-            context.Response.ContentType = "application/json; charset=utf-8";
+            if (!context.Response.HasStarted)
+            {
+                context.Response.StatusCode = MapHttpStatusCode(ex.Code);
+                context.Response.ContentType = "application/json; charset=utf-8";
 
-            var payload = JsonSerializer.Serialize(ApiResponse.Failure(ex.Code, ex.Message));
-            await context.Response.WriteAsync(payload);
+                var payload = JsonSerializer.Serialize(ApiResponse.Failure(ex.Code, ex.Message));
+                await context.Response.WriteAsync(payload);
+            }
         }
         catch (Exception ex)
         {
@@ -55,11 +58,14 @@ public sealed class GlobalExceptionMiddleware(RequestDelegate next, ILogger<Glob
                 ex.GetType().Name,
                 context.TraceIdentifier);
 
-            context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-            context.Response.ContentType = "application/json; charset=utf-8";
+            if (!context.Response.HasStarted)
+            {
+                context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                context.Response.ContentType = "application/json; charset=utf-8";
 
-            var payload = JsonSerializer.Serialize(ApiResponse.Failure(ErrorCodes.ServerError, "Server error"));
-            await context.Response.WriteAsync(payload);
+                var payload = JsonSerializer.Serialize(ApiResponse.Failure(ErrorCodes.ServerError, "Server error"));
+                await context.Response.WriteAsync(payload);
+            }
         }
     }
 

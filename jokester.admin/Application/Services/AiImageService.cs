@@ -13,6 +13,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Threading;
 
 namespace jokester.admin.Application.Services;
 
@@ -40,6 +41,7 @@ public sealed class AiImageService(
     private const int ProviderMaxTotalPixels = 8_294_400;
     private static readonly TimeSpan GenerateWaitTimeout = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan GenerateWaitPollInterval = TimeSpan.FromSeconds(1);
+    private static readonly SemaphoreSlim SyncGenerateSemaphore = new(4, 4);
     private const string ResolutionType = "resolution";
     private const string QualityType = "quality";
     private const string AspectRatioType = "aspect_ratio";
@@ -316,58 +318,75 @@ public sealed class AiImageService(
 
     public async Task<GenerateAiImageResponse> GenerateAsync(GenerateAiImageRequest request, CancellationToken cancellationToken)
     {
-        var taskIds = await CreateTasksAsync(new CreateAiImageTaskRequest
+        if (!await SyncGenerateSemaphore.WaitAsync(0, cancellationToken))
         {
-            IdempotencyKey = request.IdempotencyKey,
-            SourcePromptId = request.SourcePromptId,
-            Prompt = request.Prompt,
-            ModelCode = request.ModelCode,
-            ModelName = request.ModelName,
-            ImageCount = request.ImageCount,
-            Resolution = request.Resolution,
-            ResolutionCode = request.ResolutionCode,
-            QualityCode = request.QualityCode,
-            AspectRatioCode = request.AspectRatioCode,
-            ReferenceImageUrls = request.ReferenceImageUrls,
-            MaskImageUrl = request.MaskImageUrl
-        }, cancellationToken);
-
-        var generatedTasks = await Task.WhenAll(
-            taskIds.Select(taskId => WaitForGeneratedTaskAsync(taskId, cancellationToken)));
-
-        var resultUrls = generatedTasks.SelectMany(x => x.ResultUrls).ToArray();
-        if (resultUrls.Length == 0 && generatedTasks.All(x => x.Status == 2))
-        {
-            throw new AppException(ErrorCodes.BadRequest, generatedTasks.FirstOrDefault(x => !string.IsNullOrWhiteSpace(x.ErrorMessage))?.ErrorMessage ?? "AI image generation failed");
+            throw new AppException(ErrorCodes.TooManyRequests, "同步生图请求过多，请稍后重试");
         }
 
-        if (resultUrls.Length == 0)
+        try
         {
-            throw new AppException(ErrorCodes.ServerError, $"AI image generation timed out after {GenerateWaitTimeout.TotalMinutes:0} minutes. Tasks {string.Join(", ", taskIds)} are still available in history.");
-        }
+            var taskIds = await CreateTasksAsync(new CreateAiImageTaskRequest
+            {
+                IdempotencyKey = request.IdempotencyKey,
+                SourcePromptId = request.SourcePromptId,
+                Prompt = request.Prompt,
+                ModelCode = request.ModelCode,
+                ModelName = request.ModelName,
+                ImageCount = request.ImageCount,
+                Resolution = request.Resolution,
+                ResolutionCode = request.ResolutionCode,
+                QualityCode = request.QualityCode,
+                AspectRatioCode = request.AspectRatioCode,
+                ReferenceImageUrls = request.ReferenceImageUrls,
+                MaskImageUrl = request.MaskImageUrl
+            }, cancellationToken);
 
-        var firstTask = generatedTasks[0];
-        return new GenerateAiImageResponse
+            var generatedTasks = await Task.WhenAll(
+                taskIds.Select(taskId => WaitForGeneratedTaskAsync(taskId, cancellationToken)));
+
+            var resultUrls = generatedTasks.SelectMany(x => x.ResultUrls).ToArray();
+            if (resultUrls.Length == 0 && generatedTasks.All(x => x.Status == 2))
+            {
+                throw new AppException(
+                    ErrorCodes.BadRequest,
+                    generatedTasks.FirstOrDefault(x => !string.IsNullOrWhiteSpace(x.ErrorMessage))?.ErrorMessage
+                        ?? "AI image generation failed");
+            }
+
+            if (resultUrls.Length == 0)
+            {
+                throw new AppException(
+                    ErrorCodes.ServerError,
+                    $"AI image generation timed out after {GenerateWaitTimeout.TotalMinutes:0} minutes. Tasks {string.Join(", ", taskIds)} are still available in history.");
+            }
+
+            var firstTask = generatedTasks[0];
+            return new GenerateAiImageResponse
+            {
+                TaskId = firstTask.Id,
+                TaskIds = taskIds,
+                SourcePromptId = firstTask.SourcePromptId,
+                ModelName = firstTask.ModelName,
+                ModelCode = firstTask.ModelName,
+                Prompt = firstTask.Prompt,
+                ResolutionCode = firstTask.ResolutionCode,
+                QualityCode = firstTask.QualityCode,
+                AspectRatioCode = firstTask.AspectRatioCode,
+                Width = firstTask.Width,
+                Height = firstTask.Height,
+                Size = firstTask.Size,
+                Quality = firstTask.Quality,
+                MimeType = MimeType,
+                Url = resultUrls[0],
+                Urls = resultUrls,
+                MaskImageUrl = firstTask.MaskImageUrl,
+                ReferenceImageUrls = firstTask.ReferenceImageUrls
+            };
+        }
+        finally
         {
-            TaskId = firstTask.Id,
-            TaskIds = taskIds,
-            SourcePromptId = firstTask.SourcePromptId,
-            ModelName = firstTask.ModelName,
-            ModelCode = firstTask.ModelName,
-            Prompt = firstTask.Prompt,
-            ResolutionCode = firstTask.ResolutionCode,
-            QualityCode = firstTask.QualityCode,
-            AspectRatioCode = firstTask.AspectRatioCode,
-            Width = firstTask.Width,
-            Height = firstTask.Height,
-            Size = firstTask.Size,
-            Quality = firstTask.Quality,
-            MimeType = MimeType,
-            Url = resultUrls[0],
-            Urls = resultUrls,
-            MaskImageUrl = firstTask.MaskImageUrl,
-            ReferenceImageUrls = firstTask.ReferenceImageUrls
-        };
+            SyncGenerateSemaphore.Release();
+        }
     }
 
     public async Task<UploadAiImageResponse> UploadAsync(IFormFile file, CancellationToken cancellationToken)

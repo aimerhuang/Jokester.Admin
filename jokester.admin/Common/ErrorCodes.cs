@@ -14,5 +14,7 @@ public static class ErrorCodes
     public const int InvalidCredentials = 1001;
     public const int AccountDisabled = 1002;
     public const int InvalidRefreshToken = 1003;
+    public const int CaptchaRequired = 1004;
+    public const int LoginLocked = 1005;
     public const int AiPromptRejected = 2001;
 }

@@ -19,7 +19,7 @@ public sealed class BlogCaptchaService(
 
     public async Task<BlogCaptchaDto> CreateAsync(CancellationToken cancellationToken)
     {
-        var code = RandomNumberGenerator.GetInt32(1000, 10000).ToString();
+        var code = CreateCode();
         var id = Guid.NewGuid().ToString("N");
         await _database.StringSetAsync(_prefix + id, code, Lifetime);
 
@@ -31,9 +31,21 @@ public sealed class BlogCaptchaService(
         };
     }
 
+    private static string CreateCode()
+    {
+        const string alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+        Span<char> chars = stackalloc char[6];
+        for (var i = 0; i < chars.Length; i++)
+        {
+            chars[i] = alphabet[RandomNumberGenerator.GetInt32(alphabet.Length)];
+        }
+
+        return new string(chars);
+    }
+
     private static string CreateSvg(string code)
     {
-        var lines = Enumerable.Range(0, 5)
+        var lines = Enumerable.Range(0, 7)
             .Select(_ =>
             {
                 var x1 = RandomNumberGenerator.GetInt32(0, 140);
@@ -46,16 +58,17 @@ public sealed class BlogCaptchaService(
 
         var chars = code.Select((ch, index) =>
         {
-            var x = 18 + index * 27;
-            var y = RandomNumberGenerator.GetInt32(30, 39);
+            var x = 12 + index * 20;
+            var y = RandomNumberGenerator.GetInt32(28, 39);
             var rotate = RandomNumberGenerator.GetInt32(-18, 19);
-            return $"<text x='{x}' y='{y}' transform='rotate({rotate} {x} {y})'>{HtmlEncoder.Default.Encode(ch.ToString())}</text>";
+            var jitter = RandomNumberGenerator.GetInt32(-4, 5);
+            return $"<text x='{x + jitter}' y='{y}' transform='rotate({rotate} {x} {y})'>{HtmlEncoder.Default.Encode(ch.ToString())}</text>";
         });
 
         return $"<svg xmlns='http://www.w3.org/2000/svg' width='140' height='48' viewBox='0 0 140 48'>" +
             "<rect width='140' height='48' rx='8' fill='#f8fafc'/>" +
             string.Concat(lines) +
-            "<g font-family='Arial,Helvetica,sans-serif' font-size='28' font-weight='700' fill='#0f172a'>" +
+            "<g font-family='Arial,Helvetica,sans-serif' font-size='24' font-weight='700' fill='#0f172a'>" +
             string.Concat(chars) +
             "</g></svg>";
     }
