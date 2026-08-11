@@ -19,11 +19,13 @@ public sealed class BlogArticleService(ISqlSugarClient db, ICurrentUser currentU
     public async Task<PagedResult<BlogArticleDto>> GetPageAsync(BlogArticleQuery query, CancellationToken cancellationToken)
     {
         var siteId = await GetBlogSiteIdAsync(cancellationToken);
+        var isPublicRequest = !currentUser.UserId.HasValue;
         RefAsync<int> total = 0;
         var dbQuery = db.Queryable<BlogArticleEntity>()
             .LeftJoin<BlogCategoryEntity>((article, category) => article.CategoryId == category.Id && !category.IsDeleted)
             .Where((article, category) => !article.IsDeleted && article.SiteId == siteId)
-            .WhereIF(query.Status.HasValue, (article, category) => article.Status == query.Status!.Value)
+            .WhereIF(isPublicRequest, (article, category) => article.Status == PublishedStatus)
+            .WhereIF(!isPublicRequest && query.Status.HasValue, (article, category) => article.Status == query.Status!.Value)
             .WhereIF(!string.IsNullOrWhiteSpace(query.Keyword),
                 (article, category) => article.Title.Contains(query.Keyword!) || (article.Summary != null && article.Summary.Contains(query.Keyword!)))
             .OrderByDescending((article, category) => article.CreatedAt)
@@ -58,9 +60,11 @@ public sealed class BlogArticleService(ISqlSugarClient db, ICurrentUser currentU
     public async Task<BlogArticleDto?> GetByIdAsync(long id, CancellationToken cancellationToken)
     {
         var siteId = await GetBlogSiteIdAsync(cancellationToken);
+        var isPublicRequest = !currentUser.UserId.HasValue;
         var article = await db.Queryable<BlogArticleEntity>()
             .LeftJoin<BlogCategoryEntity>((article, category) => article.CategoryId == category.Id && !category.IsDeleted)
             .Where((article, category) => article.Id == id && article.SiteId == siteId && !article.IsDeleted)
+            .WhereIF(isPublicRequest, (article, category) => article.Status == PublishedStatus)
             .Select((article, category) => new BlogArticleDto
             {
                 Id = article.Id,

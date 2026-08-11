@@ -3,7 +3,8 @@
 基于 `.NET 10 Web API` 的后台管理系统后端，当前已接入以下能力：
 
 - JWT 登录、刷新、登出、当前用户信息
-- 用户注册赠送积分、每日签到领积分、AI 生图扣积分与失败返还
+- 用户注册赠送积分、每日签到、积分充值兑换、AI 生图扣积分与失败返还
+- YouMind 官方中文提示词库同步、搜索、行为统计和历史快照切换
 - 用户、角色、站点、菜单、日志审计接口
 - 权限码校验中间件
 - `SqlSugar` 数据访问
@@ -14,6 +15,11 @@
 - [docs/integration-guide.md](./docs/integration-guide.md)：接口集成说明
 - [docs/architecture.md](./docs/architecture.md)：架构和数据流说明
 - [docs/runbook.md](./docs/runbook.md)：本地运行、冒烟检查和排障
+- [docs/point-recharge.md](./docs/point-recharge.md)：充值套餐、订单、兑换码与购买地址配置
+- [docs/architecture.md](./docs/architecture.md#提示词库数据流)：提示词库数据源、同步、图片与快照边界
+- [docs/ai-prompt-filter.md](./docs/ai-prompt-filter.md)：基于中英文关键词词库的生图过滤、热更新和管理接口
+- [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)：第三方数据来源、固定版本与许可证说明
+- [docs/security-hardening-prd.md](./docs/security-hardening-prd.md)：公网 App API 安全加固计划
 
 ## 当前技术栈
 
@@ -54,6 +60,8 @@ dotnet run --launch-profile http
 - `Redis.ConnectionString`
 - `Redis.InstanceName`
 - `Redis.EnableInMemoryRefreshTokenFallback`
+- `Security.AllowedOrigins`
+- `Security.KnownProxies`
 - `Mail.Host`
 - `Mail.Port`
 - `Mail.UseSsl`
@@ -70,9 +78,7 @@ dotnet run --launch-profile http
 - `BootstrapAdmin.UserName`
 - `BootstrapAdmin.Password`
 - `BootstrapAdmin.Secret`
-- `OpenAI.ApiKey`
-- `OpenAI.BaseUrl`
-- `OpenAI.ImageModel`
+- `OpenAI.PrimaryTimeoutSeconds`（默认 120 秒，超时后切换回退路由）
 
 当前实现不会再从代码内回退任何 JWT / MySQL / Redis 默认值。如缺少上述配置，应用会在启动时直接失败。
 
@@ -93,6 +99,7 @@ Redis 相关运行说明：
 - 应用启动时会以 `AbortOnConnectFail=false` 创建 `ConnectionMultiplexer`
 - Redis 首次不可达时，不会因为连接初始化失败直接阻塞服务启动
 - `EnableInMemoryRefreshTokenFallback=true` 时，Redis 不可用会退回当前进程内存保存刷新令牌，仅适合本地开发调试
+- Refresh Token 仅按哈希存储，并使用 session/token family 原子轮换；并发刷新只有一个成功，重放会撤销同一会话族
 - 权限缓存读取失败时会退回数据库直查
 
 邮件发送与注册邮箱验证说明：
@@ -280,35 +287,44 @@ X-Refresh-Token: <refreshToken>
 - `POST /api/ai/images/{id}/favorite`：收藏或取消收藏任务中的单张结果图片
 - `DELETE /api/ai/images/{id}`：删除 AI 生图任务记录
 
+## 提示词库接口约定
+
+- `GET /api/prompts`、`GET /api/prompts/{id}`：查询当前激活的 126 条中文提示词快照
+- `POST /api/prompts/{id}/events`：记录详情、复制和使用行为，不影响当前排序
+- `GET /api/admin/prompt-sync/status`：查看同步、内容哈希、封面和当前快照状态
+- `POST /api/admin/prompt-sync/run`：提交官方 `/youmarketing-api/prompts` 同步任务
+- `POST /api/admin/prompt-sync/snapshots/{snapshotId}/activate`：切换到封面完整的历史成功快照
+- 同步只接收标题、描述和正文都包含中文的条目；不足 126 条或任一封面失败时保留当前快照
+
 ## Nano Banana2 生图接口约定
 
 - `POST /api/ai/images/nanoBananaImage/generate`：直接生成 Nano Banana2 图片
 - `POST /api/ai/images/nanoBananaImage`：创建 Nano Banana2 后台生图任务
 - 请求体不传 `imageUrls` 或传空数组时执行文生图
-- 请求体传 `imageUrls` 时执行图生图，图片 URL 应为后端内部静态图片 URL
+- 请求体传 `imageUrls` 时执行图生图，图片 URL 必须来自当前用户的 `/api/media/ai/...` 私有媒体
 - 请求体可传 `size`，也可传 `resolutionCode` + `aspectRatioCode`；`aspectRatioCode=auto` 时后端不计算具体画幅比例，直接把上游 `size` 参数设为 `auto`；积分价格仍按业务分辨率档位匹配，不依赖画幅比例
-- 配置项通过 `.env` / 环境变量注入：`NanoBanana2__BaseUrl`、`NanoBanana2__ApiKey`、`NanoBanana2__ImageModel`、`NanoBanana2__TextToImagePath`、`NanoBanana2__ImageToImagePath`
+- Nano Banana2 不使用单独的配置段，也不参与 GPT 主备切换；路由、Provider 模型和 Key 直接读取 `ai_image_model_config` 中当前启用的渠道
 
 说明：
 
 - 生成接口需要 `AiImage.Generate` 权限，列表查询需要 `AiImage.Page` 权限，详情/删除分别需要 `AiImage.Record.View`、`AiImage.Record.Delete`，收藏/取消收藏需要 `AiImage.Favorite`
 - 列表查询支持 `prompt` 对提示词做模糊查询，`startDate`/`endDate` 按创建时间筛选；只传日期的 `endDate` 会包含当天
 - 列表查询支持 `isFavorite=true` 只返回包含当前用户收藏图片的任务，`isFavorite=false` 返回不包含当前用户收藏图片的任务
-- 请求体记录 `prompt`、`resolutionCode`、`qualityCode`、`aspectRatioCode`；后台任务还记录 `imageCount`
+- 请求体记录 `prompt`、`resolutionCode`、`qualityCode`、`aspectRatioCode`；GPT 多图请求按 `imageCount` 创建同等数量的单图任务，每条任务固定 `imageCount=1`
 - GPT Image2 分辨率档位按长边计算：`1k=1024`、`2k=2048`、`4k=3840`；最终尺寸会压到 `16px` 倍数且总像素不超过 `8,294,400`，例如 `4k + 1:1` 为 `2880x2880`
 - 直接生成和后台任务请求体都支持 `referenceImageUrls`，前端传已上传到后端的图片 URL JSON 数组，最多 6 张
-- 直接生成响应包含 `taskId` 和 `url`；用户关闭网页不会取消已入队任务，完成后仍可在历史记录中通过 `taskId` / `resultUrls` 找回图片
-- 请求体传入的 `modelCode` 是业务模型编码，后端按 `ai_image_model_config.model_code` + `resolutionCode` 命中配置行，并把数据库 `provider_model` 原样作为上游 `model` 参数；图生图 `/images/edits` 也必须遵循该约束
-- 生成图片保存到服务器静态目录 `wwwroot/ai-images/{yyyyMM}/`，响应返回可访问的 `url`
+- 直接生成响应包含 `taskId`、`taskIds` 和 `url`；创建接口返回首个 `id` 和完整 `ids`。用户关闭网页不会取消已入队任务，完成后仍可在历史记录中找回图片
+- 请求体传入的 `modelCode` 是业务模型编码，后端按 `model_code` + `resolution_code` 分别解析 `route_role=primary/fallback`；每条路由自己的 `provider_model` 会原样作为上游 `model` 参数
+- GPT 主备地址、Key、Provider 模型和请求路径统一保存在 `ai_image_model_config`。主备均启用时先主后备；禁用主路由后会直接使用备用路由
+- AI 上传图和生成图保存在 `private-media/ai`（不在 `wwwroot`）；响应 URL 使用 `/api/media/ai/...`，下载时必须携带 Access Token
 - 后台任务完成后，`GET /api/ai/images` 和 `GET /api/ai/images/{id}` 返回 `resultUrls` 图片 URL 数组、`favoriteUrls` 当前用户已收藏的结果图 URL 数组，以及 `isFavorite` 是否存在收藏；列表接口会隐藏已写入错误信息且 `resultUrls` 为空的任务，详情接口仍可按 id 查询；`ai_image_task.result_urls` 保存图片 URL 的 JSON 数组，`ai_image_task.reference_image_urls` 保存参考图 URL 的 JSON 数组
-- 收藏接口请求体示例：`{ "imageUrl": "/ai-images/202606/xxx.png", "isFavorite": true }`；取消收藏传 `isFavorite=false`，`imageUrl` 必须属于该任务的 `resultUrls`
+- 收藏接口请求体示例：`{ "imageUrl": "/api/media/ai/tasks/202608/xxx.png", "isFavorite": true }`；取消收藏传 `isFavorite=false`，`imageUrl` 必须属于该任务的 `resultUrls`
 
 
 - 启动时可能出现 `DataProtection` 的 DPAPI / 文件权限告警
   - 当前不影响 API 启动与本地联调
   - 若要彻底消除，需要单独调整密钥持久化目录或开发环境 DataProtection 策略
-- 本机 `localhost:6379` 当前只确认到端口可连接，尚未完成稳定的 Redis `PING/SET/GET` 实写验证
-  - 现阶段只能确认“项目已接入本地 Redis 配置”，不能确认“本地 Redis 实例已经可正常读写”
+- 2026-08-08 已完成一次本地 Redis `PING/SET/GET` 和 Refresh Token Lua 集成测试；仍需在完整登录链路中继续验收权限缓存键与长期稳定性
   - 如果要做完整验收，需要先把本机 Redis 实例自身校验清楚，再确认登录后 refresh token / 权限缓存键写入
 - 设计书存在明显编码异常，实际实现应以当前代码和接口为准
 

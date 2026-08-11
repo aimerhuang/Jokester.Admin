@@ -20,7 +20,10 @@ public sealed class RedisPermissionCacheInvalidator(
         }
         catch (RedisConnectionException ex)
         {
-            logger.LogWarning(ex, "Redis unavailable when removing permission cache for user {UserId}.", userId);
+            logger.LogWarning(
+                "Redis unavailable when removing permission cache. UserId={UserId}, FailureType={FailureType}",
+                userId,
+                ex.GetType().Name);
         }
     }
 
@@ -39,7 +42,9 @@ public sealed class RedisPermissionCacheInvalidator(
         }
         catch (RedisConnectionException ex)
         {
-            logger.LogWarning(ex, "Redis unavailable when clearing permission cache.");
+            logger.LogWarning(
+                "Redis unavailable when clearing permission cache. FailureType={FailureType}",
+                ex.GetType().Name);
         }
     }
 }

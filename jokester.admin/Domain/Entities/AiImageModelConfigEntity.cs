@@ -21,7 +21,10 @@ public sealed class AiImageModelConfigEntity
     public string ProviderModel { get; set; } = string.Empty;
 
     [SugarColumn(ColumnName = "resolution_code")]
-    public string? ResolutionCode { get; set; }
+    public string ResolutionCode { get; set; } = string.Empty;
+
+    [SugarColumn(ColumnName = "route_role")]
+    public string RouteRole { get; set; } = "primary";
 
     [SugarColumn(ColumnName = "base_url")]
     public string BaseUrl { get; set; } = string.Empty;

@@ -4,6 +4,9 @@
         <name>jokester.admin</name>
     </assembly>
     <members>
+        <member name="M:jokester.admin.Application.Abstractions.IRefreshTokenStore.ConsumeAsync(System.String,System.Threading.CancellationToken)">
+            <summary>Atomically consumes a token and detects reuse of an already-consumed token.</summary>
+        </member>
         <member name="T:jokester.admin.Application.DTOs.Auth.LoginRequest">
             <summary>
             登录请求。
@@ -134,6 +137,11 @@
             用户昵称。
             </summary>
         </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.UserProfileDto.Email">
+            <summary>
+            用户邮箱。
+            </summary>
+        </member>
         <member name="P:jokester.admin.Application.DTOs.Auth.UserProfileDto.AvatarUrl">
             <summary>
             头像地址。
@@ -204,6 +212,16 @@
             站点 ID。
             </summary>
         </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogArticleDto.CategoryId">
+            <summary>
+            分类 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.BlogArticleDto.CategoryName">
+            <summary>
+            分类名称。
+            </summary>
+        </member>
         <member name="P:jokester.admin.Application.DTOs.Blog.BlogArticleDto.Title">
             <summary>
             文章标题。
@@ -259,6 +277,11 @@
             封面图地址。
             </summary>
         </member>
+        <member name="P:jokester.admin.Application.DTOs.Blog.SaveBlogArticleRequest.CategoryId">
+            <summary>
+            分类 ID。
+            </summary>
+        </member>
         <member name="P:jokester.admin.Application.DTOs.Blog.SaveBlogArticleRequest.Tags">
             <summary>
             标签，多个标签用逗号分隔。
@@ -292,6 +315,16 @@
         <member name="P:jokester.admin.Application.DTOs.Blog.BlogCaptchaDto.ExpiresInSeconds">
             <summary>
             有效期，单位秒。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Blog.BlogCategoryDto">
+            <summary>
+            博客分类信息。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Blog.SaveBlogCategoryRequest">
+            <summary>
+            保存博客分类请求。
             </summary>
         </member>
         <member name="T:jokester.admin.Application.DTOs.Blog.BlogCommentQuery">
@@ -722,6 +755,26 @@
         <member name="P:jokester.admin.Application.DTOs.Blog.UploadMediaRequest.File">
             <summary>
             媒体文件。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Blog.BlogSummaryDto">
+            <summary>
+            博客首页摘要统计。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Blog.BlogLatestTitleDto">
+            <summary>
+            最新博客标题。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Blog.BlogLatestCommentDto">
+            <summary>
+            最新博客评论。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Blog.BlogSiteInfoDto">
+            <summary>
+            博客网站信息。
             </summary>
         </member>
         <member name="T:jokester.admin.Application.DTOs.Common.PageQuery">
@@ -1789,6 +1842,29 @@
             创建时间。
             </summary>
         </member>
+        <member name="M:jokester.admin.Application.Services.PromptLibraryImageStore.GeneratedFileNameRegex">
+            <remarks>
+            Pattern:<br/>
+            <code>^\\d+-(?&lt;hash&gt;[0-9a-f]{12})\\.(?&lt;extension&gt;jpg|png|webp)$</code><br/>
+            Options:<br/>
+            <code>RegexOptions.CultureInvariant</code><br/>
+            Explanation:<br/>
+            <code>
+            ○ Match if at the beginning of the string.<br/>
+            ○ Match a Unicode digit atomically at least once.<br/>
+            ○ Match '-'.<br/>
+            ○ "hash" capture group.<br/>
+                ○ Match a lowercase hexadecimal digit exactly 12 times.<br/>
+            ○ Match '.'.<br/>
+            ○ "extension" capture group.<br/>
+                ○ Match with 3 alternative expressions.<br/>
+                    ○ Match the string "jpg".<br/>
+                    ○ Match the string "png".<br/>
+                    ○ Match the string "webp".<br/>
+            ○ Match if at the end of the string or if before an ending newline.<br/>
+            </code>
+            </remarks>
+        </member>
         <member name="T:jokester.admin.Common.ApiResponse">
             <summary>
             通用接口响应。
@@ -1947,7 +2023,7 @@
             用户登出。
             </summary>
             <remarks>
-            RefreshToken 可通过 X-Refresh-Token 请求头或 refreshToken 查询参数传入。
+            RefreshToken 仅通过 X-Refresh-Token 请求头传入，避免出现在 URL 和访问日志中。
             </remarks>
         </member>
         <member name="M:jokester.admin.Controllers.AuthController.Profile(System.Threading.CancellationToken)">
@@ -1960,7 +2036,7 @@
             分页查询博客文章。
             </summary>
             <remarks>
-            公开接口；博客文章固定归属 siteCode=blog，可按状态和关键词筛选。
+            匿名调用只返回已发布文章；登录后的后台调用可按状态和关键词筛选。
             </remarks>
         </member>
         <member name="M:jokester.admin.Controllers.BlogArticlesController.GetById(System.Int64,System.Threading.CancellationToken)">
@@ -1992,6 +2068,26 @@
         <member name="M:jokester.admin.Controllers.BlogArticlesController.Publish(System.Int64,System.Threading.CancellationToken)">
             <summary>
             发布博客文章。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.BlogCategoriesController.GetList(System.Threading.CancellationToken)">
+            <summary>
+            获取博客分类列表。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.BlogCategoriesController.Create(jokester.admin.Application.DTOs.Blog.SaveBlogCategoryRequest,System.Threading.CancellationToken)">
+            <summary>
+            新增博客分类。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.BlogCategoriesController.Update(System.Int64,jokester.admin.Application.DTOs.Blog.SaveBlogCategoryRequest,System.Threading.CancellationToken)">
+            <summary>
+            编辑博客分类。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.BlogCategoriesController.Delete(System.Int64,System.Threading.CancellationToken)">
+            <summary>
+            删除博客分类。
             </summary>
         </member>
         <member name="M:jokester.admin.Controllers.BlogCommentsController.Captcha(System.Threading.CancellationToken)">
@@ -2065,6 +2161,26 @@
             删除博客媒体。
             </summary>
         </member>
+        <member name="M:jokester.admin.Controllers.BlogReadController.Summary(System.Threading.CancellationToken)">
+            <summary>
+            获取博客汇总信息。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.BlogReadController.LatestTitles(System.Int32,System.Threading.CancellationToken)">
+            <summary>
+            获取最新博客标题。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.BlogReadController.LatestComments(System.Int32,System.Threading.CancellationToken)">
+            <summary>
+            获取最新评论。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.BlogReadController.SiteInfo(System.Threading.CancellationToken)">
+            <summary>
+            获取博客网站信息。
+            </summary>
+        </member>
         <member name="M:jokester.admin.Controllers.LogsController.GetLoginLogs(jokester.admin.Application.DTOs.Logs.LoginLogQuery,System.Threading.CancellationToken)">
             <summary>
             分页查询登录日志。
@@ -2126,6 +2242,26 @@
             <remarks>
             状态：1=启用，0=禁用。
             </remarks>
+        </member>
+        <member name="M:jokester.admin.Controllers.PointRechargeController.GetPackages(System.Threading.CancellationToken)">
+            <summary>
+            查询当前可购买的积分套餐。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.PointRechargeController.CreateOrder(jokester.admin.Application.DTOs.Points.CreateRechargeOrderRequest,System.Threading.CancellationToken)">
+            <summary>
+            创建待支付充值订单。支付完成后由管理员或支付回调发放兑换码。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.PointRechargeController.Redeem(jokester.admin.Application.DTOs.Points.RedeemPointCodeRequest,System.Threading.CancellationToken)">
+            <summary>
+            核销一次性兑换码并增加当前用户积分。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.PointRechargeController.IssueCodes(jokester.admin.Application.DTOs.Points.IssuePointRedeemCodesRequest,System.Threading.CancellationToken)">
+            <summary>
+            超级管理员批量签发兑换码；传 orderNo 时同时确认并履约该订单。
+            </summary>
         </member>
         <member name="M:jokester.admin.Controllers.PointsController.GetBalance(System.Threading.CancellationToken)">
             <summary>
@@ -2278,10 +2414,96 @@
             删除用户。
             </summary>
         </member>
-        <member name="T:Program">
-            <summary>
-            Auto-generated public partial Program class for top-level statement apps.
-            </summary>
+        <member name="M:jokester.admin.Infrastructure.PromptLibraryOptionsValidator.SourceCodeRegex">
+            <remarks>
+            Pattern:<br/>
+            <code>^[a-z0-9][a-z0-9-]*$</code><br/>
+            Options:<br/>
+            <code>RegexOptions.CultureInvariant</code><br/>
+            Explanation:<br/>
+            <code>
+            ○ Match if at the beginning of the string.<br/>
+            ○ Match a character in the set [0-9a-z].<br/>
+            ○ Match a character in the set [\-0-9a-z] atomically any number of times.<br/>
+            ○ Match if at the end of the string or if before an ending newline.<br/>
+            </code>
+            </remarks>
+        </member>
+        <member name="T:System.Text.RegularExpressions.Generated.GeneratedFileNameRegex_0">
+            <summary>Custom <see cref="T:System.Text.RegularExpressions.Regex"/>-derived type for the GeneratedFileNameRegex method.</summary>
+        </member>
+        <member name="F:System.Text.RegularExpressions.Generated.GeneratedFileNameRegex_0.Instance">
+            <summary>Cached, thread-safe singleton instance.</summary>
+        </member>
+        <member name="M:System.Text.RegularExpressions.Generated.GeneratedFileNameRegex_0.#ctor">
+            <summary>Initializes the instance.</summary>
+        </member>
+        <member name="T:System.Text.RegularExpressions.Generated.GeneratedFileNameRegex_0.RunnerFactory">
+            <summary>Provides a factory for creating <see cref="T:System.Text.RegularExpressions.RegexRunner"/> instances to be used by methods on <see cref="T:System.Text.RegularExpressions.Regex"/>.</summary>
+        </member>
+        <member name="M:System.Text.RegularExpressions.Generated.GeneratedFileNameRegex_0.RunnerFactory.CreateInstance">
+            <summary>Creates an instance of a <see cref="T:System.Text.RegularExpressions.RegexRunner"/> used by methods on <see cref="T:System.Text.RegularExpressions.Regex"/>.</summary>
+        </member>
+        <member name="T:System.Text.RegularExpressions.Generated.GeneratedFileNameRegex_0.RunnerFactory.Runner">
+            <summary>Provides the runner that contains the custom logic implementing the specified regular expression.</summary>
+        </member>
+        <member name="M:System.Text.RegularExpressions.Generated.GeneratedFileNameRegex_0.RunnerFactory.Runner.Scan(System.ReadOnlySpan{System.Char})">
+            <summary>Scan the <paramref name="inputSpan"/> starting from base.runtextstart for the next match.</summary>
+            <param name="inputSpan">The text being scanned by the regular expression.</param>
+        </member>
+        <member name="M:System.Text.RegularExpressions.Generated.GeneratedFileNameRegex_0.RunnerFactory.Runner.TryFindNextPossibleStartingPosition(System.ReadOnlySpan{System.Char})">
+            <summary>Search <paramref name="inputSpan"/> starting from base.runtextpos for the next location a match could possibly start.</summary>
+            <param name="inputSpan">The text being scanned by the regular expression.</param>
+            <returns>true if a possible match was found; false if no more matches are possible.</returns>
+        </member>
+        <member name="M:System.Text.RegularExpressions.Generated.GeneratedFileNameRegex_0.RunnerFactory.Runner.TryMatchAtCurrentPosition(System.ReadOnlySpan{System.Char})">
+            <summary>Determine whether <paramref name="inputSpan"/> at base.runtextpos is a match for the regular expression.</summary>
+            <param name="inputSpan">The text being scanned by the regular expression.</param>
+            <returns>true if the regular expression matches at the current position; otherwise, false.</returns>
+        </member>
+        <member name="T:System.Text.RegularExpressions.Generated.SourceCodeRegex_1">
+            <summary>Custom <see cref="T:System.Text.RegularExpressions.Regex"/>-derived type for the SourceCodeRegex method.</summary>
+        </member>
+        <member name="F:System.Text.RegularExpressions.Generated.SourceCodeRegex_1.Instance">
+            <summary>Cached, thread-safe singleton instance.</summary>
+        </member>
+        <member name="M:System.Text.RegularExpressions.Generated.SourceCodeRegex_1.#ctor">
+            <summary>Initializes the instance.</summary>
+        </member>
+        <member name="T:System.Text.RegularExpressions.Generated.SourceCodeRegex_1.RunnerFactory">
+            <summary>Provides a factory for creating <see cref="T:System.Text.RegularExpressions.RegexRunner"/> instances to be used by methods on <see cref="T:System.Text.RegularExpressions.Regex"/>.</summary>
+        </member>
+        <member name="M:System.Text.RegularExpressions.Generated.SourceCodeRegex_1.RunnerFactory.CreateInstance">
+            <summary>Creates an instance of a <see cref="T:System.Text.RegularExpressions.RegexRunner"/> used by methods on <see cref="T:System.Text.RegularExpressions.Regex"/>.</summary>
+        </member>
+        <member name="T:System.Text.RegularExpressions.Generated.SourceCodeRegex_1.RunnerFactory.Runner">
+            <summary>Provides the runner that contains the custom logic implementing the specified regular expression.</summary>
+        </member>
+        <member name="M:System.Text.RegularExpressions.Generated.SourceCodeRegex_1.RunnerFactory.Runner.Scan(System.ReadOnlySpan{System.Char})">
+            <summary>Scan the <paramref name="inputSpan"/> starting from base.runtextstart for the next match.</summary>
+            <param name="inputSpan">The text being scanned by the regular expression.</param>
+        </member>
+        <member name="M:System.Text.RegularExpressions.Generated.SourceCodeRegex_1.RunnerFactory.Runner.TryFindNextPossibleStartingPosition(System.ReadOnlySpan{System.Char})">
+            <summary>Search <paramref name="inputSpan"/> starting from base.runtextpos for the next location a match could possibly start.</summary>
+            <param name="inputSpan">The text being scanned by the regular expression.</param>
+            <returns>true if a possible match was found; false if no more matches are possible.</returns>
+        </member>
+        <member name="M:System.Text.RegularExpressions.Generated.SourceCodeRegex_1.RunnerFactory.Runner.TryMatchAtCurrentPosition(System.ReadOnlySpan{System.Char})">
+            <summary>Determine whether <paramref name="inputSpan"/> at base.runtextpos is a match for the regular expression.</summary>
+            <param name="inputSpan">The text being scanned by the regular expression.</param>
+            <returns>true if the regular expression matches at the current position; otherwise, false.</returns>
+        </member>
+        <member name="T:System.Text.RegularExpressions.Generated.Utilities">
+            <summary>Helper methods used by generated <see cref="T:System.Text.RegularExpressions.Regex"/>-derived implementations.</summary>
+        </member>
+        <member name="F:System.Text.RegularExpressions.Generated.Utilities.s_defaultTimeout">
+            <summary>Default timeout value set in <see cref="T:System.AppContext"/>, or <see cref="F:System.Text.RegularExpressions.Regex.InfiniteMatchTimeout"/> if none was set.</summary>
+        </member>
+        <member name="F:System.Text.RegularExpressions.Generated.Utilities.s_hasTimeout">
+            <summary>Whether <see cref="F:System.Text.RegularExpressions.Generated.Utilities.s_defaultTimeout"/> is non-infinite.</summary>
+        </member>
+        <member name="F:System.Text.RegularExpressions.Generated.Utilities.s_asciiLettersLowerAndDigitsAndDash">
+            <summary>Supports searching for characters in or not in "-0123456789abcdefghijklmnopqrstuvwxyz".</summary>
         </member>
     </members>
 </doc>

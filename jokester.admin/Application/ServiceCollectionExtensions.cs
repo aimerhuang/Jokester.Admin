@@ -1,7 +1,11 @@
 using jokester.admin.Application.Abstractions;
 using jokester.admin.Application.Security;
 using jokester.admin.Application.Services;
+using jokester.admin.Infrastructure;
+using jokester.admin.Infrastructure.PromptLibrary;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
+using System.Net;
 
 namespace jokester.admin.Application;
 
@@ -25,8 +29,53 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IBlogReadService, BlogReadService>();
         services.AddSingleton<IBlogCaptchaService, BlogCaptchaService>();
         services.AddSingleton<IAiImageTaskQueue, AiImageTaskQueue>();
+        services.AddSingleton<IAiImageAdmissionService, AiImageAdmissionService>();
+        services.AddSingleton<IAiImageProviderGate, AiImageProviderGate>();
+        services.AddSingleton<IAiPromptFilter, AiPromptFilterService>();
         services.AddScoped<IAiImageTaskProcessor, AiImageTaskProcessor>();
         services.AddHostedService<AiImageTaskWorker>();
+        services.AddHostedService<AiImageTaskRecoveryWorker>();
+        services.AddHostedService<AiPromptFilterRefreshWorker>();
+        services.AddSingleton<IPromptLibrarySyncQueue, PromptLibrarySyncQueue>();
+        services.AddHostedService<PromptLibrarySyncWorker>();
+        services.AddHttpClient<IPromptLibraryImageStore, PromptLibraryImageStore>(client =>
+            {
+                client.Timeout = Timeout.InfiniteTimeSpan;
+                client.DefaultRequestHeaders.UserAgent.ParseAdd("Jokester-PromptLibrarySync/1.0");
+            })
+            .ConfigurePrimaryHttpMessageHandler(serviceProvider =>
+            {
+                var options = serviceProvider.GetRequiredService<IOptions<PromptLibraryOptions>>().Value;
+                return new SocketsHttpHandler
+                {
+                    AllowAutoRedirect = false,
+                    ConnectTimeout = TimeSpan.FromSeconds(options.ConnectTimeoutSeconds),
+                    Proxy = string.IsNullOrWhiteSpace(options.HttpProxy)
+                        ? null
+                        : new WebProxy(options.HttpProxy),
+                    UseProxy = !string.IsNullOrWhiteSpace(options.HttpProxy),
+                    AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
+                };
+            });
+        services.AddHttpClient<IPromptLibrarySourceClient, YouMarketingPromptSourceClient>(client =>
+            {
+                client.Timeout = Timeout.InfiniteTimeSpan;
+                client.DefaultRequestHeaders.UserAgent.ParseAdd("Jokester-PromptLibrarySync/1.0");
+            })
+            .ConfigurePrimaryHttpMessageHandler(serviceProvider =>
+            {
+                var options = serviceProvider.GetRequiredService<IOptions<PromptLibraryOptions>>().Value;
+                return new SocketsHttpHandler
+                {
+                    AllowAutoRedirect = false,
+                    ConnectTimeout = TimeSpan.FromSeconds(options.ConnectTimeoutSeconds),
+                    Proxy = string.IsNullOrWhiteSpace(options.HttpProxy)
+                        ? null
+                        : new WebProxy(options.HttpProxy),
+                    UseProxy = !string.IsNullOrWhiteSpace(options.HttpProxy),
+                    AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
+                };
+            });
         services.AddHttpClient<IAiImageService, AiImageService>(client =>
         {
             client.Timeout = TimeSpan.FromMinutes(5);
@@ -36,7 +85,12 @@ public static class ServiceCollectionExtensions
             client.Timeout = TimeSpan.FromMinutes(5);
         });
         services.AddScoped<IAiImageModelConfigService, AiImageModelConfigService>();
+        services.AddScoped<IAiPromptSensitiveWordService, AiPromptSensitiveWordService>();
         services.AddScoped<IPointService, PointService>();
+        services.AddScoped<IPointRechargeService, PointRechargeService>();
+        services.AddScoped<IPromptLibraryService, PromptLibraryService>();
+        services.AddScoped<IPromptLibrarySyncAdminService, PromptLibrarySyncAdminService>();
+        services.AddScoped<IPromptLibrarySyncRunner, PromptLibrarySyncRunner>();
         services.AddScoped<ILogService, LogService>();
         services.AddScoped<ICurrentUser, CurrentUser>();
         services.AddScoped<IPasswordHasher, Pbkdf2PasswordHasher>();

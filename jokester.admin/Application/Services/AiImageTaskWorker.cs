@@ -2,19 +2,20 @@ using jokester.admin.Application.Abstractions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using jokester.admin.Infrastructure;
 
 namespace jokester.admin.Application.Services;
 
 public sealed class AiImageTaskWorker(
     IAiImageTaskQueue queue,
     IServiceScopeFactory scopeFactory,
+    IOptions<AiCostControlOptions> options,
     ILogger<AiImageTaskWorker> logger) : BackgroundService
 {
-    private const int MaxConcurrency = 1;
-
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        using var semaphore = new SemaphoreSlim(MaxConcurrency);
+        using var semaphore = new SemaphoreSlim(options.Value.MaxGlobalProviderConcurrency);
         var runningTasks = new HashSet<Task>();
 
         try
@@ -53,7 +54,10 @@ public sealed class AiImageTaskWorker(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "AI image task {TaskId} failed in background worker.", taskId);
+            logger.LogError(
+                "AI image task failed in background worker. TaskId={TaskId}, FailureType={FailureType}",
+                taskId,
+                ex.GetType().Name);
         }
         finally
         {

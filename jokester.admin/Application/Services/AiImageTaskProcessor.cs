@@ -2,6 +2,7 @@ using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using jokester.admin.Application.Abstractions;
 using jokester.admin.Application.DTOs.AiImages;
+using jokester.admin.Application.Models.AiPromptFilter;
 using jokester.admin.Common;
 using jokester.admin.Common.Exceptions;
 using jokester.admin.Domain.Entities;
@@ -14,19 +15,36 @@ public sealed class AiImageTaskProcessor(
     ISqlSugarClient db,
     IServiceScopeFactory scopeFactory,
     IPointService pointService,
+    IAiImageAdmissionService admissionService,
+    IAiImageProviderGate providerGate,
+    IAiPromptFilter promptFilter,
     ILogger<AiImageTaskProcessor> logger) : IAiImageTaskProcessor
 {
-    private const int MinutesPerImage = 3;
+    private const int MinutesPerImage = 5;
     private const int MaxTaskTimeoutMinutes = 10;
+    private const int PendingTaskTimeoutMinutes = 120;
     private const int MaxImageGenerationConcurrency = 4;
     private const string GenericGenerationFailureMessage = "图片生成服务暂时不可用，请稍后重试。";
 
     public async Task ProcessAsync(long taskId, CancellationToken cancellationToken)
     {
-        var task = await db.Queryable<AiImageTaskEntity>()
-            .FirstAsync(x => x.Id == taskId && !x.IsDeleted, cancellationToken);
+        var claimed = await db.Updateable<AiImageTaskEntity>()
+            .SetColumns(x => new AiImageTaskEntity
+            {
+                Status = 3,
+                StartedAt = HongKongNow(),
+                UpdatedAt = HongKongNow()
+            })
+            .Where(x => x.Id == taskId && !x.IsDeleted && x.Status == 0 && x.BillingStatus == 0)
+            .ExecuteCommandAsync(cancellationToken);
+        if (claimed != 1)
+        {
+            return;
+        }
 
-        if (task is null || task.Status != 0)
+        var task = await db.Queryable<AiImageTaskEntity>()
+            .FirstAsync(x => x.Id == taskId && !x.IsDeleted && x.Status == 3, cancellationToken);
+        if (task is null)
         {
             return;
         }
@@ -37,6 +55,23 @@ public sealed class AiImageTaskProcessor(
             using var taskTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             taskTimeout.CancelAfter(ResolveTaskTimeout(task.ImageCount));
             var taskToken = taskTimeout.Token;
+
+            task.PromptPolicyVersion = await promptFilter.EnsureAllAllowedAsync(
+                [
+                    new AiPromptFilterText("prompt", task.Prompt),
+                    new AiPromptFilterText("negativePrompt", task.NegativePrompt)
+                ],
+                taskToken);
+            task.PromptCheckedAt = HongKongNow();
+            await db.Updateable<AiImageTaskEntity>()
+                .SetColumns(x => new AiImageTaskEntity
+                {
+                    PromptPolicyVersion = task.PromptPolicyVersion,
+                    PromptCheckedAt = task.PromptCheckedAt,
+                    UpdatedAt = task.PromptCheckedAt
+                })
+                .Where(x => x.Id == task.Id && !x.IsDeleted && x.Status == 3)
+                .ExecuteCommandAsync(taskToken);
 
             var modelCode = AiImageModelConfigService.NormalizeModelCode(task.ModelName);
             if (AiImageModelConfigService.IsNanoBananaModel(modelCode))
@@ -60,16 +95,17 @@ public sealed class AiImageTaskProcessor(
                     taskToken);
             }
 
-            await db.Updateable<AiImageTaskEntity>()
-                .SetColumns(x => new AiImageTaskEntity
-                {
-                    Status = 1,
-                    ResultUrls = JsonSerializer.Serialize(results),
-                    ErrorMessage = null,
-                    UpdatedAt = HongKongNow()
-                })
-                .Where(x => x.Id == taskId && !x.IsDeleted && x.Status == 0)
-                .ExecuteCommandAsync(CancellationToken.None);
+            var settlement = await pointService.SettleImageTaskAsync(
+                task.Id,
+                1,
+                JsonSerializer.Serialize(results),
+                null,
+                results.Count,
+                CancellationToken.None);
+            if (settlement.Transitioned)
+            {
+                await admissionService.CompleteAsync(task, settlement.CompletedImageCount, settlement.RefundedPoints);
+            }
         }
         catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
         {
@@ -87,6 +123,8 @@ public sealed class AiImageTaskProcessor(
         return TimeSpan.FromMinutes(minutes);
     }
 
+    public static TimeSpan ResolvePendingTaskTimeout() => TimeSpan.FromMinutes(PendingTaskTimeoutMinutes);
+
     private async Task PersistPartialResultsAsync(long taskId, IReadOnlyList<string> results, CancellationToken cancellationToken)
     {
         if (results.Count == 0)
@@ -100,7 +138,7 @@ public sealed class AiImageTaskProcessor(
                 ResultUrls = JsonSerializer.Serialize(results),
                 UpdatedAt = HongKongNow()
             })
-            .Where(x => x.Id == taskId && !x.IsDeleted && x.Status == 0)
+            .Where(x => x.Id == taskId && !x.IsDeleted && x.Status == 3)
             .ExecuteCommandAsync(cancellationToken);
     }
 
@@ -151,7 +189,7 @@ public sealed class AiImageTaskProcessor(
         }
     }
 
-    private static async Task<string> GenerateImageWithConcurrencyAsync(
+    private async Task<string> GenerateImageWithConcurrencyAsync(
         Func<CancellationToken, Task<string>> generateImageAsync,
         SemaphoreSlim semaphore,
         CancellationToken cancellationToken)
@@ -159,7 +197,22 @@ public sealed class AiImageTaskProcessor(
         await semaphore.WaitAsync(cancellationToken);
         try
         {
-            return await generateImageAsync(cancellationToken);
+            await using var providerLease = await providerGate.AcquireAsync(cancellationToken);
+            try
+            {
+                var result = await generateImageAsync(cancellationToken);
+                await providerGate.ReportSuccessAsync();
+                return result;
+            }
+            catch (Exception ex) when (ex is AiPromptRejectedException or AiPromptFilterUnavailableException)
+            {
+                throw;
+            }
+            catch
+            {
+                await providerGate.ReportFailureAsync();
+                throw;
+            }
         }
         finally
         {
@@ -186,6 +239,7 @@ public sealed class AiImageTaskProcessor(
             },
             referenceImageUrls,
             task.MaskImageUrl,
+            task.UserId,
             cancellationToken);
 
         return response.Url;
@@ -202,6 +256,7 @@ public sealed class AiImageTaskProcessor(
             task.AspectRatioCode,
             task.Size,
             imageUrls,
+            task.UserId,
             cancellationToken);
 
         return response.Url;
@@ -244,8 +299,7 @@ public sealed class AiImageTaskProcessor(
     private async Task MarkFailedAsync(AiImageTaskEntity task, Exception ex, IReadOnlyList<string> results, CancellationToken cancellationToken)
     {
         logger.LogError(
-            ex,
-            "AI image task failed. TaskId={TaskId}, UserId={UserId}, ModelName={ModelName}, ResolutionCode={ResolutionCode}, QualityCode={QualityCode}, AspectRatioCode={AspectRatioCode}, Size={Size}, ImageCount={ImageCount}, CompletedImageCount={CompletedImageCount}, ReferenceImageUrls={ReferenceImageUrls}, MaskImageUrl={MaskImageUrl}",
+            "AI image task failed. TaskId={TaskId}, UserId={UserId}, ModelName={ModelName}, ResolutionCode={ResolutionCode}, QualityCode={QualityCode}, AspectRatioCode={AspectRatioCode}, Size={Size}, ImageCount={ImageCount}, CompletedImageCount={CompletedImageCount}, FailureType={FailureType}",
             task.Id,
             task.UserId,
             task.ModelName,
@@ -255,8 +309,7 @@ public sealed class AiImageTaskProcessor(
             task.Size,
             task.ImageCount,
             results.Count,
-            task.ReferenceImageUrls,
-            task.MaskImageUrl);
+            ex.GetType().Name);
 
         var message = SanitizeFailureMessage(ex);
         if (message.Length > 1000)
@@ -266,45 +319,20 @@ public sealed class AiImageTaskProcessor(
 
         var latestTask = await db.Queryable<AiImageTaskEntity>()
             .FirstAsync(x => x.Id == task.Id && !x.IsDeleted, cancellationToken);
-        if (latestTask is null || latestTask.Status != 0)
+        var mergedResults = MergeImageUrls(
+            DeserializeImageUrls(latestTask?.ResultUrls),
+            results);
+        var settlement = await pointService.SettleImageTaskAsync(
+            task.Id,
+            2,
+            mergedResults.Count == 0 ? latestTask?.ResultUrls : JsonSerializer.Serialize(mergedResults),
+            message,
+            mergedResults.Count,
+            cancellationToken);
+        if (settlement.Transitioned)
         {
-            return;
+            await admissionService.CompleteAsync(task, settlement.CompletedImageCount, settlement.RefundedPoints);
         }
-
-        var mergedResults = MergeImageUrls(DeserializeImageUrls(latestTask.ResultUrls), results);
-        var affected = mergedResults.Count > 0
-            ? await db.Updateable<AiImageTaskEntity>()
-                .SetColumns(x => new AiImageTaskEntity
-                {
-                    Status = 2,
-                    ErrorMessage = message,
-                    ResultUrls = JsonSerializer.Serialize(mergedResults),
-                    UpdatedAt = HongKongNow()
-                })
-                .Where(x => x.Id == task.Id && !x.IsDeleted && x.Status == 0)
-                .ExecuteCommandAsync(cancellationToken)
-            : await db.Updateable<AiImageTaskEntity>()
-                .SetColumns(x => new AiImageTaskEntity
-                {
-                    Status = 2,
-                    ErrorMessage = message,
-                    UpdatedAt = HongKongNow()
-                })
-                .Where(x => x.Id == task.Id && !x.IsDeleted && x.Status == 0)
-                .ExecuteCommandAsync(cancellationToken);
-        if (affected == 0)
-        {
-            return;
-        }
-
-        var failedImageCount = Math.Max(0, task.ImageCount - mergedResults.Count);
-        if (failedImageCount == 0)
-        {
-            return;
-        }
-
-        var refundPoints = await ResolveTaskCostAsync(task, failedImageCount, cancellationToken);
-        await pointService.RefundForImageAsync(task.UserId, task.Id, refundPoints, cancellationToken);
     }
 
     private static IReadOnlyList<string> MergeImageUrls(params IReadOnlyList<string>[] urlLists)
@@ -321,6 +349,8 @@ public sealed class AiImageTaskProcessor(
     {
         return ex switch
         {
+            AiPromptRejectedException => "提示词包含不允许的内容，任务已取消并退款。",
+            AiPromptFilterUnavailableException => GenericGenerationFailureMessage,
             AppException { Code: ErrorCodes.BadRequest } => GenericGenerationFailureMessage,
             HttpRequestException => GenericGenerationFailureMessage,
             TimeoutException => GenericGenerationFailureMessage,
@@ -334,35 +364,4 @@ public sealed class AiImageTaskProcessor(
         return DateTime.UtcNow.AddHours(8);
     }
 
-    private async Task<int> ResolveTaskCostAsync(AiImageTaskEntity task, int imageCount, CancellationToken cancellationToken)
-    {
-        if (imageCount <= 0)
-        {
-            return 0;
-        }
-
-        var modelCode = AiImageModelConfigService.NormalizeModelCode(task.ModelName);
-        var isNanoBananaModel = AiImageModelConfigService.IsNanoBananaModel(modelCode);
-        if (isNanoBananaModel)
-        {
-            var candidates = string.Equals(task.Size, task.ResolutionCode, StringComparison.OrdinalIgnoreCase)
-                ? [task.Size]
-                : new[] { task.Size, task.ResolutionCode };
-
-            foreach (var resolutionCode in candidates)
-            {
-                try
-                {
-                    return await pointService.GetImageGenerateCostAsync(modelCode, resolutionCode, string.Empty, imageCount, cancellationToken);
-                }
-                catch (AppException ex) when (ex.Code == ErrorCodes.BadRequest)
-                {
-                }
-            }
-
-            return 0;
-        }
-
-        return await pointService.GetImageGenerateCostAsync(modelCode, task.ResolutionCode, task.QualityCode, imageCount, cancellationToken);
-    }
 }

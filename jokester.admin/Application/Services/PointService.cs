@@ -12,28 +12,40 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
     private const int SignInGiftPoints = 25;
     private const string SignInSource = "sign_in";
     private const string ImageGenerateSource = "image_generate";
+    private const string ImageRefundSource = "image_refund";
 
     public async Task<PointBalanceDto> GetBalanceAsync(CancellationToken cancellationToken)
     {
         var userId = currentUser.UserId ?? throw new AppException(ErrorCodes.Unauthorized, "User is not authenticated");
-        var user = await db.Queryable<SysUserEntity>()
-            .FirstAsync(x => x.Id == userId && !x.IsDeleted, cancellationToken);
-        if (user is null)
+        await db.Ado.BeginTranAsync();
+        try
         {
-            throw new AppException(ErrorCodes.Unauthorized, "User is not authenticated");
+            var user = await db.Queryable<SysUserEntity>()
+                .TranLock(DbLockType.Wait)
+                .FirstAsync(x => x.Id == userId && !x.IsDeleted, cancellationToken);
+            if (user is null)
+            {
+                throw new AppException(ErrorCodes.Unauthorized, "User is not authenticated");
+            }
+
+            var todayStart = DateTime.Today;
+            await ExpirePreviousSignInPointsAsync(user, todayStart, cancellationToken);
+            var tomorrowStart = todayStart.AddDays(1);
+            var hasSignedInToday = await HasSignedInAsync(userId, todayStart, tomorrowStart, cancellationToken);
+
+            await db.Ado.CommitTranAsync();
+            return new PointBalanceDto
+            {
+                AvailablePoints = user.PointBalance,
+                HasSignedInToday = hasSignedInToday,
+                TodaySignInPoints = hasSignedInToday ? SignInGiftPoints : 0
+            };
         }
-
-        var todayStart = DateTime.Today;
-        await ExpirePreviousSignInPointsAsync(user, todayStart, cancellationToken);
-        var tomorrowStart = todayStart.AddDays(1);
-        var hasSignedInToday = await HasSignedInAsync(userId, todayStart, tomorrowStart, cancellationToken);
-
-        return new PointBalanceDto
+        catch
         {
-            AvailablePoints = user.PointBalance,
-            HasSignedInToday = hasSignedInToday,
-            TodaySignInPoints = hasSignedInToday ? SignInGiftPoints : 0
-        };
+            await db.Ado.RollbackTranAsync();
+            throw;
+        }
     }
 
     public async Task<SignInPointResponse> SignInAsync(CancellationToken cancellationToken)
@@ -48,6 +60,7 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
         try
         {
             var user = await db.Queryable<SysUserEntity>()
+                .TranLock(DbLockType.Wait)
                 .FirstAsync(x => x.Id == userId && !x.IsDeleted, cancellationToken);
             if (user is null)
             {
@@ -127,52 +140,128 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
         return price.Points * imageCount;
     }
 
-    public async Task ConsumeForImageAsync(long userId, long taskId, string modelCode, string resolutionCode, string qualityCode, int points, CancellationToken cancellationToken)
+    public async Task<ImageTaskReservationResult> ReserveImageTaskAsync(
+        AiImageTaskEntity task,
+        string modelCode,
+        string resolutionCode,
+        string qualityCode,
+        CancellationToken cancellationToken)
     {
-        if (points <= 0)
+        var result = await ReserveImageTasksAsync(
+            [task],
+            modelCode,
+            resolutionCode,
+            qualityCode,
+            cancellationToken);
+        return new ImageTaskReservationResult(result.TaskIds[0], result.Created);
+    }
+
+    public async Task<ImageTaskBatchReservationResult> ReserveImageTasksAsync(
+        IReadOnlyList<AiImageTaskEntity> tasks,
+        string modelCode,
+        string resolutionCode,
+        string qualityCode,
+        CancellationToken cancellationToken)
+    {
+        if (tasks.Count == 0)
         {
-            return;
+            throw new AppException(ErrorCodes.BadRequest, "At least one AI image task is required");
         }
 
-        var now = DateTime.Now;
+        var userId = tasks[0].UserId;
+        if (userId <= 0
+            || tasks.Any(task => task.UserId != userId || task.PointCost <= 0 || task.ImageCount <= 0))
+        {
+            throw new AppException(ErrorCodes.BadRequest, "AI image task billing snapshot is invalid");
+        }
+        if (tasks.Any(task => string.IsNullOrWhiteSpace(task.IdempotencyKey)
+                || string.IsNullOrWhiteSpace(task.RequestFingerprint))
+            || tasks.Select(task => task.IdempotencyKey).Distinct(StringComparer.Ordinal).Count() != tasks.Count)
+        {
+            throw new AppException(ErrorCodes.BadRequest, "AI image task idempotency snapshot is invalid");
+        }
+
+        var totalPointCost = tasks.Aggregate(0, (total, task) => checked(total + task.PointCost));
+        var idempotencyKeys = tasks.Select(task => task.IdempotencyKey).ToArray();
+
         await db.Ado.BeginTranAsync();
         try
         {
             var user = await db.Queryable<SysUserEntity>()
+                .TranLock(DbLockType.Wait)
                 .FirstAsync(x => x.Id == userId && !x.IsDeleted, cancellationToken);
             if (user is null)
             {
                 throw new NotFoundException($"用户不存在: {userId}");
             }
 
-            await ExpirePreviousSignInPointsAsync(user, DateTime.Today, cancellationToken);
-            if (user.PointBalance < points)
+            var existingTasks = await db.Queryable<AiImageTaskEntity>()
+                .Where(x => x.UserId == userId && idempotencyKeys.Contains(x.IdempotencyKey))
+                .ToListAsync(cancellationToken);
+            if (existingTasks.Count > 0)
             {
-                throw new AppException(ErrorCodes.BadRequest, $"积分不足，需要 {points} 积分，当前可用 {user.PointBalance} 积分");
+                var existingLookup = existingTasks.ToDictionary(x => x.IdempotencyKey, StringComparer.Ordinal);
+                var orderedExistingIds = new List<long>(tasks.Count);
+                foreach (var task in tasks)
+                {
+                    if (!existingLookup.TryGetValue(task.IdempotencyKey, out var existing)
+                        || !string.Equals(existing.RequestFingerprint, task.RequestFingerprint, StringComparison.Ordinal))
+                    {
+                        throw new ConflictException("Idempotency key was already used with a different request");
+                    }
+
+                    orderedExistingIds.Add(existing.Id);
+                }
+
+                await db.Ado.CommitTranAsync();
+                return new ImageTaskBatchReservationResult(orderedExistingIds, false);
             }
 
-            var balanceAfter = user.PointBalance - points;
-            await db.Updateable<SysUserEntity>()
+            await ExpirePreviousSignInPointsAsync(user, DateTime.Today, cancellationToken);
+            if (user.PointBalance < totalPointCost)
+            {
+                throw new AppException(ErrorCodes.BadRequest, $"积分不足，需要 {totalPointCost} 积分，当前可用 {user.PointBalance} 积分");
+            }
+
+            foreach (var task in tasks)
+            {
+                task.Id = await db.Insertable(task).ExecuteReturnBigIdentityAsync();
+            }
+
+            var balanceAfter = user.PointBalance - totalPointCost;
+            var affected = await db.Updateable<SysUserEntity>()
                 .SetColumns(x => new SysUserEntity
                 {
                     PointBalance = balanceAfter,
-                    UpdatedAt = now
+                    UpdatedAt = DateTime.Now
                 })
-                .Where(x => x.Id == userId && !x.IsDeleted && x.PointBalance >= points)
+                .Where(x => x.Id == userId && !x.IsDeleted && x.PointBalance >= totalPointCost)
                 .ExecuteCommandAsync(cancellationToken);
-
-            await db.Insertable(new UserPointDetailEntity
+            if (affected != 1)
             {
-                UserId = userId,
-                ChangePoints = -points,
-                BalanceAfter = balanceAfter,
-                ChangeType = "consume",
-                Source = ImageGenerateSource,
-                Remark = $"AI 出图扣除积分，任务ID：{taskId}，模型：{modelCode}，分辨率：{resolutionCode}，画质：{qualityCode}",
-                CreatedAt = now
-            }).ExecuteCommandAsync(cancellationToken);
+                throw new AppException(ErrorCodes.BadRequest, "积分不足或积分余额已发生变化，请重试");
+            }
+
+            var runningBalance = user.PointBalance;
+            var pointDetails = tasks.Select(task =>
+            {
+                runningBalance -= task.PointCost;
+                return new UserPointDetailEntity
+                {
+                    UserId = task.UserId,
+                    ChangePoints = -task.PointCost,
+                    BalanceAfter = runningBalance,
+                    ChangeType = "consume",
+                    Source = ImageGenerateSource,
+                    BusinessKey = BuildImageBusinessKey(task.Id, "reserve"),
+                    Remark = $"AI 出图预留积分，任务ID：{task.Id}，模型：{modelCode}，分辨率：{resolutionCode}，画质：{qualityCode}",
+                    CreatedAt = DateTime.Now
+                };
+            }).ToArray();
+            await db.Insertable(pointDetails).ExecuteCommandAsync(cancellationToken);
 
             await db.Ado.CommitTranAsync();
+            return new ImageTaskBatchReservationResult(tasks.Select(task => task.Id).ToArray(), true);
         }
         catch
         {
@@ -181,63 +270,168 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
         }
     }
 
-    public async Task RefundForImageAsync(long userId, long taskId, int points, CancellationToken cancellationToken)
+    public async Task<ImageTaskSettlementResult> SettleImageTaskAsync(
+        long taskId,
+        int finalStatus,
+        string? resultUrls,
+        string? errorMessage,
+        int completedImageCount,
+        CancellationToken cancellationToken)
     {
-        if (points <= 0)
+        if (finalStatus is not 1 and not 2)
         {
-            return;
+            throw new ArgumentOutOfRangeException(nameof(finalStatus), "Final AI image task status must be success or failure");
         }
 
-        var now = DateTime.Now;
         await db.Ado.BeginTranAsync();
         try
         {
-            var user = await db.Queryable<SysUserEntity>()
-                .FirstAsync(x => x.Id == userId && !x.IsDeleted, cancellationToken);
-            if (user is null)
+            var task = await db.Queryable<AiImageTaskEntity>()
+                .TranLock(DbLockType.Wait)
+                .FirstAsync(x => x.Id == taskId && !x.IsDeleted, cancellationToken);
+            if (task is null)
             {
-                throw new NotFoundException($"用户不存在: {userId}");
+                throw new NotFoundException($"AI image task does not exist: {taskId}");
             }
 
-            var alreadyRefunded = taskId > 0 && await db.Queryable<UserPointDetailEntity>()
-                .AnyAsync(x => x.UserId == userId
-                    && x.Source == "image_refund"
-                    && x.Remark != null
-                    && x.Remark.Contains($"任务ID：{taskId}"),
-                    cancellationToken);
-            if (alreadyRefunded)
+            if (task.ImageCount <= 0)
+            {
+                throw new AppException(ErrorCodes.ServerError, "AI image task image count snapshot is invalid");
+            }
+            var normalizedCompletedCount = Math.Clamp(completedImageCount, 0, task.ImageCount);
+            if (task.BillingStatus != 0 || task.Status is 1 or 2)
             {
                 await db.Ado.CommitTranAsync();
-                return;
+                return new ImageTaskSettlementResult(
+                    task.Id,
+                    task.UserId,
+                    task.ImageCount,
+                    task.CompletedImageCount,
+                    0,
+                    false);
+            }
+            if (finalStatus == 1 && normalizedCompletedCount != task.ImageCount)
+            {
+                throw new AppException(ErrorCodes.ServerError, "A successful AI image task must contain all requested images");
             }
 
-            var balanceAfter = user.PointBalance + points;
-            await db.Updateable<SysUserEntity>()
-                .SetColumns(x => new SysUserEntity
+            var failedImageCount = task.ImageCount - normalizedCompletedCount;
+            if (task.PointCost % task.ImageCount != 0)
+            {
+                throw new AppException(ErrorCodes.ServerError, "AI image task point snapshot cannot be settled per image");
+            }
+            var pointCostPerImage = task.ImageCount > 0 ? task.PointCost / task.ImageCount : 0;
+            var refundPoints = finalStatus == 2 ? checked(pointCostPerImage * failedImageCount) : 0;
+            var billingStatus = finalStatus == 1 || refundPoints == 0
+                ? 1
+                : normalizedCompletedCount == 0 ? 3 : 2;
+
+            if (refundPoints > 0)
+            {
+                var user = await db.Queryable<SysUserEntity>()
+                    .TranLock(DbLockType.Wait)
+                    .FirstAsync(x => x.Id == task.UserId && !x.IsDeleted, cancellationToken);
+                if (user is null)
                 {
-                    PointBalance = balanceAfter,
+                    throw new NotFoundException($"用户不存在: {task.UserId}");
+                }
+
+                var balanceAfter = checked(user.PointBalance + refundPoints);
+                await db.Updateable<SysUserEntity>()
+                    .SetColumns(x => new SysUserEntity
+                    {
+                        PointBalance = balanceAfter,
+                        UpdatedAt = DateTime.Now
+                    })
+                    .Where(x => x.Id == task.UserId && !x.IsDeleted)
+                    .ExecuteCommandAsync(cancellationToken);
+
+                await db.Insertable(new UserPointDetailEntity
+                {
+                    UserId = task.UserId,
+                    ChangePoints = refundPoints,
+                    BalanceAfter = balanceAfter,
+                    ChangeType = "refund",
+                    Source = ImageRefundSource,
+                    BusinessKey = BuildImageBusinessKey(task.Id, "refund"),
+                    Remark = $"AI 出图失败返还积分，任务ID：{task.Id}，未完成图片数：{failedImageCount}",
+                    CreatedAt = DateTime.Now
+                }).ExecuteCommandAsync(cancellationToken);
+            }
+
+            var now = HongKongNow();
+            var affected = await db.Updateable<AiImageTaskEntity>()
+                .SetColumns(x => new AiImageTaskEntity
+                {
+                    Status = finalStatus,
+                    BillingStatus = billingStatus,
+                    CompletedImageCount = normalizedCompletedCount,
+                    ResultUrls = resultUrls,
+                    ErrorMessage = finalStatus == 1 ? null : errorMessage,
+                    CompletedAt = now,
                     UpdatedAt = now
                 })
-                .Where(x => x.Id == userId && !x.IsDeleted)
+                .Where(x => x.Id == task.Id && !x.IsDeleted && x.BillingStatus == 0 && (x.Status == 0 || x.Status == 3))
                 .ExecuteCommandAsync(cancellationToken);
-
-            await db.Insertable(new UserPointDetailEntity
+            if (affected != 1)
             {
-                UserId = userId,
-                ChangePoints = points,
-                BalanceAfter = balanceAfter,
-                ChangeType = "refund",
-                Source = "image_refund",
-                Remark = $"AI 出图失败返还积分，任务ID：{taskId}",
-                CreatedAt = now
-            }).ExecuteCommandAsync(cancellationToken);
+                throw new AppException(ErrorCodes.ServerError, "AI image task settlement state changed unexpectedly");
+            }
+
+            if (task.SourcePromptId.HasValue && normalizedCompletedCount > 0)
+            {
+                await IncrementSuccessfulPromptGenerationAsync(
+                    task.SourcePromptId.Value,
+                    normalizedCompletedCount,
+                    now,
+                    cancellationToken);
+            }
 
             await db.Ado.CommitTranAsync();
+            return new ImageTaskSettlementResult(
+                task.Id,
+                task.UserId,
+                task.ImageCount,
+                normalizedCompletedCount,
+                refundPoints,
+                true);
         }
         catch
         {
             await db.Ado.RollbackTranAsync();
             throw;
+        }
+    }
+
+    private async Task IncrementSuccessfulPromptGenerationAsync(
+        long promptId,
+        int completedImageCount,
+        DateTime now,
+        CancellationToken cancellationToken)
+    {
+        var metricDate = now.Date;
+        var inserted = await db.Insertable(new PromptLibraryMetricDailyEntity
+            {
+                PromptId = promptId,
+                MetricDate = metricDate,
+                SuccessfulGenerationCount = completedImageCount,
+                UpdatedAt = now
+            })
+            .MySqlIgnore()
+            .ExecuteCommandAsync(cancellationToken);
+        if (inserted == 1)
+        {
+            return;
+        }
+
+        var updated = await db.Updateable<PromptLibraryMetricDailyEntity>()
+            .SetColumns(x => x.SuccessfulGenerationCount == x.SuccessfulGenerationCount + completedImageCount)
+            .SetColumns(x => x.UpdatedAt == now)
+            .Where(x => x.PromptId == promptId && x.MetricDate == metricDate)
+            .ExecuteCommandAsync(cancellationToken);
+        if (updated != 1)
+        {
+            throw new AppException(ErrorCodes.ServerError, "Prompt generation metric could not be updated");
         }
     }
 
@@ -323,4 +517,8 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
 
         return value.Trim().ToLowerInvariant();
     }
+
+    private static string BuildImageBusinessKey(long taskId, string operation) => $"image:{taskId}:{operation}";
+
+    private static DateTime HongKongNow() => DateTime.UtcNow.AddHours(8);
 }

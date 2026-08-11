@@ -4,8 +4,12 @@ using jokester.admin.Application.Abstractions;
 using jokester.admin.Configuration;
 using jokester.admin.Infrastructure;
 using jokester.admin.Middleware;
+using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.Extensions.Options;
+using System.Net;
 
 var rootDirectory = Directory.GetCurrentDirectory();
+var isAiMediaMigration = args.Contains("--migrate-ai-media", StringComparer.OrdinalIgnoreCase);
 DotEnvConfiguration.LoadToEnvironment(
     rootDirectory,
     Path.Combine(rootDirectory, "jokester.admin"),
@@ -13,35 +17,61 @@ DotEnvConfiguration.LoadToEnvironment(
 
 var builder = WebApplication.CreateBuilder(args);
 const string CorsPolicyName = "DefaultCors";
+var swaggerEnabled = builder.Environment.IsDevelopment()
+    || builder.Configuration.GetValue<bool>("Swagger:Enabled");
 
-// 允许最大 100MB 的请求体，防止 IIS 反向代理或 Kestrel 层面返回 413
+// 上传业务上限为 10MB；仅为 multipart 边界预留少量空间。
 builder.WebHost.ConfigureKestrel(options =>
 {
-    options.Limits.MaxRequestBodySize = 100 * 1024 * 1024; // 100 MB
+    options.Limits.MaxRequestBodySize = 12 * 1024 * 1024;
 });
 
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole();
 builder.Logging.AddDebug();
 
-var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>();
+var securityOptions = builder.Configuration.GetSection(SecurityOptions.SectionName).Get<SecurityOptions>() ?? new SecurityOptions();
+if (!isAiMediaMigration && !builder.Environment.IsDevelopment() && securityOptions.AllowedOrigins.Length == 0)
+{
+    throw new InvalidOperationException("Security:AllowedOrigins must contain explicit production origins.");
+}
+if (securityOptions.AllowedOrigins.Any(origin =>
+        origin == "*"
+        || !Uri.TryCreate(origin, UriKind.Absolute, out var uri)
+        || (uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeHttp)
+        || uri.AbsolutePath != "/"
+        || !string.IsNullOrEmpty(uri.Query)
+        || !string.IsNullOrEmpty(uri.Fragment)
+        || origin.EndsWith('/')))
+{
+    throw new InvalidOperationException("Security:AllowedOrigins must contain exact HTTP(S) origins without paths, wildcards, query strings, fragments, or trailing slashes.");
+}
+
 builder.Services.AddCors(options =>
 {
     options.AddPolicy(CorsPolicyName, policy =>
     {
-        if (allowedOrigins is { Length: > 0 })
-        {
-            policy.WithOrigins(allowedOrigins)
-                .AllowAnyHeader()
-                .AllowAnyMethod();
-        }
-        else
-        {
-            policy.AllowAnyOrigin()
-                .AllowAnyHeader()
-                .AllowAnyMethod();
-        }
+        policy.WithOrigins(securityOptions.AllowedOrigins)
+            .AllowAnyHeader()
+            .AllowAnyMethod();
     });
+});
+
+builder.Services.Configure<SecurityOptions>(builder.Configuration.GetSection(SecurityOptions.SectionName));
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+    options.ForwardLimit = 1;
+    options.KnownIPNetworks.Clear();
+    options.KnownProxies.Clear();
+    foreach (var proxy in securityOptions.KnownProxies)
+    {
+        if (!IPAddress.TryParse(proxy, out var address))
+        {
+            throw new InvalidOperationException($"Security:KnownProxies contains an invalid IP address: {proxy}");
+        }
+        options.KnownProxies.Add(address);
+    }
 });
 
 builder.Services
@@ -50,21 +80,59 @@ builder.Services
     .AddInfrastructure(builder.Configuration);
 
 var app = builder.Build();
+var publicMediaRoot = app.Environment.WebRootPath ?? Path.Combine(app.Environment.ContentRootPath, "wwwroot");
+var publicBlogRoot = Path.Combine(publicMediaRoot, "blog");
+var publicAvatarRoot = Path.Combine(publicMediaRoot, "avatar");
+var promptLibraryOptions = app.Services.GetRequiredService<IOptions<PromptLibraryOptions>>().Value;
+Directory.CreateDirectory(publicBlogRoot);
+Directory.CreateDirectory(publicAvatarRoot);
 
-if (app.Environment.IsDevelopment())
+if (isAiMediaMigration)
+{
+    var dryRun = args.Contains("--dry-run", StringComparer.OrdinalIgnoreCase);
+    await using var scope = app.Services.CreateAsyncScope();
+    var db = scope.ServiceProvider.GetRequiredService<SqlSugar.ISqlSugarClient>();
+    var mediaPathResolver = scope.ServiceProvider.GetRequiredService<IAiMediaPathResolver>();
+    var result = await AiMediaMigration.RunAsync(db, app.Environment.ContentRootPath, mediaPathResolver, dryRun);
+    Console.WriteLine(
+        $"AI media migration {(result.DryRun ? "dry run" : "completed")}: "
+        + $"tasks={result.UpdatedTaskCount}, favorites={result.UpdatedFavoriteCount}, "
+        + $"files={result.CopiedFileCount}, unreferencedLegacyFiles={result.OrphanLegacyFileCount}");
+    return;
+}
+
+if (swaggerEnabled)
 {
     app.UseSwagger();
     app.UseSwaggerUI();
 }
 
 app.UseMiddleware<GlobalExceptionMiddleware>();
+app.UseForwardedHeaders();
+app.UseMiddleware<SecurityHeadersMiddleware>();
 app.UseHttpsRedirection();
-app.UseStaticFiles();
+app.UseStaticFiles(new StaticFileOptions { RequestPath = "/blog", FileProvider = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(publicBlogRoot) });
+app.UseStaticFiles(new StaticFileOptions { RequestPath = "/avatar", FileProvider = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(publicAvatarRoot) });
+if (!string.IsNullOrWhiteSpace(promptLibraryOptions.ImageRoot))
+{
+    var promptImageRoot = Path.GetFullPath(promptLibraryOptions.ImageRoot);
+    Directory.CreateDirectory(promptImageRoot);
+    app.UseStaticFiles(new StaticFileOptions
+    {
+        RequestPath = promptLibraryOptions.PublicBasePath,
+        FileProvider = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(promptImageRoot),
+        OnPrepareResponse = context =>
+            context.Context.Response.Headers.CacheControl = "public, max-age=604800, immutable"
+    });
+}
 app.UseCors(CorsPolicyName);
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseMiddleware<SecurityRateLimitMiddleware>();
 app.UseMiddleware<PermissionMiddleware>();
 app.UseMiddleware<OperationLogMiddleware>();
 app.MapControllers();
 
 app.Run();
+
+public partial class Program;

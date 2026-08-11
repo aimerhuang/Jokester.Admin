@@ -1,6 +1,7 @@
 using jokester.admin.Application.Abstractions;
 using jokester.admin.Application.DTOs.Blog;
 using jokester.admin.Authorization;
+using jokester.admin.Common.Exceptions;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -14,7 +15,7 @@ public sealed class BlogArticlesController(IBlogArticleService articleService) :
     /// 分页查询博客文章。
     /// </summary>
     /// <remarks>
-    /// 公开接口；博客文章固定归属 siteCode=blog，可按状态和关键词筛选。
+    /// 匿名调用只返回已发布文章；登录后的后台调用可按状态和关键词筛选。
     /// </remarks>
     [AllowAnonymous]
     [HttpGet]
@@ -32,6 +33,10 @@ public sealed class BlogArticlesController(IBlogArticleService articleService) :
     public async Task<IActionResult> GetById(long id, CancellationToken cancellationToken)
     {
         var result = await articleService.GetByIdAsync(id, cancellationToken);
+        if (result is null)
+        {
+            throw new NotFoundException($"文章不存在: {id}");
+        }
         return Success(result);
     }
 

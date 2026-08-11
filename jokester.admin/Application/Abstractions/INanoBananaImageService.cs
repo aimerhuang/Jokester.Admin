@@ -8,5 +8,5 @@ public interface INanoBananaImageService
 
     Task<long> CreateAsync(CreateNanoBananaImageTaskRequest request, CancellationToken cancellationToken);
 
-    Task<GenerateNanoBananaImageResponse> GenerateFromTaskAsync(string prompt, string? modelCode, string resolutionCode, string aspectRatioCode, string size, IReadOnlyList<string> imageUrls, CancellationToken cancellationToken);
+    Task<GenerateNanoBananaImageResponse> GenerateFromTaskAsync(string prompt, string? modelCode, string resolutionCode, string aspectRatioCode, string size, IReadOnlyList<string> imageUrls, long ownerUserId, CancellationToken cancellationToken);
 }

@@ -39,7 +39,9 @@ public sealed class PermissionService(
         }
         catch (RedisConnectionException ex)
         {
-            logger.LogWarning(ex, "Redis unavailable when reading permission cache. Falling back to database query.");
+            logger.LogWarning(
+                "Redis unavailable when reading permission cache; using database query. FailureType={FailureType}",
+                ex.GetType().Name);
         }
 
         var permissions = await db.Queryable<SysUserRoleEntity, SysRoleEntity, SysRoleMenuEntity, SysMenuEntity>(
@@ -66,7 +68,9 @@ public sealed class PermissionService(
             }
             catch (RedisConnectionException ex)
             {
-                logger.LogWarning(ex, "Redis unavailable when writing permission cache. Continuing without cache.");
+                logger.LogWarning(
+                    "Redis unavailable when writing permission cache; continuing without cache. FailureType={FailureType}",
+                    ex.GetType().Name);
             }
         }
 

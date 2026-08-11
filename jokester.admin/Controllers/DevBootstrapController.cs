@@ -1,4 +1,5 @@
 using jokester.admin.Application.Abstractions;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
 
@@ -13,6 +14,7 @@ public sealed class DevBootstrapController(
 {
     private const string BootstrapSecretHeader = "X-Bootstrap-Secret";
 
+    [AllowAnonymous]
     [HttpPost("super-admin")]
     public async Task<IActionResult> UpsertSuperAdmin(CancellationToken cancellationToken)
     {

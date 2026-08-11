@@ -1,0 +1,23 @@
+{
+  "sourceCode": "houbb-sensitive-word-data",
+  "sourceVersion": "fe6fc2921836217b8c90619db81b24af8b22d80f",
+  "sourceUrl": "https://github.com/houbb/sensitive-word-data",
+  "license": "Apache-2.0",
+  "files": [
+    {
+      "path": "inputs/sensitive_word_tags.txt",
+      "format": "tagged",
+      "languageCode": "zh",
+      "matchMode": "compact",
+      "proposedAction": "audit",
+      "severity": 3,
+      "expectedSha256": "d2ca6f91477238577743e8cfebee71e448b32d2477959c2aa7ba49482b3bd142",
+      "tagMappings": {
+        "1": "illegal_drugs",
+        "2": "sexual_content",
+        "4": "illegal_activity"
+      },
+      "tagPriority": ["2", "1", "4"]
+    }
+  ]
+}

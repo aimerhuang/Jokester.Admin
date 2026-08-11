@@ -20,7 +20,7 @@ public interface IAiImageService
 
     Task<UploadAiImageResponse> UploadAsync(IFormFile file, CancellationToken cancellationToken);
 
-    Task<GenerateAiImageResponse> GenerateFromResolvedAsync(string prompt, string? modelCode, ResolveAiImageParametersResponse parameters, IReadOnlyList<string> referenceImageUrls, string? maskImageUrl, CancellationToken cancellationToken);
+    Task<GenerateAiImageResponse> GenerateFromResolvedAsync(string prompt, string? modelCode, ResolveAiImageParametersResponse parameters, IReadOnlyList<string> referenceImageUrls, string? maskImageUrl, long ownerUserId, CancellationToken cancellationToken);
 
     Task<long> CreateAsync(CreateAiImageTaskRequest request, CancellationToken cancellationToken);
 

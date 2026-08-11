@@ -5,6 +5,12 @@
 bin/
 obj/
 artifacts/
+private-media/
+publish/
+publish-backup-*/
+logs/
+wwwroot/ai-images/
+wwwroot/avatar/
 
 *.user
 *.suo

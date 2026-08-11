@@ -54,7 +54,7 @@ public sealed class AuthController(
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            await authService.RecordLoginFailureAsync(request.UserName, ex.Message, cancellationToken);
+            await authService.RecordLoginFailureAsync(request.UserName, "登录失败", cancellationToken);
             throw;
         }
     }
@@ -62,6 +62,7 @@ public sealed class AuthController(
     /// <summary>
     /// 刷新访问令牌。
     /// </summary>
+    [AllowAnonymous]
     [HttpPost("refresh")]
     public async Task<IActionResult> Refresh([FromBody] RefreshTokenRequest request, CancellationToken cancellationToken)
     {
@@ -73,13 +74,12 @@ public sealed class AuthController(
     /// 用户登出。
     /// </summary>
     /// <remarks>
-    /// RefreshToken 可通过 X-Refresh-Token 请求头或 refreshToken 查询参数传入。
+    /// RefreshToken 仅通过 X-Refresh-Token 请求头传入，避免出现在 URL 和访问日志中。
     /// </remarks>
     [HttpPost("logout")]
     public async Task<IActionResult> Logout(CancellationToken cancellationToken)
     {
-        var refreshToken = Request.Headers["X-Refresh-Token"].FirstOrDefault()
-            ?? Request.Query["refreshToken"].FirstOrDefault();
+        var refreshToken = Request.Headers["X-Refresh-Token"].FirstOrDefault();
         await authService.LogoutAsync(refreshToken, cancellationToken);
         return Success();
     }

@@ -12,7 +12,7 @@ public sealed class JwtTokenService(IOptions<JwtOptions> options) : ITokenServic
 {
     private readonly JwtOptions _options = options.Value;
 
-    public string CreateAccessToken(long userId, string userName, bool isSuperAdmin)
+    public string CreateAccessToken(long userId, string userName, bool isSuperAdmin, string sessionId)
     {
         var credentials = new SigningCredentials(
             new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_options.SecretKey)),
@@ -22,7 +22,9 @@ public sealed class JwtTokenService(IOptions<JwtOptions> options) : ITokenServic
         {
             new Claim(ClaimTypes.NameIdentifier, userId.ToString()),
             new Claim(ClaimTypes.Name, userName),
-            new Claim("is_super_admin", isSuperAdmin ? "true" : "false")
+            new Claim("is_super_admin", isSuperAdmin ? "true" : "false"),
+            new Claim(JwtRegisteredClaimNames.Sid, sessionId),
+            new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString("N"))
         };
 
         var token = new JwtSecurityToken(

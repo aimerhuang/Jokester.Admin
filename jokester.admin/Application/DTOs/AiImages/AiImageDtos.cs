@@ -26,11 +26,19 @@ public sealed class AiImageTaskDto
 
     public long SiteId { get; init; }
 
+    public long? SourcePromptId { get; init; }
+
     public string Prompt { get; init; } = string.Empty;
 
     public string ModelName { get; init; } = string.Empty;
 
     public int ImageCount { get; init; }
+
+    public int CompletedImageCount { get; init; }
+
+    public int PointCost { get; init; }
+
+    public int BillingStatus { get; init; }
 
     public string ResolutionCode { get; init; } = string.Empty;
 
@@ -168,7 +176,11 @@ public sealed class ResolveAiImageParametersResponse
 
 public sealed class CreateAiImageTaskRequest
 {
+    public string IdempotencyKey { get; init; } = string.Empty;
+
     public long SiteId { get; init; }
+
+    public long? SourcePromptId { get; init; }
 
     public string Prompt { get; init; } = string.Empty;
 
@@ -195,6 +207,10 @@ public sealed class CreateAiImageTaskRequest
 
 public sealed class GenerateAiImageRequest
 {
+    public string IdempotencyKey { get; init; } = string.Empty;
+
+    public long? SourcePromptId { get; init; }
+
     public string Prompt { get; init; } = string.Empty;
 
     public string ModelCode { get; init; } = string.Empty;
@@ -242,6 +258,10 @@ public sealed class UploadAiImageResponse
 public sealed class GenerateAiImageResponse
 {
     public long TaskId { get; init; }
+
+    public IReadOnlyList<long> TaskIds { get; init; } = [];
+
+    public long? SourcePromptId { get; init; }
 
     public string ModelName { get; init; } = string.Empty;
 

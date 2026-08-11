@@ -2,6 +2,10 @@ namespace jokester.admin.Application.DTOs.NanoBananaImages;
 
 public sealed class GenerateNanoBananaImageRequest
 {
+    public string IdempotencyKey { get; init; } = string.Empty;
+
+    public long? SourcePromptId { get; init; }
+
     public string Prompt { get; init; } = string.Empty;
 
     public string ModelCode { get; init; } = string.Empty;
@@ -23,6 +27,10 @@ public sealed class GenerateNanoBananaImageRequest
 
 public sealed class CreateNanoBananaImageTaskRequest
 {
+    public string IdempotencyKey { get; init; } = string.Empty;
+
+    public long? SourcePromptId { get; init; }
+
     public string Prompt { get; init; } = string.Empty;
 
     public string ModelCode { get; init; } = string.Empty;
@@ -44,6 +52,10 @@ public sealed class CreateNanoBananaImageTaskRequest
 
 public sealed class GenerateNanoBananaImageResponse
 {
+    public long TaskId { get; init; }
+
+    public long? SourcePromptId { get; init; }
+
     public string ModelName { get; init; } = string.Empty;
 
     public string ModelCode { get; init; } = string.Empty;

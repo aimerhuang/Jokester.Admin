@@ -14,17 +14,41 @@ public sealed class AiImageTaskEntity
     [SugarColumn(ColumnName = "user_id")]
     public long UserId { get; set; }
 
+    [SugarColumn(ColumnName = "source_prompt_id")]
+    public long? SourcePromptId { get; set; }
+
     [SugarColumn(ColumnName = "prompt")]
     public string Prompt { get; set; } = string.Empty;
 
     [SugarColumn(ColumnName = "negative_prompt")]
     public string? NegativePrompt { get; set; }
 
+    [SugarColumn(ColumnName = "prompt_policy_version")]
+    public long PromptPolicyVersion { get; set; }
+
+    [SugarColumn(ColumnName = "prompt_checked_at")]
+    public DateTime? PromptCheckedAt { get; set; }
+
     [SugarColumn(ColumnName = "model_name")]
     public string? ModelName { get; set; }
 
     [SugarColumn(ColumnName = "image_count")]
     public int ImageCount { get; set; } = 1;
+
+    [SugarColumn(ColumnName = "completed_image_count")]
+    public int CompletedImageCount { get; set; }
+
+    [SugarColumn(ColumnName = "idempotency_key")]
+    public string IdempotencyKey { get; set; } = string.Empty;
+
+    [SugarColumn(ColumnName = "request_fingerprint")]
+    public string RequestFingerprint { get; set; } = string.Empty;
+
+    [SugarColumn(ColumnName = "point_cost")]
+    public int PointCost { get; set; }
+
+    [SugarColumn(ColumnName = "billing_status")]
+    public int BillingStatus { get; set; }
 
     [SugarColumn(ColumnName = "resolution_code")]
     public string ResolutionCode { get; set; } = "1k";
@@ -61,6 +85,12 @@ public sealed class AiImageTaskEntity
 
     [SugarColumn(ColumnName = "error_message")]
     public string? ErrorMessage { get; set; }
+
+    [SugarColumn(ColumnName = "started_at")]
+    public DateTime? StartedAt { get; set; }
+
+    [SugarColumn(ColumnName = "completed_at")]
+    public DateTime? CompletedAt { get; set; }
 
     [SugarColumn(ColumnName = "created_at")]
     public DateTime CreatedAt { get; set; }

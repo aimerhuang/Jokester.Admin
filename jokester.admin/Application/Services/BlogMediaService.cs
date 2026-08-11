@@ -7,17 +7,13 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Hosting;
 using SqlSugar;
 using System.Security.Cryptography;
+using jokester.admin.Application.Security;
 
 namespace jokester.admin.Application.Services;
 
 public sealed class BlogMediaService(ISqlSugarClient db, IWebHostEnvironment environment) : IBlogMediaService
 {
     private const string BlogSiteCode = "blog";
-
-    private static readonly HashSet<string> AllowedMimeTypes =
-    [
-        "image/jpeg", "image/png", "image/gif", "image/webp", "image/svg+xml"
-    ];
 
     private const long MaxFileSizeBytes = 10 * 1024 * 1024;
 
@@ -36,13 +32,9 @@ public sealed class BlogMediaService(ISqlSugarClient db, IWebHostEnvironment env
             throw new AppException(ErrorCodes.BadRequest, "文件大小不能超过 10MB");
         }
 
-        var mimeType = file.ContentType.ToLowerInvariant();
-        if (!AllowedMimeTypes.Contains(mimeType))
-        {
-            throw new AppException(ErrorCodes.BadRequest, $"不支持的文件类型: {mimeType}");
-        }
-
-        var ext = Path.GetExtension(file.FileName);
+        var image = await ImageUploadValidator.ValidateAsync(file, MaxFileSizeBytes, cancellationToken);
+        var mimeType = image.MimeType;
+        var ext = image.Extension;
         var blogPathCode = RandomNumberGenerator.GetInt32(100000, 1000000).ToString();
         var storageKey = $"blog/{blogPathCode}/{DateTime.UtcNow:yyyyMM}/{Guid.NewGuid():N}{ext}";
         var webRootPath = environment.WebRootPath
@@ -50,10 +42,7 @@ public sealed class BlogMediaService(ISqlSugarClient db, IWebHostEnvironment env
         var savePath = Path.Combine(webRootPath, storageKey);
 
         Directory.CreateDirectory(Path.GetDirectoryName(savePath)!);
-        await using (var stream = File.Create(savePath))
-        {
-            await file.CopyToAsync(stream, cancellationToken);
-        }
+        await File.WriteAllBytesAsync(savePath, image.Content, cancellationToken);
 
         var url = $"/{storageKey.Replace('\\', '/')}";
 

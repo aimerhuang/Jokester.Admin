@@ -143,6 +143,11 @@ public sealed class UserProfileDto
     public string NickName { get; init; } = string.Empty;
 
     /// <summary>
+    /// 用户邮箱。
+    /// </summary>
+    public string? Email { get; init; }
+
+    /// <summary>
     /// 头像地址。
     /// </summary>
     public string? AvatarUrl { get; init; }

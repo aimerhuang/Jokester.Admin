@@ -3,6 +3,7 @@ using jokester.admin.Application.Abstractions;
 using jokester.admin.Application.Services;
 using jokester.admin.Infrastructure.Email;
 using jokester.admin.Infrastructure.Mapping;
+using jokester.admin.Infrastructure.PromptLibrary;
 using jokester.admin.Infrastructure.Security;
 using Mapster;
 using MapsterMapper;
@@ -10,6 +11,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using SqlSugar;
 using StackExchange.Redis;
@@ -29,8 +31,45 @@ public static class ServiceCollectionExtensions
         services.Configure<RedisOptions>(configuration.GetSection(RedisOptions.SectionName));
         services.Configure<MailOptions>(configuration.GetSection(MailOptions.SectionName));
         services.Configure<EmailValidationOptions>(configuration.GetSection(EmailValidationOptions.SectionName));
-        services.Configure<OpenAiOptions>(configuration.GetSection(OpenAiOptions.SectionName));
-        services.Configure<NanoBanana2Options>(configuration.GetSection(NanoBanana2Options.SectionName));
+        services.AddSingleton<IValidateOptions<AiMediaStorageOptions>, AiMediaStorageOptionsValidator>();
+        services.AddOptions<AiMediaStorageOptions>()
+            .Bind(configuration.GetSection(AiMediaStorageOptions.SectionName))
+            .ValidateOnStart();
+        services.AddSingleton<IValidateOptions<PromptLibraryOptions>, PromptLibraryOptionsValidator>();
+        services.AddOptions<PromptLibraryOptions>()
+            .Bind(configuration.GetSection(PromptLibraryOptions.SectionName))
+            .PostConfigure(PromptLibraryConfiguration.ApplyFlatEnvironmentVariables)
+            .ValidateOnStart();
+        services.AddOptions<OpenAiOptions>()
+            .Bind(configuration.GetSection(OpenAiOptions.SectionName))
+            .Validate(
+                options => options.PrimaryTimeoutSeconds is >= 10 and <= 240,
+                "OpenAI:PrimaryTimeoutSeconds must be between 10 and 240 seconds.")
+            .ValidateOnStart();
+        services.AddOptions<AiCostControlOptions>()
+            .Bind(configuration.GetSection(AiCostControlOptions.SectionName))
+            .Validate(
+                options => options.DailyImageLimitPerUser > 0
+                    && options.DailyPointLimitPerUser > 0
+                    && options.MaxConcurrentTasksPerUser > 0
+                    && options.MaxQueuedTasks is > 0 and <= 1000
+                    && options.MaxGlobalProviderConcurrency > 0
+                    && options.IdempotencyTtlHours > 0
+                    && options.ReservationTtlMinutes >= 120
+                    && options.ProviderLeaseSeconds >= 300
+                    && options.ProviderFailureThreshold > 0
+                    && options.ProviderFailureWindowSeconds > 0
+                    && options.ProviderCircuitOpenSeconds > 0,
+                "AiCostControl values are outside the supported safety bounds.")
+            .ValidateOnStart();
+        services.AddOptions<AiPromptFilterOptions>()
+            .Bind(configuration.GetSection(AiPromptFilterOptions.SectionName))
+            .Validate(
+                options => options.RefreshIntervalSeconds is >= 5 and <= 3600
+                    && options.MaxSnapshotAgeMinutes is >= 1 and <= 1440
+                    && options.MinimumActiveWordCount is >= 1 and <= 1_000_000,
+                "AiPromptFilter values are outside the supported safety bounds.")
+            .ValidateOnStart();
         services.AddHttpContextAccessor();
         services.AddSingleton<IConnectionMultiplexer>(serviceProvider =>
         {
@@ -60,6 +99,8 @@ public static class ServiceCollectionExtensions
         services.AddScoped<ITokenService, JwtTokenService>();
         services.AddScoped<IAuditLogWriter, AuditLogWriter>();
         services.AddScoped<IEmailSender, MailKitEmailSender>();
+        services.AddSingleton<IAiMediaPathResolver, AiMediaPathResolver>();
+        services.AddSingleton<IPromptReadmeParser, MarkdigPromptReadmeParser>();
         services.AddScoped<IBlogMediaService, BlogMediaService>();
         services.AddSingleton<IRefreshTokenStore, ResilientRefreshTokenStore>();
         services.AddSingleton<IPermissionCacheInvalidator, RedisPermissionCacheInvalidator>();
@@ -76,10 +117,16 @@ public static class ServiceCollectionExtensions
                     ValidIssuer = jwtOptions.Issuer,
                     ValidAudience = jwtOptions.Audience,
                     IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtOptions.SecretKey)),
-                    ClockSkew = TimeSpan.FromMinutes(1)
+                    ValidAlgorithms = [SecurityAlgorithms.HmacSha256],
+                    ClockSkew = TimeSpan.Zero
                 };
             });
-        services.AddAuthorization();
+        services.AddAuthorization(options =>
+        {
+            options.FallbackPolicy = new Microsoft.AspNetCore.Authorization.AuthorizationPolicyBuilder()
+                .RequireAuthenticatedUser()
+                .Build();
+        });
 
         return services;
     }
@@ -109,9 +156,9 @@ public static class ServiceCollectionExtensions
             throw new InvalidOperationException("Jwt:SecretKey must be at least 32 bytes.");
         }
 
-        if (options.AccessTokenExpiresMinutes <= 0)
+        if (options.AccessTokenExpiresMinutes is < 10 or > 15)
         {
-            throw new InvalidOperationException("Jwt:AccessTokenExpiresMinutes must be greater than 0.");
+            throw new InvalidOperationException("Jwt:AccessTokenExpiresMinutes must be between 10 and 15.");
         }
 
         if (options.RefreshTokenExpiresDays <= 0)

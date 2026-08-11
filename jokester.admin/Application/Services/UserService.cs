@@ -1,6 +1,7 @@
 using jokester.admin.Application.Abstractions;
 using jokester.admin.Application.DTOs.Common;
 using jokester.admin.Application.DTOs.Users;
+using jokester.admin.Application.Security;
 using jokester.admin.Common;
 using jokester.admin.Common.Exceptions;
 using jokester.admin.Domain.Entities;
@@ -16,13 +17,9 @@ public sealed class UserService(
     IPasswordHasher passwordHasher,
     IMapper mapper,
     IPermissionCacheInvalidator permissionCacheInvalidator,
+    IRefreshTokenStore refreshTokenStore,
     IWebHostEnvironment environment) : IUserService
 {
-    private static readonly HashSet<string> AllowedAvatarMimeTypes =
-    [
-        "image/jpeg", "image/png", "image/gif", "image/webp", "image/svg+xml"
-    ];
-
     private const long MaxAvatarFileSizeBytes = 10 * 1024 * 1024;
     public async Task<PagedResult<UserListItemDto>> GetPageAsync(PageQuery query, CancellationToken cancellationToken)
     {
@@ -197,6 +194,19 @@ public sealed class UserService(
             throw new NotFoundException($"用户不存在: {id}");
         }
 
+        var existingRoleIds = await db.Queryable<SysUserRoleEntity>()
+            .Where(x => x.UserId == id)
+            .Select(x => x.RoleId)
+            .ToListAsync(cancellationToken);
+        var existingSiteIds = await db.Queryable<SysUserSiteEntity>()
+            .Where(x => x.UserId == id)
+            .Select(x => x.SiteId)
+            .ToListAsync(cancellationToken);
+        var securityContextChanged = entity.Status != request.Status
+            || entity.IsSuperAdmin != request.IsSuperAdmin
+            || !existingRoleIds.ToHashSet().SetEquals(request.RoleIds)
+            || !existingSiteIds.ToHashSet().SetEquals(request.SiteIds);
+
         entity.NickName = request.NickName;
         entity.Email = request.Email;
         entity.Phone = request.Phone;
@@ -213,6 +223,10 @@ public sealed class UserService(
             await SyncUserSitesAsync(id, request.SiteIds);
             await db.Ado.CommitTranAsync();
             await permissionCacheInvalidator.RemoveUserAsync(id, cancellationToken);
+            if (securityContextChanged)
+            {
+                await refreshTokenStore.RevokeUserSessionsAsync(id, cancellationToken);
+            }
         }
         catch
         {
@@ -303,6 +317,7 @@ public sealed class UserService(
         }
 
         await permissionCacheInvalidator.RemoveUserAsync(id, cancellationToken);
+        await refreshTokenStore.RevokeUserSessionsAsync(id, cancellationToken);
     }
 
     public async Task UpdatePasswordAsync(long id, UpdateUserPasswordRequest request, CancellationToken cancellationToken)
@@ -324,6 +339,7 @@ public sealed class UserService(
         }
 
         await permissionCacheInvalidator.RemoveUserAsync(id, cancellationToken);
+        await refreshTokenStore.RevokeUserSessionsAsync(id, cancellationToken);
     }
 
     public async Task<string> UploadAvatarAsync(long id, IFormFile file, CancellationToken cancellationToken)
@@ -338,29 +354,21 @@ public sealed class UserService(
             throw new AppException(ErrorCodes.BadRequest, "文件大小不能超过 10MB");
         }
 
-        var mimeType = file.ContentType.ToLowerInvariant();
-        if (!AllowedAvatarMimeTypes.Contains(mimeType))
-        {
-            throw new AppException(ErrorCodes.BadRequest, $"不支持的文件类型: {mimeType}");
-        }
-
+        var image = await ImageUploadValidator.ValidateAsync(file, MaxAvatarFileSizeBytes, cancellationToken);
         var exists = await db.Queryable<SysUserEntity>().AnyAsync(x => x.Id == id && !x.IsDeleted, cancellationToken);
         if (!exists)
         {
             throw new NotFoundException($"用户不存在: {id}");
         }
 
-        var ext = Path.GetExtension(file.FileName);
+        var ext = image.Extension;
         var storageKey = $"avatar/{DateTime.UtcNow:yyyyMM}/{Guid.NewGuid():N}{ext}";
         var webRootPath = environment.WebRootPath
             ?? Path.Combine(environment.ContentRootPath, "wwwroot");
         var savePath = Path.Combine(webRootPath, storageKey);
 
         Directory.CreateDirectory(Path.GetDirectoryName(savePath)!);
-        await using (var stream = File.Create(savePath))
-        {
-            await file.CopyToAsync(stream, cancellationToken);
-        }
+        await File.WriteAllBytesAsync(savePath, image.Content, cancellationToken);
 
         var url = $"/{storageKey.Replace('\\', '/')}";
         await db.Updateable<SysUserEntity>()
@@ -400,6 +408,7 @@ public sealed class UserService(
         }
 
         await permissionCacheInvalidator.RemoveUserAsync(id, cancellationToken);
+        await refreshTokenStore.RevokeUserSessionsAsync(id, cancellationToken);
     }
 
     public async Task DeleteAsync(long id, CancellationToken cancellationToken)
@@ -421,6 +430,7 @@ public sealed class UserService(
                 .ExecuteCommandAsync();
             await db.Ado.CommitTranAsync();
             await permissionCacheInvalidator.RemoveUserAsync(id, cancellationToken);
+            await refreshTokenStore.RevokeUserSessionsAsync(id, cancellationToken);
         }
         catch
         {

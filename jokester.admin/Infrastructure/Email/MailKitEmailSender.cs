@@ -58,24 +58,24 @@ public sealed class MailKitEmailSender(
         if (exception is SmtpCommandException smtpCommandException)
         {
             logger.LogError(
-                smtpCommandException,
-                "SMTP email sending failed. Host={Host}, Port={Port}, SecureSocketOptions={SecureSocketOptions}, UserNameConfigured={UserNameConfigured}, SmtpErrorCode={SmtpErrorCode}, SmtpStatusCode={SmtpStatusCode}",
+                "SMTP email sending failed. Host={Host}, Port={Port}, SecureSocketOptions={SecureSocketOptions}, UserNameConfigured={UserNameConfigured}, SmtpErrorCode={SmtpErrorCode}, SmtpStatusCode={SmtpStatusCode}, FailureType={FailureType}",
                 options.Host,
                 options.Port,
                 secureSocketOptions,
                 !string.IsNullOrWhiteSpace(options.UserName),
                 smtpCommandException.ErrorCode,
-                smtpCommandException.StatusCode);
+                smtpCommandException.StatusCode,
+                smtpCommandException.GetType().Name);
             return;
         }
 
         logger.LogError(
-            exception,
-            "SMTP email sending failed. Host={Host}, Port={Port}, SecureSocketOptions={SecureSocketOptions}, UserNameConfigured={UserNameConfigured}",
+            "SMTP email sending failed. Host={Host}, Port={Port}, SecureSocketOptions={SecureSocketOptions}, UserNameConfigured={UserNameConfigured}, FailureType={FailureType}",
             options.Host,
             options.Port,
             secureSocketOptions,
-            !string.IsNullOrWhiteSpace(options.UserName));
+            !string.IsNullOrWhiteSpace(options.UserName),
+            exception.GetType().Name);
     }
 
     private static void ValidateOptions(MailOptions options)

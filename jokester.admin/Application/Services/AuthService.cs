@@ -32,7 +32,7 @@ public sealed class AuthService(
 
         if (user.Status != 1)
         {
-            throw new AppException(ErrorCodes.AccountDisabled, "账号已禁用");
+            throw new AppException(ErrorCodes.InvalidCredentials, "用户名或密码错误");
         }
 
         var response = await BuildLoginResponseAsync(user, cancellationToken);
@@ -42,29 +42,30 @@ public sealed class AuthService(
 
     public async Task<LoginResponse> RefreshAsync(RefreshTokenRequest request, CancellationToken cancellationToken)
     {
-        var userId = await refreshTokenStore.GetUserIdAsync(request.RefreshToken, cancellationToken);
-        if (!userId.HasValue)
+        var consumed = await refreshTokenStore.ConsumeAsync(request.RefreshToken, cancellationToken);
+        if (consumed.Status != RefreshTokenConsumeStatus.Succeeded
+            || !consumed.UserId.HasValue
+            || string.IsNullOrWhiteSpace(consumed.SessionId))
         {
             throw new AppException(ErrorCodes.InvalidRefreshToken, "RefreshToken 无效或已过期");
         }
 
         var user = await db.Queryable<SysUserEntity>()
-            .FirstAsync(x => x.Id == userId.Value && !x.IsDeleted, cancellationToken);
+            .FirstAsync(x => x.Id == consumed.UserId.Value && !x.IsDeleted, cancellationToken);
 
         if (user is null || user.Status != 1)
         {
             throw new AppException(ErrorCodes.InvalidRefreshToken, "RefreshToken 无效或已过期");
         }
 
-        await refreshTokenStore.RemoveAsync(request.RefreshToken, cancellationToken);
-        return await BuildLoginResponseAsync(user, cancellationToken);
+        return await BuildLoginResponseAsync(user, cancellationToken, consumed.SessionId);
     }
 
     public async Task LogoutAsync(string? refreshToken, CancellationToken cancellationToken)
     {
         if (!string.IsNullOrWhiteSpace(refreshToken))
         {
-            await refreshTokenStore.RemoveAsync(refreshToken, cancellationToken);
+            await refreshTokenStore.RevokeAsync(refreshToken, cancellationToken);
         }
     }
 
@@ -82,6 +83,7 @@ public sealed class AuthService(
                 Id = x.Id,
                 UserName = x.UserName,
                 NickName = x.NickName ?? string.Empty,
+                Email = x.Email,
                 AvatarUrl = x.AvatarUrl,
                 Signature = x.Signature,
                 PointBalance = x.PointBalance,
@@ -102,13 +104,16 @@ public sealed class AuthService(
         await auditLogWriter.WriteLoginAsync(null, userName, false, errorMessage, cancellationToken);
     }
 
-    private async Task<LoginResponse> BuildLoginResponseAsync(SysUserEntity user, CancellationToken cancellationToken)
+    private async Task<LoginResponse> BuildLoginResponseAsync(
+        SysUserEntity user,
+        CancellationToken cancellationToken,
+        string? existingSessionId = null)
     {
-        var accessToken = tokenService.CreateAccessToken(user.Id, user.UserName, user.IsSuperAdmin);
+        var sessionId = existingSessionId ?? Guid.NewGuid().ToString("N");
+        var accessToken = tokenService.CreateAccessToken(user.Id, user.UserName, user.IsSuperAdmin, sessionId);
         var refreshToken = tokenService.CreateRefreshToken();
         var accessTokenExpiresAt = tokenService.GetAccessTokenExpiresAt();
         var refreshExpiresAt = DateTime.UtcNow.AddDays(jwtOptions.Value.RefreshTokenExpiresDays);
-        await refreshTokenStore.SaveAsync(refreshToken, user.Id, refreshExpiresAt, cancellationToken);
 
         var sites = await db.Queryable<SysUserSiteEntity, SysSiteEntity>((us, s) => new JoinQueryInfos(JoinType.Inner, us.SiteId == s.Id))
             .Where((us, s) => us.UserId == user.Id && !s.IsDeleted && s.Status == 1)
@@ -120,6 +125,12 @@ public sealed class AuthService(
                 SiteName = s.SiteName
             })
             .ToListAsync(cancellationToken);
+        var permissions = await permissionService.GetPermissionsAsync(user.Id, user.IsSuperAdmin, cancellationToken);
+        var saved = await refreshTokenStore.SaveAsync(refreshToken, user.Id, sessionId, refreshExpiresAt, cancellationToken);
+        if (!saved)
+        {
+            throw new AppException(ErrorCodes.InvalidRefreshToken, "RefreshToken 会话已失效，请重新登录");
+        }
 
         return new LoginResponse
         {
@@ -131,12 +142,14 @@ public sealed class AuthService(
                 Id = user.Id,
                 UserName = user.UserName,
                 NickName = user.NickName ?? string.Empty,
+                Email = user.Email,
                 AvatarUrl = user.AvatarUrl,
                 Signature = user.Signature,
+                PointBalance = user.PointBalance,
                 IsSuperAdmin = user.IsSuperAdmin
             },
             Sites = sites,
-            Permissions = await permissionService.GetPermissionsAsync(user.Id, user.IsSuperAdmin, cancellationToken)
+            Permissions = permissions
         };
     }
 

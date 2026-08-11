@@ -155,6 +155,24 @@ Authorization: Bearer <accessToken>
 }
 ```
 
+### 积分充值与兑换
+
+```http
+GET /api/points/recharge/packages
+POST /api/points/recharge/orders
+POST /api/points/recharge/redeem
+POST /api/points/recharge/admin/codes
+Authorization: Bearer <accessToken>
+```
+
+- 套餐接口按当前用户返回首充资格和实际可得积分。
+- 下单接口只创建待支付订单；`purchaseUrl` 来自套餐表配置，未配置时返回 `null`。
+- 兑换成功后原子增加余额并写入 `source=recharge` 积分流水；兑换码区分大小写且只能使用一次。
+- 管理员签发接口仅限超级管理员，明文兑换码只在签发响应中返回一次。
+
+请求、响应、订单状态和 `purchase_url` 配置详见
+[point-recharge.md](./point-recharge.md)。
+
 ## AI 生图
 
 统一路由：
@@ -185,7 +203,9 @@ Authorization: Bearer <accessToken>
 - 扣分数量为价格表 `points * imageCount`。
 - `imageCount` 为单次生成的图片数量，按各供应商官方限制校验：GPT Image2 支持 `1-10`，Nano Banana2 支持 `1-4`；超出范围后端拒绝请求。
 - 积分不足或价格组合未配置时，后端拒绝创建任务，不调用上游生图服务。
-- 任务生成失败或超时后，后端写入 `source=image_refund` 的返还流水。
+- 四个生成/创建接口都必须传 `idempotencyKey`（8-128 个非控制字符）。同一用户使用相同 key 和相同请求时返回原任务（多图 GPT 请求返回原任务集合）且不重复扣分；同 key 不同请求返回 HTTP 409。
+- 任务与积分预留在同一数据库事务提交；任务成功确认预留，失败或超时只对未完成图片写入一次 `source=image_refund` 流水。
+- Redis 原子限制用户每日图片/积分额度、单用户活动任务数和全局任务积压；Redis 或成本控制状态不可用时拒绝新任务，不调用 Provider。
 
 参数选项与解析：
 
@@ -198,12 +218,13 @@ Authorization: Bearer <accessToken>
 
 `GET /api/ai/images/parameters` 会同时返回启用的分辨率、画质、画幅比例选项和 `pointPrices`。`GET /api/ai/images/pricing-options` 返回可直接用于前端展示的积分定价列表，每项包含 `modelCode`、`modelName`、`resolutionCode`、`resolutionName`、`qualityCode`、`qualityName`、`points`、`priceAmount`、`currency` 和 `sort`，其中 `points` 表示该选项单张图片消耗的积分。`resolutionCode` 支持 `1k`、`2k`、`4k`，按长边计算；其中 `4k` 的长边上限为 `3840`，同时会按供应商限制把宽高压到 `16px` 倍数且总像素不超过 `8,294,400`。例如 `4k + 1:1` 会解析为 `2880x2880`，`4k + 16:9` 会解析为 `3840x2160`。`qualityCode` 支持 `low`、`med`、`high`；`aspectRatioCode` 支持 `1:1`、`16:9`、`9:16`、`4:3`、`3:4`、`3:2`、`2:3`、`21:9`。
 
-`resolution` 可作为 `resolutionCode` 的兼容别名；两者同时传入时优先使用 `resolution`。`modelCode` 是业务模型编码，后端会按 `ai_image_model_config.model_code` + `resolutionCode` 读取数据库配置，并把命中的 `provider_model` 原样传给上游 `model` 字段。不要假设供应商模型参数等于 `modelCode`。
+`resolution` 可作为 `resolutionCode` 的兼容别名；两者同时传入时优先使用 `resolution`。`modelCode` 是业务模型编码，后端会按 `model_code + resolution_code + route_role` 读取数据库路由，并把当前路由的 `provider_model` 原样传给上游 `model` 字段。不要假设主、备供应商模型参数彼此相同或等于 `modelCode`。
 
 GPT Image2 直接生成请求体：
 
 ```json
 {
+  "idempotencyKey": "img-20260808-000001",
   "prompt": "一张写实风格博客封面图",
   "modelCode": "gpt-image-2",
   "imageCount": 1,
@@ -211,8 +232,8 @@ GPT Image2 直接生成请求体：
   "qualityCode": "med",
   "aspectRatioCode": "1:1",
   "referenceImageUrls": [
-    "/ai-images/uploads/202606/reference-1.png",
-    "/ai-images/uploads/202606/reference-2.png"
+    "/api/media/ai/42/202608/reference-1.png",
+    "/api/media/ai/42/202608/reference-2.png"
   ]
 }
 ```
@@ -221,6 +242,7 @@ GPT Image2 创建后台任务请求体：
 
 ```json
 {
+  "idempotencyKey": "img-20260808-000002",
   "siteId": 0,
   "prompt": "一张写实风格博客封面图",
   "negativePrompt": null,
@@ -230,16 +252,20 @@ GPT Image2 创建后台任务请求体：
   "qualityCode": "med",
   "aspectRatioCode": "1:1",
   "referenceImageUrls": [
-    "/ai-images/uploads/202606/reference-1.png"
+    "/api/media/ai/42/202608/reference-1.png"
   ]
 }
 ```
 
-`referenceImageUrls` 是可选 JSON 数组，最多 6 张；前端应先调用 `POST /api/ai/images/upload` 上传参考图，拿到内部 URL 后再点击生图按钮。传参考图时后端调用上游 `/images/edits`，把内部 URL 解析为 `wwwroot` 下的本地文件，并以 multipart `image[]` 文件字段提交；不传参考图时调用 `/images/generations`。
+`referenceImageUrls` 是可选 JSON 数组，最多 6 张；前端应先调用 `POST /api/ai/images/upload` 上传参考图，拿到当前用户的 `/api/media/ai/...` 私有 URL 后再点击生图按钮。入队前后端会验证文件存在及所有权；传参考图时调用上游 `/images/edits` 并以 multipart `image[]` 文件字段提交，不传时调用 `/images/generations`。
 
-直接生成响应 `data` 返回 `taskId`、`modelName`、`prompt`、`resolutionCode`、`qualityCode`、`aspectRatioCode`、`width`、`height`、`size`、`quality`、`mimeType`、`url`、`urls`。`imageCount` 默认 `1`，可传 `1-10` 生成多张；`url` 是首张图片地址，`urls` 是本次生成的全部图片地址数组，前端应优先使用 `urls` 展示结果。图片会保存到服务器静态目录，均为可直接访问的静态图片地址。
+直接生成响应 `data` 返回 `taskId`、`taskIds`、`modelName`、`prompt`、`resolutionCode`、`qualityCode`、`aspectRatioCode`、`width`、`height`、`size`、`quality`、`mimeType`、`url`、`urls`。`imageCount` 默认 `1`，可传 `1-10` 生成多张；`taskId` 是首个任务 id，`taskIds` 是全部单图任务 id，`url` 是首张图片地址，`urls` 是本次生成的全部图片地址数组。URL 是鉴权下载地址，Web 前端应携带 Bearer Token 请求 Blob 后展示，不能把它当作匿名静态 `<img src>`。
 
-直接生成接口会先创建 `ai_image_task` 历史记录，再交给后台 worker 生图，并在接口侧最多等待 5 分钟返回完成结果。用户关闭网页不会取消后台任务，完成后的图片仍可通过历史记录接口按 `taskId` 找回。
+直接生成接口会先创建 `ai_image_task` 历史记录，再交给后台 worker 生图，并在接口侧最多等待 5 分钟返回完成结果。用户关闭网页不会取消后台任务，完成后的图片仍可通过历史记录接口按 `taskId` / `taskIds` 找回。
+
+GPT 多图按请求 `imageCount` 拆成同等数量的任务，每条 `ai_image_task.image_count` 固定为 `1`，并由 worker 在全局 Provider 并发限制内同时处理。创建接口返回 `id` 和 `ids`：`id` 是首个任务 id，`ids` 包含本批全部任务 id。整批任务插入、总积分扣减和每个任务的 `image:{taskId}:reserve` 流水在同一数据库事务提交；同一幂等键重试返回原 `ids`。
+
+GPT 主备上游都来自 `ai_image_model_config`。后端按 `model_code + resolution_code` 先读取启用的 `route_role=primary`，失败后切换到同一槽位启用的 `route_role=fallback`；两条记录分别提供自己的 `provider_model`、地址、Key 和请求路径。禁用主记录即可强制直连备用记录，切换不需要重启服务。
 
 列表接口支持以下筛选参数：
 
@@ -251,14 +277,14 @@ GPT Image2 创建后台任务请求体：
 
 ```json
 {
-  "imageUrl": "/ai-images/202606/xxx.png",
+  "imageUrl": "/api/media/ai/42/202608/xxx.png",
   "isFavorite": true
 }
 ```
 
 `imageUrl` 必须来自该任务的 `resultUrls`；取消收藏时传 `isFavorite=false`。收藏状态按当前登录用户隔离。
 
-后台任务成功后，`GET /api/ai/images` 和 `GET /api/ai/images/{id}` 的任务数据返回 `resultUrls` 图片 URL 数组、`favoriteUrls` 当前用户已收藏的结果图 URL 数组，以及 `isFavorite` 是否存在收藏；列表接口会隐藏已写入错误信息且没有结果图片的任务，详情接口仍可按 id 查询；记录同时保存本次任务的参数编码、计算后的 `size`、供应商 `quality` 和 `reference_image_urls`。普通用户只返回/删除自己的任务，超级管理员可查看全部任务。
+后台任务成功后，`GET /api/ai/images` 和 `GET /api/ai/images/{id}` 的任务数据返回 `resultUrls`、`favoriteUrls`、`isFavorite`、`completedImageCount`、`pointCost` 与 `billingStatus`。任务 `status` 为 `0` 待处理、`3` 处理中、`1` 成功、`2` 失败；`billingStatus` 为 `0` 已预留、`1` 已确认、`2` 部分退款、`3` 全额退款。失败任务也会出现在列表中。普通用户只返回/删除自己的任务，活动任务不能删除；超级管理员可查看全部任务。
 
 Nano Banana2 直接生成或创建后台任务：
 
@@ -274,15 +300,18 @@ Authorization: Bearer <accessToken>
 
 ```json
 {
+  "idempotencyKey": "nano-20260808-000001",
   "prompt": "一张写实风格博客封面图",
   "modelCode": "nano-banana-2",
   "resolutionCode": "1k",
   "aspectRatioCode": "auto",
   "imageCount": 1,
   "imageUrls": [
-    "/ai-images/uploads/202606/reference-1.png"
+    "/api/media/ai/42/202608/reference-1.png"
   ]
 }
 ```
 
-`imageUrls` 是可选 JSON 数组，最多 6 张；图片 URL 必须是后端内部静态图片 URL。`imageCount` 默认 `1`，可传 `1-4` 生成多张。Nano Banana2 支持直接传 `size`，也支持传 `resolutionCode` + `aspectRatioCode`。`aspectRatioCode` 传 `auto` 时，后端不会读取参考图尺寸或推导具体画幅比例，而是把上游 `size` 参数直接设为 `auto`，由上游服务自行决定画幅；积分扣减仍按 `resolutionCode` 对应的价格档位匹配，和画幅比例无关。直接生成响应 `data` 返回 `modelName`、`prompt`、`size`、`quality`、`mimeType`、`url`、`urls`、`base64`、`dataUrl`、`isImageToImage`、`imageUrls`、`revisedPrompt`，其中 `url`/`base64`/`dataUrl` 对应首张图片，`urls` 是本次生成的全部图片地址数组。
+`imageUrls` 是可选 JSON 数组，最多 6 张；图片 URL 必须是当前用户可访问的 `/api/media/ai/...` 私有 URL。`imageCount` 默认 `1`，可传 `1-4` 生成多张。Nano Banana2 支持直接传 `size`，也支持传 `resolutionCode` + `aspectRatioCode`。`aspectRatioCode` 传 `auto` 时，后端不会读取参考图尺寸或推导具体画幅比例，而是把上游 `size` 参数直接设为 `auto`，由上游服务自行决定画幅；积分扣减仍按 `resolutionCode` 对应的价格档位匹配，和画幅比例无关。直接生成也先创建同一个持久化后台任务并等待结果，响应 `data` 返回 `taskId`、`modelName`、`prompt`、`size`、`quality`、`mimeType`、`url`、`urls`、`base64`、`dataUrl`、`isImageToImage`、`imageUrls`、`revisedPrompt`。
+
+Nano Banana2 没有单独的配置段，也不参与 GPT 主备切换。文生图和图生图都直接使用 `ai_image_model_config` 中当前启用的 `route_role=primary` 渠道。

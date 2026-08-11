@@ -1,10 +1,13 @@
 using jokester.admin.Application.Abstractions;
 using jokester.admin.Application.DTOs.AiImages;
+using jokester.admin.Application.Models.AiPromptFilter;
+using jokester.admin.Application.Security;
 using jokester.admin.Common;
 using jokester.admin.Common.Exceptions;
 using jokester.admin.Domain.Entities;
-using Microsoft.AspNetCore.Hosting;
+using jokester.admin.Infrastructure;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Options;
 using SqlSugar;
 using System.Net;
 using System.Net.Http.Headers;
@@ -20,13 +23,18 @@ public sealed class AiImageService(
     ISqlSugarClient db,
     ICurrentUser currentUser,
     IAiImageTaskQueue taskQueue,
-    IWebHostEnvironment environment,
+    IAiImageAdmissionService admissionService,
+    IOptions<OpenAiOptions> openAiOptions,
+    IOptions<PromptLibraryOptions> promptLibraryOptions,
+    IAiMediaPathResolver mediaPathResolver,
+    IAiPromptFilter promptFilter,
     ILogger<AiImageService> logger) : IAiImageService
 {
     private const string MimeType = "image/png";
     private const int MaxReferenceImageCount = 6;
     private const long MaxReferenceImageSizeBytes = 10 * 1024 * 1024;
     private const long MaxMaskImageSizeBytes = 4 * 1024 * 1024;
+    private const long MaxGeneratedImageSizeBytes = 25 * 1024 * 1024;
     private const int ProviderDimensionQuantum = 16;
     private const int ProviderMaxLongSide = 3840;
     private const int ProviderMaxTotalPixels = 8_294_400;
@@ -36,14 +44,6 @@ public sealed class AiImageService(
     private const string QualityType = "quality";
     private const string AspectRatioType = "aspect_ratio";
     private const string AiImageSiteCode = "ai_image";
-    private const string EmptyResultUrlsJson = "[]";
-
-    private static readonly Dictionary<string, string> AllowedUploadMimeTypes = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ["image/jpeg"] = ".jpg",
-        ["image/png"] = ".png",
-        ["image/webp"] = ".webp"
-    };
 
     public async Task<PagedResult<AiImageTaskDto>> GetPageAsync(AiImageQuery query, CancellationToken cancellationToken)
     {
@@ -85,8 +85,6 @@ public sealed class AiImageService(
             .WhereIF(endDateExclusive.HasValue, x => x.CreatedAt < endDateExclusive!.Value)
             .WhereIF(query.IsFavorite == true, x => favoriteTaskIds.Contains(x.Id))
             .WhereIF(query.IsFavorite == false && favoriteTaskIds.Count > 0, x => !favoriteTaskIds.Contains(x.Id))
-            .Where(x => string.IsNullOrEmpty(x.ErrorMessage)
-                || (!string.IsNullOrEmpty(x.ResultUrls) && x.ResultUrls != EmptyResultUrlsJson))
             .OrderByDescending(x => x.CreatedAt)
             .OrderByDescending(x => x.Id);
 
@@ -320,6 +318,8 @@ public sealed class AiImageService(
     {
         var taskIds = await CreateTasksAsync(new CreateAiImageTaskRequest
         {
+            IdempotencyKey = request.IdempotencyKey,
+            SourcePromptId = request.SourcePromptId,
             Prompt = request.Prompt,
             ModelCode = request.ModelCode,
             ModelName = request.ModelName,
@@ -332,11 +332,8 @@ public sealed class AiImageService(
             MaskImageUrl = request.MaskImageUrl
         }, cancellationToken);
 
-        var generatedTasks = new List<AiImageTaskDto>(taskIds.Count);
-        foreach (var taskId in taskIds)
-        {
-            generatedTasks.Add(await WaitForGeneratedTaskAsync(taskId, cancellationToken));
-        }
+        var generatedTasks = await Task.WhenAll(
+            taskIds.Select(taskId => WaitForGeneratedTaskAsync(taskId, cancellationToken)));
 
         var resultUrls = generatedTasks.SelectMany(x => x.ResultUrls).ToArray();
         if (resultUrls.Length == 0 && generatedTasks.All(x => x.Status == 2))
@@ -353,6 +350,8 @@ public sealed class AiImageService(
         return new GenerateAiImageResponse
         {
             TaskId = firstTask.Id,
+            TaskIds = taskIds,
+            SourcePromptId = firstTask.SourcePromptId,
             ModelName = firstTask.ModelName,
             ModelCode = firstTask.ModelName,
             Prompt = firstTask.Prompt,
@@ -383,45 +382,34 @@ public sealed class AiImageService(
             throw new AppException(ErrorCodes.BadRequest, "文件大小不能超过 10MB");
         }
 
-        var mimeType = file.ContentType.Trim().ToLowerInvariant();
-        if (!AllowedUploadMimeTypes.TryGetValue(mimeType, out var ext))
-        {
-            throw new AppException(ErrorCodes.BadRequest, $"不支持的文件类型: {mimeType}");
-        }
+        var image = await ImageUploadValidator.ValidateAsync(file, MaxReferenceImageSizeBytes, cancellationToken);
+        var mimeType = image.MimeType;
+        var ext = image.Extension;
 
-        var fileExt = Path.GetExtension(file.FileName);
-        if (!string.IsNullOrWhiteSpace(fileExt) && AllowedUploadMimeTypes.ContainsValue(fileExt.ToLowerInvariant()))
-        {
-            ext = fileExt.ToLowerInvariant();
-        }
-
-        var storageKey = $"ai-images/uploads/{DateTime.UtcNow:yyyyMM}/{Guid.NewGuid():N}{ext}";
-        var webRootPath = environment.WebRootPath
-            ?? Path.Combine(environment.ContentRootPath, "wwwroot");
-        var savePath = Path.Combine(webRootPath, storageKey);
+        var owner = currentUser.UserId ?? throw new AppException(ErrorCodes.Unauthorized, "Unauthorized");
+        var storageKey = $"{owner}/{DateTime.UtcNow:yyyyMM}/{Guid.NewGuid():N}{ext}";
+        var savePath = mediaPathResolver.ResolveFilePath(storageKey);
 
         Directory.CreateDirectory(Path.GetDirectoryName(savePath)!);
-        await using (var stream = File.Create(savePath))
-        {
-            await file.CopyToAsync(stream, cancellationToken);
-        }
+        await File.WriteAllBytesAsync(savePath, image.Content, cancellationToken);
 
         return new UploadAiImageResponse
         {
-            Url = $"/{storageKey.Replace('\\', '/')}",
+            Url = $"/api/media/ai/{storageKey.Replace('\\', '/')}",
             FileName = file.FileName,
             MimeType = mimeType,
             FileSize = file.Length
         };
     }
 
-    public async Task<GenerateAiImageResponse> GenerateFromResolvedAsync(string prompt, string? modelCode, ResolveAiImageParametersResponse parameters, IReadOnlyList<string> referenceImageUrls, string? maskImageUrl, CancellationToken cancellationToken)
+    public async Task<GenerateAiImageResponse> GenerateFromResolvedAsync(string prompt, string? modelCode, ResolveAiImageParametersResponse parameters, IReadOnlyList<string> referenceImageUrls, string? maskImageUrl, long ownerUserId, CancellationToken cancellationToken)
     {
-        var normalizedPrompt = ValidatePrompt(prompt);
+        var normalizedPrompt = AiImagePromptValidator.Validate(prompt);
         var normalizedReferenceImageUrls = ValidateReferenceImageUrls(referenceImageUrls);
         var normalizedMaskImageUrl = ValidateMaskImageUrl(maskImageUrl, normalizedReferenceImageUrls);
         var requestedModelCode = AiImageModelConfigService.NormalizeModelCode(modelCode);
-        var modelConfig = await modelConfigService.ResolveAsync(requestedModelCode, parameters.ResolutionCode, cancellationToken);
+        var modelRoutes = await modelConfigService.ResolveRoutesAsync(requestedModelCode, parameters.ResolutionCode, cancellationToken);
+        var modelConfig = modelRoutes[0];
 
         if (!string.Equals(modelConfig.ModelCode, AiImageModelConfigService.DefaultGptModelCode, StringComparison.OrdinalIgnoreCase))
         {
@@ -432,25 +420,24 @@ public sealed class AiImageService(
 
         httpClient.DefaultRequestHeaders.Authorization = null;
 
-        using var document = await SendImageRequestWithFallbackAsync(
-            modelConfig,
+        var generatedImage = await GenerateImageWithFallbackAsync(
+            modelRoutes,
             normalizedPrompt,
             parameters,
             normalizedReferenceImageUrls,
             normalizedMaskImageUrl,
+            ownerUserId,
             cancellationToken);
 
-        var firstImage = ReadFirstOpenAiImage(document.RootElement);
-        var (base64, url) = string.IsNullOrWhiteSpace(firstImage.Base64)
-            ? await DownloadImageAsBase64Async(firstImage.Url!, cancellationToken)
-            : (firstImage.Base64!, await SaveImageAsync(firstImage.Base64!, cancellationToken));
+        var firstImage = generatedImage.ProviderResult;
+        var savedImage = generatedImage.SavedImage;
 
         return new GenerateAiImageResponse
         {
             TaskId = 0,
-            ModelName = modelConfig.ModelName,
+            ModelName = generatedImage.Route.ModelName,
             ModelCode = modelConfig.ModelCode,
-            ProviderModel = modelConfig.ProviderModel,
+            ProviderModel = generatedImage.Route.ProviderModel,
             Prompt = normalizedPrompt,
             ResolutionCode = parameters.ResolutionCode,
             QualityCode = parameters.QualityCode,
@@ -459,18 +446,94 @@ public sealed class AiImageService(
             Height = parameters.Height,
             Size = parameters.Size,
             Quality = parameters.ProviderQuality,
-            MimeType = MimeType,
-            Url = url,
-            Urls = [url],
-            Base64 = base64,
-            DataUrl = $"data:{MimeType};base64,{base64}",
+            MimeType = savedImage.MimeType,
+            Url = savedImage.Url,
+            Urls = [savedImage.Url],
+            Base64 = savedImage.Base64,
+            DataUrl = $"data:{savedImage.MimeType};base64,{savedImage.Base64}",
             MaskImageUrl = normalizedMaskImageUrl,
             ReferenceImageUrls = normalizedReferenceImageUrls,
             RevisedPrompt = firstImage.RevisedPrompt
         };
     }
 
-    private async Task<JsonDocument> SendImageRequestWithFallbackAsync(
+    private async Task<GeneratedProviderImage> GenerateImageWithFallbackAsync(
+        IReadOnlyList<ResolvedAiImageModelConfig> routes,
+        string prompt,
+        ResolveAiImageParametersResponse parameters,
+        IReadOnlyList<string> referenceImageUrls,
+        string? maskImageUrl,
+        long ownerUserId,
+        CancellationToken cancellationToken)
+    {
+        var selectedRoute = routes[0];
+        if (routes.Count > 1)
+        {
+            using var primaryTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            primaryTimeout.CancelAfter(TimeSpan.FromSeconds(openAiOptions.Value.PrimaryTimeoutSeconds));
+            try
+            {
+                return await GenerateImageForRouteAsync(
+                    selectedRoute,
+                    prompt,
+                    parameters,
+                    referenceImageUrls,
+                    maskImageUrl,
+                    ownerUserId,
+                    primaryTimeout.Token);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(
+                    "Primary AI image route failed; switching to the database fallback route. Mode={Mode}, ModelCode={ModelCode}, RouteConfigId={RouteConfigId}, ProviderModel={ProviderModel}, FailureType={FailureType}",
+                    referenceImageUrls.Count == 0 ? "generations" : "edits",
+                    selectedRoute.ModelCode,
+                    selectedRoute.Id,
+                    selectedRoute.ProviderModel,
+                    ex.GetType().Name);
+            }
+
+            selectedRoute = routes[1];
+        }
+
+        return await GenerateImageForRouteAsync(
+            selectedRoute,
+            prompt,
+            parameters,
+            referenceImageUrls,
+            maskImageUrl,
+            ownerUserId,
+            cancellationToken);
+    }
+
+    private async Task<GeneratedProviderImage> GenerateImageForRouteAsync(
+        ResolvedAiImageModelConfig modelConfig,
+        string prompt,
+        ResolveAiImageParametersResponse parameters,
+        IReadOnlyList<string> referenceImageUrls,
+        string? maskImageUrl,
+        long ownerUserId,
+        CancellationToken cancellationToken)
+    {
+        using var document = await SendImageRequestForRouteAsync(
+            modelConfig,
+            prompt,
+            parameters,
+            referenceImageUrls,
+            maskImageUrl,
+            cancellationToken);
+        var providerResult = ReadFirstOpenAiImage(document.RootElement);
+        var savedImage = string.IsNullOrWhiteSpace(providerResult.Base64)
+            ? await DownloadImageAsBase64Async(providerResult.Url!, ownerUserId, cancellationToken)
+            : await SaveImageAsync(providerResult.Base64!, ownerUserId, cancellationToken);
+        return new GeneratedProviderImage(providerResult, savedImage, modelConfig);
+    }
+
+    private async Task<JsonDocument> SendImageRequestForRouteAsync(
         ResolvedAiImageModelConfig modelConfig,
         string prompt,
         ResolveAiImageParametersResponse parameters,
@@ -481,7 +544,7 @@ public sealed class AiImageService(
         var mode = referenceImageUrls.Count == 0 ? "generations" : "edits";
         var primaryImageFieldName = referenceImageUrls.Count == 0 ? null : "image[]";
         var response = await SendImageRequestAsync(modelConfig, prompt, parameters, referenceImageUrls, maskImageUrl, primaryImageFieldName, cancellationToken);
-        if (response.IsSuccess)
+        if (response.IsSuccess && TryReadOpenAiImage(response.Document.RootElement, out _))
         {
             return response.Document;
         }
@@ -489,32 +552,26 @@ public sealed class AiImageService(
         if (referenceImageUrls.Count > 0)
         {
             logger.LogWarning(
-                "AI image request failed; retrying with alternate multipart image field. Endpoint={Endpoint}, Mode={Mode}, ModelCode={ModelCode}, ProviderModel={ProviderModel}, ImageFieldName={ImageFieldName}, StatusCode={StatusCode}, ResponseBody={ResponseBody}",
-                response.Endpoint,
+                "AI image request failed; retrying with alternate multipart image field. Mode={Mode}, ModelCode={ModelCode}, StatusCode={StatusCode}",
                 mode,
                 modelConfig.ModelCode,
-                modelConfig.ProviderModel,
-                primaryImageFieldName,
-                response.StatusCode,
-                TruncateForLog(response.Body));
+                response.StatusCode);
             response.Document.Dispose();
 
             var retryResponse = await SendImageRequestAsync(modelConfig, prompt, parameters, referenceImageUrls, maskImageUrl, "image", cancellationToken);
-            if (retryResponse.IsSuccess)
+            if (retryResponse.IsSuccess && TryReadOpenAiImage(retryResponse.Document.RootElement, out _))
             {
                 return retryResponse.Document;
             }
 
             LogProviderFailure(retryResponse, mode, modelConfig, "image");
-            var retryMessage = ReadProviderErrorSafely(retryResponse.Document.RootElement, retryResponse.Body);
             retryResponse.Document.Dispose();
-            throw new AppException(ErrorCodes.BadRequest, $"Image generation failed: {retryMessage}");
+            throw new AppException(ErrorCodes.BadRequest, "Image generation service temporarily failed. Please try again later.");
         }
 
         LogProviderFailure(response, mode, modelConfig, primaryImageFieldName);
-        var message = ReadProviderErrorSafely(response.Document.RootElement, response.Body);
         response.Document.Dispose();
-        throw new AppException(ErrorCodes.BadRequest, $"Image generation failed: {message}");
+        throw new AppException(ErrorCodes.BadRequest, "Image generation service temporarily failed. Please try again later.");
     }
 
     private async Task<ImageProviderResponse> SendImageRequestAsync(
@@ -533,18 +590,16 @@ public sealed class AiImageService(
         httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", modelConfig.ApiKey);
 
         logger.LogInformation(
-            "Sending AI image request. Endpoint={Endpoint}, Mode={Mode}, ModelCode={ModelCode}, ProviderModel={ProviderModel}, Size={Size}, Quality={Quality}, ReferenceImageCount={ReferenceImageCount}, ImageFieldName={ImageFieldName}, ReferenceImageUrls={ReferenceImageUrls}, MaskImageUrl={MaskImageUrl}, Prompt={Prompt}",
-            httpRequest.RequestUri,
+            "Sending AI image request. Mode={Mode}, ModelCode={ModelCode}, RouteRole={RouteRole}, RouteConfigId={RouteConfigId}, ProviderModel={ProviderModel}, Endpoint={Endpoint}, Size={Size}, Quality={Quality}, ReferenceImageCount={ReferenceImageCount}",
             referenceImageUrls.Count == 0 ? "generations" : "edits",
             modelConfig.ModelCode,
+            modelConfig.RouteRole,
+            modelConfig.Id,
             modelConfig.ProviderModel,
+            httpRequest.RequestUri,
             parameters.Size,
             parameters.ProviderQuality,
-            referenceImageUrls.Count,
-            imageFieldName,
-            referenceImageUrls,
-            maskImageUrl,
-            prompt);
+            referenceImageUrls.Count);
 
         using var response = await httpClient.SendAsync(httpRequest, cancellationToken);
         var body = await response.Content.ReadAsStringAsync(cancellationToken);
@@ -556,11 +611,9 @@ public sealed class AiImageService(
         catch (JsonException ex)
         {
             logger.LogError(
-                ex,
-                "AI image provider returned non-JSON response. Endpoint={Endpoint}, StatusCode={StatusCode}, Body={Body}",
-                httpRequest.RequestUri,
+                "AI image provider returned non-JSON response. StatusCode={StatusCode}, FailureType={FailureType}",
                 response.StatusCode,
-                TruncateForLog(body));
+                ex.GetType().Name);
             throw new AppException(ErrorCodes.BadRequest, "Image generation failed: provider returned invalid JSON");
         }
 
@@ -584,7 +637,7 @@ public sealed class AiImageService(
                 throw new NotFoundException($"AI image task does not exist: {taskId}");
             }
 
-            if (task.Status != 0)
+            if (!IsTaskActive(task.Status))
             {
                 return task;
             }
@@ -611,7 +664,7 @@ public sealed class AiImageService(
 
     public async Task<IReadOnlyList<long>> CreateTasksAsync(CreateAiImageTaskRequest request, CancellationToken cancellationToken)
     {
-        var prompt = ValidatePrompt(request.Prompt);
+        var prompt = AiImagePromptValidator.Validate(request.Prompt);
         var modelCode = ResolveRequestModelCode(request.ModelCode, request.ModelName, AiImageModelConfigService.DefaultGptModelCode);
         var imageCount = ValidateImageCount(request.ImageCount, modelCode);
         var parameters = await ResolveParametersAsync(new ResolveAiImageParametersRequest
@@ -624,57 +677,248 @@ public sealed class AiImageService(
         var referenceImageUrls = ValidateReferenceImageUrls(request.ReferenceImageUrls);
         var maskImageUrl = ValidateMaskImageUrl(request.MaskImageUrl, referenceImageUrls);
         var userId = currentUser.UserId ?? throw new AppException(ErrorCodes.Unauthorized, "User is not authenticated");
+        var sourcePromptId = await ValidateSourcePromptIdAsync(request.SourcePromptId, cancellationToken);
+        foreach (var referenceImageUrl in referenceImageUrls)
+        {
+            _ = ResolveReferenceImageFile(referenceImageUrl);
+        }
+        if (!string.IsNullOrWhiteSpace(maskImageUrl))
+        {
+            _ = ResolveMaskImageFile(maskImageUrl);
+        }
         var siteId = await ResolveAiImageSiteIdAsync(request.SiteId, cancellationToken);
         var modelConfig = await modelConfigService.ResolveAsync(modelCode, parameters.ResolutionCode, cancellationToken);
-        var pointCost = await pointService.GetImageGenerateCostAsync(modelConfig.ModelCode, parameters.ResolutionCode, parameters.QualityCode, 1, cancellationToken);
+        var pointCostPerImage = await pointService.GetImageGenerateCostAsync(
+            modelConfig.ModelCode,
+            parameters.ResolutionCode,
+            parameters.QualityCode,
+            1,
+            cancellationToken);
+        var pointCost = checked(pointCostPerImage * imageCount);
         await ExpireStaleTasksAsync(userId, cancellationToken);
 
-        var taskIds = new List<long>(imageCount);
-        for (var i = 0; i < imageCount; i++)
+        var negativePrompt = string.IsNullOrWhiteSpace(request.NegativePrompt) ? null : request.NegativePrompt.Trim();
+        if (negativePrompt?.Length > 2000)
         {
-            var entity = new AiImageTaskEntity
+            throw new AppException(ErrorCodes.BadRequest, "Negative prompt is too long");
+        }
+        object canonicalRequest = sourcePromptId.HasValue
+            ? new
             {
-                SiteId = siteId,
-                UserId = userId,
+                Endpoint = "gpt-image",
+                SourcePromptId = sourcePromptId.Value,
                 Prompt = prompt,
-                NegativePrompt = string.IsNullOrWhiteSpace(request.NegativePrompt) ? null : request.NegativePrompt.Trim(),
-                ModelName = modelConfig.ModelCode,
-                ImageCount = 1,
-                ResolutionCode = parameters.ResolutionCode,
-                QualityCode = parameters.QualityCode,
-                AspectRatioCode = parameters.AspectRatioCode,
-                Width = parameters.Width,
-                Height = parameters.Height,
-                Size = parameters.Size,
-                Quality = parameters.ProviderQuality,
-                ReferenceImageUrls = referenceImageUrls.Count == 0 ? null : JsonSerializer.Serialize(referenceImageUrls),
-                MaskImageUrl = maskImageUrl,
-                Status = 0,
-                CreatedAt = HongKongNow(),
-                IsDeleted = false
-            };
-
-            entity.Id = await db.Insertable(entity).ExecuteReturnBigIdentityAsync();
-            await pointService.ConsumeForImageAsync(userId, entity.Id, modelConfig.ModelCode, parameters.ResolutionCode, parameters.QualityCode, pointCost, cancellationToken);
-            if (!taskQueue.TryQueue(entity.Id))
-            {
-                await db.Updateable<AiImageTaskEntity>()
-                    .SetColumns(x => new AiImageTaskEntity
-                    {
-                        Status = 2,
-                        ErrorMessage = "AI image task queue is full",
-                        UpdatedAt = HongKongNow()
-                    })
-                    .Where(x => x.Id == entity.Id)
-                    .ExecuteCommandAsync();
-                await pointService.RefundForImageAsync(userId, entity.Id, pointCost, cancellationToken);
-                throw new AppException(ErrorCodes.ServerError, "AI image task queue is full");
+                NegativePrompt = negativePrompt,
+                ModelCode = modelConfig.ModelCode,
+                ImageCount = imageCount,
+                parameters.ResolutionCode,
+                parameters.QualityCode,
+                parameters.AspectRatioCode,
+                ReferenceImageUrls = referenceImageUrls,
+                MaskImageUrl = maskImageUrl
             }
-
-            taskIds.Add(entity.Id);
+            : new
+            {
+                Endpoint = "gpt-image",
+                Prompt = prompt,
+                NegativePrompt = negativePrompt,
+                ModelCode = modelConfig.ModelCode,
+                ImageCount = imageCount,
+                parameters.ResolutionCode,
+                parameters.QualityCode,
+                parameters.AspectRatioCode,
+                ReferenceImageUrls = referenceImageUrls,
+                MaskImageUrl = maskImageUrl
+            };
+        var identity = AiImageIdempotency.Create(request.IdempotencyKey, canonicalRequest);
+        var taskKeyHashes = Enumerable.Range(0, imageCount)
+            .Select(index => AiImageIdempotency.DeriveTaskKeyHash(identity.KeyHash, index))
+            .ToArray();
+        var existingTasks = await FindIdempotentTasksAsync(userId, identity, taskKeyHashes, imageCount, cancellationToken);
+        if (existingTasks.Count > 0)
+        {
+            return existingTasks.Select(task => task.Id).ToArray();
         }
 
-        return taskIds;
+        var promptPolicyVersion = await promptFilter.EnsureAllAllowedAsync(
+            [
+                new AiPromptFilterText("prompt", prompt),
+                new AiPromptFilterText("negativePrompt", negativePrompt)
+            ],
+            cancellationToken);
+
+        var admission = await admissionService.ReserveAsync(
+            userId,
+            identity.KeyHash,
+            identity.RequestFingerprint,
+            imageCount,
+            pointCost,
+            cancellationToken);
+        if (admission.IsDuplicate)
+        {
+            var duplicateTasks = await WaitForIdempotentTasksAsync(
+                userId,
+                identity,
+                taskKeyHashes,
+                imageCount,
+                cancellationToken);
+            return duplicateTasks.Select(task => task.Id).ToArray();
+        }
+
+        var createdAt = HongKongNow();
+        var serializedReferenceImageUrls = referenceImageUrls.Count == 0 ? null : JsonSerializer.Serialize(referenceImageUrls);
+        var entities = taskKeyHashes.Select(taskKeyHash => new AiImageTaskEntity
+        {
+            SiteId = siteId,
+            UserId = userId,
+            SourcePromptId = sourcePromptId,
+            Prompt = prompt,
+            NegativePrompt = negativePrompt,
+            PromptPolicyVersion = promptPolicyVersion,
+            PromptCheckedAt = createdAt,
+            ModelName = modelConfig.ModelCode,
+            ImageCount = 1,
+            CompletedImageCount = 0,
+            IdempotencyKey = taskKeyHash,
+            RequestFingerprint = identity.RequestFingerprint,
+            PointCost = pointCostPerImage,
+            BillingStatus = 0,
+            ResolutionCode = parameters.ResolutionCode,
+            QualityCode = parameters.QualityCode,
+            AspectRatioCode = parameters.AspectRatioCode,
+            Width = parameters.Width,
+            Height = parameters.Height,
+            Size = parameters.Size,
+            Quality = parameters.ProviderQuality,
+            ReferenceImageUrls = serializedReferenceImageUrls,
+            MaskImageUrl = maskImageUrl,
+            Status = 0,
+            CreatedAt = createdAt,
+            IsDeleted = false
+        })
+            .ToArray();
+
+        var persisted = false;
+        try
+        {
+            var reservation = await pointService.ReserveImageTasksAsync(
+                entities,
+                modelConfig.ModelCode,
+                parameters.ResolutionCode,
+                parameters.QualityCode,
+                cancellationToken);
+            persisted = reservation.Created;
+            if (!reservation.Created)
+            {
+                await admissionService.CancelAsync(admission);
+                return reservation.TaskIds;
+            }
+
+            await admissionService.BindTaskAsync(admission, entities[0].Id, cancellationToken);
+            foreach (var entity in entities)
+            {
+                if (!taskQueue.TryQueue(entity.Id))
+                {
+                    throw new AppException(ErrorCodes.ServiceUnavailable, "AI image task queue is full");
+                }
+            }
+
+            return entities.Select(entity => entity.Id).ToArray();
+        }
+        catch (Exception ex)
+        {
+            if (persisted)
+            {
+                foreach (var entity in entities)
+                {
+                    var settlement = await pointService.SettleImageTaskAsync(
+                        entity.Id,
+                        2,
+                        null,
+                        ex is AppException ? ex.Message : "AI image task admission failed",
+                        0,
+                        CancellationToken.None);
+                    if (settlement.Transitioned)
+                    {
+                        await admissionService.CompleteAsync(entity, 0, settlement.RefundedPoints);
+                    }
+                }
+            }
+            else
+            {
+                await admissionService.CancelAsync(admission);
+            }
+
+            throw;
+        }
+    }
+
+    private async Task<IReadOnlyList<AiImageTaskEntity>> FindIdempotentTasksAsync(
+        long userId,
+        AiImageRequestIdentity identity,
+        IReadOnlyList<string> taskKeyHashes,
+        int requestedImageCount,
+        CancellationToken cancellationToken)
+    {
+        var keyArray = taskKeyHashes.ToArray();
+        var existingTasks = await db.Queryable<AiImageTaskEntity>()
+            .Where(x => x.UserId == userId && keyArray.Contains(x.IdempotencyKey))
+            .ToListAsync(cancellationToken);
+        if (existingTasks.Any(existing =>
+                !string.Equals(existing.RequestFingerprint, identity.RequestFingerprint, StringComparison.Ordinal)))
+        {
+            throw new ConflictException("Idempotency key was already used with a different request");
+        }
+
+        if (existingTasks.Count == 0)
+        {
+            return [];
+        }
+
+        // Keep idempotent retries compatible with tasks created before multi-image requests
+        // were split into one task per image.
+        if (existingTasks.Count == 1
+            && existingTasks[0].IdempotencyKey == identity.KeyHash
+            && existingTasks[0].ImageCount == requestedImageCount)
+        {
+            return existingTasks;
+        }
+
+        if (existingTasks.Count != taskKeyHashes.Count)
+        {
+            return [];
+        }
+
+        var order = taskKeyHashes
+            .Select((key, index) => (key, index))
+            .ToDictionary(x => x.key, x => x.index, StringComparer.Ordinal);
+        return existingTasks.OrderBy(task => order[task.IdempotencyKey]).ToArray();
+    }
+
+    private async Task<IReadOnlyList<AiImageTaskEntity>> WaitForIdempotentTasksAsync(
+        long userId,
+        AiImageRequestIdentity identity,
+        IReadOnlyList<string> taskKeyHashes,
+        int requestedImageCount,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; attempt < 20; attempt++)
+        {
+            var existingTasks = await FindIdempotentTasksAsync(
+                userId,
+                identity,
+                taskKeyHashes,
+                requestedImageCount,
+                cancellationToken);
+            if (existingTasks.Count > 0)
+            {
+                return existingTasks;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken);
+        }
+
+        throw new ConflictException("The idempotent AI image request is still being committed; retry shortly");
     }
 
     public async Task SetFavoriteAsync(long id, FavoriteAiImageRequest request, CancellationToken cancellationToken)
@@ -736,6 +980,20 @@ public sealed class AiImageService(
     public async Task DeleteAsync(long id, CancellationToken cancellationToken)
     {
         var currentUserId = currentUser.UserId ?? throw new AppException(ErrorCodes.Unauthorized, "User is not authenticated");
+        var task = await db.Queryable<AiImageTaskEntity>()
+            .Where(x => x.Id == id && !x.IsDeleted)
+            .WhereIF(!currentUser.IsSuperAdmin, x => x.UserId == currentUserId)
+            .FirstAsync(cancellationToken);
+        if (task is null)
+        {
+            throw new NotFoundException($"AI image task does not exist: {id}");
+        }
+
+        if (IsTaskActive(task.Status))
+        {
+            throw new ConflictException("An active AI image task cannot be deleted");
+        }
+
         var affected = await db.Updateable<AiImageTaskEntity>()
             .SetColumns(x => new AiImageTaskEntity { IsDeleted = true, UpdatedAt = HongKongNow() })
             .Where(x => x.Id == id && !x.IsDeleted)
@@ -752,7 +1010,7 @@ public sealed class AiImageService(
     {
         var now = HongKongNow();
         var candidates = await db.Queryable<AiImageTaskEntity>()
-            .Where(x => !x.IsDeleted && x.Status == 0)
+            .Where(x => !x.IsDeleted && (x.Status == 0 || x.Status == 3))
             .WhereIF(userId.HasValue, x => x.UserId == userId!.Value)
             .OrderBy(x => x.CreatedAt)
             .Take(100)
@@ -772,83 +1030,36 @@ public sealed class AiImageService(
         }
 
         var resultUrls = DeserializeImageUrls(task.ResultUrls);
-        var timeout = AiImageTaskProcessor.ResolveTaskTimeout(task.ImageCount);
+        var timeout = task.Status == 0
+            ? AiImageTaskProcessor.ResolvePendingTaskTimeout()
+            : AiImageTaskProcessor.ResolveTaskTimeout(task.ImageCount);
         var message = $"AI image generation expired after {timeout.TotalMinutes:0} minutes.";
-        var affected = resultUrls.Count > 0
-            ? await db.Updateable<AiImageTaskEntity>()
-                .SetColumns(x => new AiImageTaskEntity
-                {
-                    Status = 2,
-                    ErrorMessage = message,
-                    ResultUrls = JsonSerializer.Serialize(resultUrls),
-                    UpdatedAt = HongKongNow()
-                })
-                .Where(x => x.Id == task.Id && !x.IsDeleted && x.Status == 0)
-                .ExecuteCommandAsync(cancellationToken)
-            : await db.Updateable<AiImageTaskEntity>()
-                .SetColumns(x => new AiImageTaskEntity
-                {
-                    Status = 2,
-                    ErrorMessage = message,
-                    UpdatedAt = HongKongNow()
-                })
-                .Where(x => x.Id == task.Id && !x.IsDeleted && x.Status == 0)
-                .ExecuteCommandAsync(cancellationToken);
-        if (affected == 0)
+        var settlement = await pointService.SettleImageTaskAsync(
+            task.Id,
+            2,
+            resultUrls.Count == 0 ? task.ResultUrls : JsonSerializer.Serialize(resultUrls),
+            message,
+            resultUrls.Count,
+            cancellationToken);
+        if (settlement.Transitioned)
         {
-            return;
+            await admissionService.CompleteAsync(task, settlement.CompletedImageCount, settlement.RefundedPoints);
         }
-
-        var failedImageCount = Math.Max(0, task.ImageCount - resultUrls.Count);
-        if (failedImageCount == 0)
-        {
-            return;
-        }
-
-        var refundPoints = await ResolveTaskCostAsync(task, failedImageCount, cancellationToken);
-        await pointService.RefundForImageAsync(task.UserId, task.Id, refundPoints, cancellationToken);
     }
 
     private static bool IsTaskExpired(AiImageTaskEntity task, DateTime now)
     {
-        return task.Status == 0 && task.CreatedAt.Add(AiImageTaskProcessor.ResolveTaskTimeout(task.ImageCount)) <= now;
+        return task.Status switch
+        {
+            0 => task.CreatedAt.Add(AiImageTaskProcessor.ResolvePendingTaskTimeout()) <= now,
+            3 => (task.StartedAt ?? task.CreatedAt).Add(AiImageTaskProcessor.ResolveTaskTimeout(task.ImageCount)) <= now,
+            _ => false
+        };
     }
 
     private static DateTime HongKongNow()
     {
         return DateTime.UtcNow.AddHours(8);
-    }
-
-    private async Task<int> ResolveTaskCostAsync(AiImageTaskEntity task, int imageCount, CancellationToken cancellationToken)
-    {
-        if (imageCount <= 0)
-        {
-            return 0;
-        }
-
-        var modelCode = AiImageModelConfigService.NormalizeModelCode(task.ModelName);
-        var isNanoBananaModel = AiImageModelConfigService.IsNanoBananaModel(modelCode);
-        if (isNanoBananaModel)
-        {
-            var candidates = string.Equals(task.Size, task.ResolutionCode, StringComparison.OrdinalIgnoreCase)
-                ? [task.Size]
-                : new[] { task.Size, task.ResolutionCode };
-
-            foreach (var resolutionCode in candidates)
-            {
-                try
-                {
-                    return await pointService.GetImageGenerateCostAsync(modelCode, resolutionCode, string.Empty, imageCount, cancellationToken);
-                }
-                catch (AppException ex) when (ex.Code == ErrorCodes.BadRequest)
-                {
-                }
-            }
-
-            return 0;
-        }
-
-        return await pointService.GetImageGenerateCostAsync(modelCode, task.ResolutionCode, task.QualityCode, imageCount, cancellationToken);
     }
 
     private async Task<Dictionary<long, IReadOnlyList<string>>> GetFavoriteUrlLookupAsync(IReadOnlyCollection<long> taskIds, long userId, CancellationToken cancellationToken)
@@ -922,7 +1133,32 @@ public sealed class AiImageService(
         return siteId;
     }
 
-    private async Task<string> SaveImageAsync(string base64, CancellationToken cancellationToken)
+    private async Task<long?> ValidateSourcePromptIdAsync(long? sourcePromptId, CancellationToken cancellationToken)
+    {
+        if (!sourcePromptId.HasValue)
+        {
+            return null;
+        }
+        if (sourcePromptId.Value <= 0)
+        {
+            throw new AppException(ErrorCodes.BadRequest, "sourcePromptId must be a positive integer");
+        }
+
+        var exists = await db.Queryable<PromptLibraryItemEntity>()
+            .AnyAsync(
+                x => x.Id == sourcePromptId.Value
+                    && x.Source == promptLibraryOptions.Value.Source
+                    && x.IsActive,
+                cancellationToken);
+        if (!exists)
+        {
+            throw new NotFoundException($"Prompt does not exist: {sourcePromptId.Value}");
+        }
+
+        return sourcePromptId.Value;
+    }
+
+    private async Task<SavedImage> SaveImageAsync(string base64, long ownerUserId, CancellationToken cancellationToken)
     {
         byte[] bytes;
         try
@@ -934,10 +1170,10 @@ public sealed class AiImageService(
             throw new AppException(ErrorCodes.BadRequest, "Image generation returned invalid base64 image data");
         }
 
-        return await SaveImageBytesAsync(bytes, cancellationToken);
+        return await SaveImageBytesAsync(bytes, ownerUserId, cancellationToken);
     }
 
-    private async Task<(string Base64, string Url)> DownloadImageAsBase64Async(string imageUrl, CancellationToken cancellationToken)
+    private async Task<SavedImage> DownloadImageAsBase64Async(string imageUrl, long ownerUserId, CancellationToken cancellationToken)
     {
         using var response = await httpClient.GetAsync(imageUrl, cancellationToken);
         if (!response.IsSuccessStatusCode)
@@ -951,21 +1187,24 @@ public sealed class AiImageService(
             throw new AppException(ErrorCodes.BadRequest, "Image generation returned empty image data");
         }
 
-        var url = await SaveImageBytesAsync(bytes, cancellationToken);
-        return (Convert.ToBase64String(bytes), url);
+        return await SaveImageBytesAsync(bytes, ownerUserId, cancellationToken);
     }
 
-    private async Task<string> SaveImageBytesAsync(byte[] bytes, CancellationToken cancellationToken)
+    private static bool IsTaskActive(int status) => status is 0 or 3;
+
+    private async Task<SavedImage> SaveImageBytesAsync(byte[] bytes, long ownerUserId, CancellationToken cancellationToken)
     {
-        var storageKey = $"ai-images/{DateTime.UtcNow:yyyyMM}/{Guid.NewGuid():N}.png";
-        var webRootPath = environment.WebRootPath
-            ?? Path.Combine(environment.ContentRootPath, "wwwroot");
-        var savePath = Path.Combine(webRootPath, storageKey);
+        var image = await ImageUploadValidator.ValidateAsync(bytes, MaxGeneratedImageSizeBytes, cancellationToken);
+        var storageKey = $"{ownerUserId}/{DateTime.UtcNow:yyyyMM}/{Guid.NewGuid():N}{image.Extension}";
+        var savePath = mediaPathResolver.ResolveFilePath(storageKey);
 
         Directory.CreateDirectory(Path.GetDirectoryName(savePath)!);
-        await File.WriteAllBytesAsync(savePath, bytes, cancellationToken);
+        await File.WriteAllBytesAsync(savePath, image.Content, cancellationToken);
 
-        return $"/{storageKey.Replace('\\', '/')}";
+        return new SavedImage(
+            $"/api/media/ai/{storageKey.Replace('\\', '/')}",
+            Convert.ToBase64String(image.Content),
+            image.MimeType);
     }
 
     private static AiImageTaskDto MapTaskDto(AiImageTaskEntity entity, IReadOnlyList<string>? favoriteUrls = null)
@@ -975,9 +1214,13 @@ public sealed class AiImageService(
         {
             Id = entity.Id,
             SiteId = entity.SiteId,
+            SourcePromptId = entity.SourcePromptId,
             Prompt = entity.Prompt,
             ModelName = entity.ModelName ?? string.Empty,
             ImageCount = entity.ImageCount,
+            CompletedImageCount = entity.CompletedImageCount,
+            PointCost = entity.PointCost,
+            BillingStatus = entity.BillingStatus,
             ResolutionCode = entity.ResolutionCode,
             QualityCode = entity.QualityCode,
             AspectRatioCode = entity.AspectRatioCode,
@@ -1039,22 +1282,6 @@ public sealed class AiImageService(
     private static string ResolveCodeAlias(string aliasCode, string canonicalCode)
     {
         return !string.IsNullOrWhiteSpace(aliasCode) ? aliasCode : canonicalCode;
-    }
-
-    private static string ValidatePrompt(string prompt)
-    {
-        if (string.IsNullOrWhiteSpace(prompt))
-        {
-            throw new AppException(ErrorCodes.BadRequest, "Prompt is required");
-        }
-
-        var trimmed = prompt.Trim();
-        if (trimmed.Length > 4000)
-        {
-            throw new AppException(ErrorCodes.BadRequest, "Prompt is too long");
-        }
-
-        return trimmed;
     }
 
     private static int ValidateImageCount(int imageCount, string modelCode)
@@ -1142,13 +1369,22 @@ public sealed class AiImageService(
 
     private ReferenceImageFile ResolveReferenceImageFile(string referenceImageUrl)
     {
-        var webRootPath = environment.WebRootPath
-            ?? Path.Combine(environment.ContentRootPath, "wwwroot");
-        var webRootFullPath = Path.GetFullPath(webRootPath);
-        var relativeUrl = referenceImageUrl.Split('?', '#')[0].TrimStart('/');
-        var fullPath = Path.GetFullPath(Path.Combine(webRootFullPath, relativeUrl.Replace('/', Path.DirectorySeparatorChar)));
-
-        if (!fullPath.StartsWith(webRootFullPath + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+        const string mediaPrefix = "/api/media/ai/";
+        if (!referenceImageUrl.StartsWith(mediaPrefix, StringComparison.Ordinal))
+        {
+            throw new AppException(ErrorCodes.BadRequest, "Reference image must be private media");
+        }
+        var relativeUrl = referenceImageUrl[mediaPrefix.Length..].Split('?', '#')[0];
+        if (currentUser.UserId.HasValue && !currentUser.IsSuperAdmin && !relativeUrl.StartsWith($"{currentUser.UserId.Value}/", StringComparison.Ordinal))
+        {
+            throw new AppException(ErrorCodes.NotFound, "Reference image does not exist");
+        }
+        string fullPath;
+        try
+        {
+            fullPath = mediaPathResolver.ResolveFilePath(relativeUrl);
+        }
+        catch (InvalidOperationException)
         {
             throw new AppException(ErrorCodes.BadRequest, "Invalid reference image URL");
         }
@@ -1170,13 +1406,22 @@ public sealed class AiImageService(
 
     private ReferenceImageFile ResolveMaskImageFile(string maskImageUrl)
     {
-        var webRootPath = environment.WebRootPath
-            ?? Path.Combine(environment.ContentRootPath, "wwwroot");
-        var webRootFullPath = Path.GetFullPath(webRootPath);
-        var relativeUrl = maskImageUrl.Split('?', '#')[0].TrimStart('/');
-        var fullPath = Path.GetFullPath(Path.Combine(webRootFullPath, relativeUrl.Replace('/', Path.DirectorySeparatorChar)));
-
-        if (!fullPath.StartsWith(webRootFullPath + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+        const string mediaPrefix = "/api/media/ai/";
+        if (!maskImageUrl.StartsWith(mediaPrefix, StringComparison.Ordinal))
+        {
+            throw new AppException(ErrorCodes.BadRequest, "Mask image must be private media");
+        }
+        var relativeUrl = maskImageUrl[mediaPrefix.Length..].Split('?', '#')[0];
+        if (currentUser.UserId.HasValue && !currentUser.IsSuperAdmin && !relativeUrl.StartsWith($"{currentUser.UserId.Value}/", StringComparison.Ordinal))
+        {
+            throw new AppException(ErrorCodes.NotFound, "Mask image does not exist");
+        }
+        string fullPath;
+        try
+        {
+            fullPath = mediaPathResolver.ResolveFilePath(relativeUrl);
+        }
+        catch (InvalidOperationException)
         {
             throw new AppException(ErrorCodes.BadRequest, "Invalid mask image URL");
         }
@@ -1232,7 +1477,9 @@ public sealed class AiImageService(
             }
 
             var trimmed = url.Trim();
-            if (!Uri.TryCreate(trimmed, UriKind.Relative, out var uri) || trimmed.StartsWith("//", StringComparison.Ordinal))
+            if (!Uri.TryCreate(trimmed, UriKind.Relative, out var uri)
+                || trimmed.StartsWith("//", StringComparison.Ordinal)
+                || trimmed.IndexOfAny(['?', '#']) >= 0)
             {
                 throw new AppException(ErrorCodes.BadRequest, "Reference image URL must be an internal URL");
             }
@@ -1256,7 +1503,9 @@ public sealed class AiImageService(
         }
 
         var trimmed = maskImageUrl.Trim();
-        if (!Uri.TryCreate(trimmed, UriKind.Relative, out var uri) || trimmed.StartsWith("//", StringComparison.Ordinal))
+        if (!Uri.TryCreate(trimmed, UriKind.Relative, out var uri)
+            || trimmed.StartsWith("//", StringComparison.Ordinal)
+            || trimmed.IndexOfAny(['?', '#']) >= 0)
         {
             throw new AppException(ErrorCodes.BadRequest, "Mask image URL must be an internal URL");
         }
@@ -1300,21 +1549,27 @@ public sealed class AiImageService(
 
     private sealed record ReferenceImageFile(string Path, string FileName, string MimeType);
 
+    private sealed record SavedImage(string Url, string Base64, string MimeType);
+
     private sealed record OpenAiImageResult(string? Base64, string? Url, string? RevisedPrompt);
+
+    private sealed record GeneratedProviderImage(OpenAiImageResult ProviderResult, SavedImage SavedImage, ResolvedAiImageModelConfig Route);
 
     private sealed record ImageProviderResponse(bool IsSuccess, HttpStatusCode StatusCode, string Endpoint, string Body, JsonDocument Document);
 
     private void LogProviderFailure(ImageProviderResponse response, string mode, ResolvedAiImageModelConfig modelConfig, string? imageFieldName)
     {
         logger.LogError(
-            "AI image provider request failed. Endpoint={Endpoint}, Mode={Mode}, ModelCode={ModelCode}, ProviderModel={ProviderModel}, ImageFieldName={ImageFieldName}, StatusCode={StatusCode}, ResponseBody={ResponseBody}",
-            response.Endpoint,
+            "AI image provider request failed. Mode={Mode}, ModelCode={ModelCode}, RouteRole={RouteRole}, RouteConfigId={RouteConfigId}, ProviderModel={ProviderModel}, Endpoint={Endpoint}, ImageFieldName={ImageFieldName}, StatusCode={StatusCode}, ProviderErrorCode={ProviderErrorCode}",
             mode,
             modelConfig.ModelCode,
+            modelConfig.RouteRole,
+            modelConfig.Id,
             modelConfig.ProviderModel,
+            response.Endpoint,
             imageFieldName,
             response.StatusCode,
-            TruncateForLog(response.Body));
+            ReadProviderErrorCode(response.Document.RootElement));
     }
 
     private static OpenAiImageResult ReadFirstOpenAiImage(JsonElement root)
@@ -1384,12 +1639,6 @@ public sealed class AiImageService(
         return true;
     }
 
-    private static string ReadProviderErrorSafely(JsonElement root, string body)
-    {
-        var message = ReadOpenAiError(root);
-        return string.IsNullOrWhiteSpace(message) ? body : message;
-    }
-
     private static string? TryGetFirstString(JsonElement element, params string[] propertyNames)
     {
         foreach (var propertyName in propertyNames)
@@ -1409,30 +1658,18 @@ public sealed class AiImageService(
         return markerIndex < 0 ? null : value[(markerIndex + ";base64,".Length)..];
     }
 
-    private static string TruncateForLog(string? value)
-    {
-        if (string.IsNullOrEmpty(value))
-        {
-            return string.Empty;
-        }
-
-        const int maxLength = 4000;
-        return value.Length <= maxLength ? value : value[..maxLength];
-    }
-
-    private static string ReadOpenAiError(JsonElement root)
+    private static string ReadProviderErrorCode(JsonElement root)
     {
         if (root.TryGetProperty("error", out var error))
         {
-            if (TryGetString(error, "message") is { } message)
-            {
-                return message;
-            }
-
-            return error.ToString();
+            return TryGetString(error, "code")
+                ?? TryGetString(error, "type")
+                ?? "unknown";
         }
 
-        return root.ToString();
+        return TryGetString(root, "code")
+            ?? TryGetString(root, "type")
+            ?? "unknown";
     }
 
     private static string? TryGetString(JsonElement element, string propertyName)

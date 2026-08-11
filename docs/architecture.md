@@ -90,6 +90,22 @@
 - 文章正文图片仍由前端按 HTML 渲染 `content` 展示。
 - 如果正文图片不是来自已上传媒体，接口仍可通过 HTML 兜底返回第一张图片作为缩略图，但不会写入 `blog_article_media`。
 
+## 提示词库数据流
+
+提示词库固定读取 YouMind 官方仓库提交
+`589f148fd605574569580665403311c5eb88143e` 的 `README_zh.md`。同步器使用 Markdown AST
+解析条目，以详情链接的 `?id=` CMS ID 作为稳定标识，只发布标题、描述和正文均含实质中文内容、
+且封面完整的前 126 条记录。
+
+同步使用 staging 和原子快照切换：文本与全部封面校验成功后才激活新快照；内容未变化时记录
+`not_modified`；任何下载、数量或解析异常都保留当前快照。图片写入发布目录之外的持久目录，
+由 Nginx 的 `/prompt-images/` alias 提供，浏览器不直接访问 YouMind 资源。旧快照图片至少保留
+7 天，只清理不被当前或保留快照引用的孤立文件。
+
+上游 Markdown 和图片下载仅允许配置的 HTTPS 地址与主机，不跟随到非白名单域名，并限制响应大小、
+超时和并发；图片按签名与可解码性校验。数据来源、许可和图片权利边界见
+[THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)，部署与回滚步骤见 [runbook.md](./runbook.md)。
+
 ## AI 生图与积分数据流
 
 相关表：
@@ -105,31 +121,41 @@
 2. 登录用户可调用 `POST /api/points/sign-in` 每日签到一次，领取 25 积分。
 3. 签到积分当天有效；第二天在查询余额、再次签到或出图扣分时，会把上一日未使用部分写为 `source=sign_in_expire` 的过期扣减流水。
 4. 创建生图任务前，服务按价格表组合计算 `points * imageCount`，余额不足或价格缺失时拒绝创建任务。
-5. 任务创建后立即扣减积分并写入 `source=image_generate` 流水；后台生成失败或超时时，写入 `source=image_refund` 流水返还积分。
+5. 任务创建时预留积分并写入 `source=image_generate` 流水；后台生成失败或超时时，仅对未完成图片写入一次 `source=image_refund` 流水。
 
 GPT Image2 流程：
 
 1. 后端校验 `prompt`、分辨率编码、质量编码、画幅比例编码和最多 6 个 `referenceImageUrls`。
-2. 解析 `modelCode + resolutionCode` 到 `ai_image_model_config`，并通过 `ai_image_point_price` 查询扣分价格。
-3. 创建 `ai_image_task` 历史记录，扣除积分，然后把任务 id 写入后台队列。
-4. `AiImageTaskWorker` 在独立后台任务中调用外部生图服务，单个任务超时上限为 5 分钟。
-5. 接口侧最多等待 5 分钟轮询任务结果；完成后返回 `taskId` 和静态图片 `url`。
-6. 如果用户关闭网页，后台任务仍继续执行，完成后把静态图片 URL 写入 `result_urls`，历史记录接口仍可查询。
+2. 按 `modelCode + resolutionCode + route_role` 从 `ai_image_model_config` 解析启用的主、备路由，并通过 `ai_image_point_price` 查询扣分价格。
+3. 使用 Redis Lua 原子占用幂等键、用户每日额度、用户活动任务位和全局积压位；成本熔断打开时拒绝创建。
+4. 按 `imageCount` 创建同等数量的单图 `ai_image_task`（每条 `image_count=1`），在同一 MySQL 事务中锁定用户余额、扣除整批积分并写入逐任务唯一预留流水，然后把全部任务 id 写入后台队列。
+5. `AiImageTaskWorker` 原子把每个任务从 `status=0` 认领为 `status=3`，并通过 Redis 租约限制全局 Provider 并发；同一批任务可并发执行。GPT 先调用启用的 `primary` 路由，失败后切换到同槽位启用的 `fallback` 路由；禁用主路由可强制直连备用。
+6. 成功时把任务和 `billing_status` 确认为完成；失败时在同一事务内按未完成图片数退款并写入唯一退款流水，重复回调不会二次退款。
+7. 接口侧最多等待 5 分钟并行轮询本批任务结果；完成后返回 `taskId`、`taskIds` 和 `/api/media/ai/...` 鉴权图片 URL。
+8. 如果用户关闭网页，后台任务仍继续执行，完成后把私有图片 URL 写入 `result_urls`，历史记录接口仍可查询。
 
 Nano Banana2 流程：
 
-1. `POST /api/ai/images/nanoBananaImage/generate` 直接同步生成一张图；`POST /api/ai/images/nanoBananaImage` 创建后台任务。
+1. `POST /api/ai/images/nanoBananaImage/generate` 与 `POST /api/ai/images/nanoBananaImage` 都先走统一的持久化任务、幂等、额度和积分预留状态机；前者等待任务并返回图片内容，后者立即返回任务 id。
 2. 价格表匹配使用 `model_code = modelCode`、业务分辨率档位作为 `resolution_code`；Nano Banana2 官方无 `quality` 参数，`quality_code` 不参与匹配（库中存 `''` 或 `NULL` 都不影响），画幅比例同样不参与积分价格匹配。
 3. 不传 `imageUrls` 或传空数组时执行文生图；传 `imageUrls` 时执行图生图。
 4. 当请求 `aspectRatioCode=auto` 时，后端不读取参考图尺寸，也不计算具体画幅比例；上游请求的 `size` 直接传 `auto`，由上游服务自行决定画幅。
 
 后台任务流程：
 
-1. 创建 `ai_image_task`，记录 `prompt`、参数编码、计算后的宽高、`size`、供应商 `quality`、`image_count`、`reference_image_urls`，状态为待处理。
-2. 后台队列按任务数量逐张调用外部生图服务，并复用任务中的参考图 URL。
-3. 每张图落盘后把静态图片 URL 写入 `result_urls` JSON 数组，并通过任务列表和详情接口返回 `resultUrls`。
-4. 任务成功后状态改为成功；失败时写入 `error_message`、返还本次任务积分。任务列表会隐藏已写入错误信息且没有结果图片的记录，详情接口仍可按 id 返回 `errorMessage`。
+1. 创建 `ai_image_task`，记录参数快照、幂等摘要、积分快照、完成图片数及预留结算状态，状态为待处理。
+2. GPT 多图请求已拆成多个单图任务并发调用外部生图服务；每个任务复用本批请求中的参考图 URL。
+3. 每张图按任务 `user_id` 落盘到 `private-media/ai/{userId}/...`，把鉴权图片 URL 写入 `result_urls` JSON 数组，并通过任务列表和详情接口返回 `resultUrls`；任务 owner 可继续把结果图作为参考图。
+4. 任务状态为 `0待处理/3处理中/1成功/2失败`；失败时按未完成图片数退款，失败记录保留在列表中便于审计。
 5. 普通用户只能查询或删除自己的任务；超级管理员可查看全部任务。
+6. `AiImageTaskRecoveryWorker` 周期性把进程重启后遗留的待处理任务重新入队，并对超时的处理中任务执行同一个幂等退款状态机。
+
+媒体边界：博客图片和头像分别通过公开 `/blog`、`/avatar` 前缀提供；AI 参考图与生成图不进入 `wwwroot`，下载接口再次检查登录主体和任务/路径所有权。后台任务入队前完成参考图所有权校验，避免 worker 无请求主体时跨用户读取。
+
+提示词安全边界：创建阶段在 Redis 准入和积分预留前通过 `IAiPromptFilter` 检查，Worker 在取得
+Provider 租约前按最新快照复检。MySQL 保存权威规则，进程内不可变快照执行关键词匹配，Redis
+只发布版本通知；系统不部署或调用语义审核模型。第三方词库只进入禁用审核队列，已启用的覆盖
+缺口词使用独立项目来源。分类、来源和迁移细节见 [ai-prompt-filter.md](./ai-prompt-filter.md)。
 
 
 ## 主要路由
@@ -146,6 +172,15 @@ Nano Banana2 流程：
 - `GET /api/blog/comments/captcha`
 - `POST /api/blog/comments/public`
 - `GET /api/blog/comments/public`
+- `GET /api/blog/categories`
+- `GET /api/blog/summary`
+- `GET /api/blog/titles/latest`
+- `GET /api/blog/comments/latest`
+- `GET /api/blog/site/info`
+- `GET /api/prompts`
+- `GET /api/prompts/{id}`
+- `POST /api/prompts/{id}/events`
+- `POST /api/dev/bootstrap/super-admin`（仅 Development 且要求 `X-Bootstrap-Secret`）
 
 `GET /api/blog/comments/captcha` 返回 SVG 图片验证码的 Base64 数据，答案存入 Redis，校验后一次性失效。
 

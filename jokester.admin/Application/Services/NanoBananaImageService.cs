@@ -3,10 +3,12 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using jokester.admin.Application.Abstractions;
 using jokester.admin.Application.DTOs.NanoBananaImages;
+using jokester.admin.Application.Security;
 using jokester.admin.Common;
 using jokester.admin.Common.Exceptions;
 using jokester.admin.Domain.Entities;
-using Microsoft.AspNetCore.Hosting;
+using jokester.admin.Infrastructure;
+using Microsoft.Extensions.Options;
 using SqlSugar;
 
 namespace jokester.admin.Application.Services;
@@ -18,73 +20,76 @@ public sealed class NanoBananaImageService(
     ISqlSugarClient db,
     ICurrentUser currentUser,
     IAiImageTaskQueue taskQueue,
-    IWebHostEnvironment environment) : INanoBananaImageService
+    IAiImageAdmissionService admissionService,
+    IOptions<PromptLibraryOptions> promptLibraryOptions,
+    IAiMediaPathResolver mediaPathResolver,
+    IAiPromptFilter promptFilter) : INanoBananaImageService
 {
     private const string MimeType = "image/png";
     private const int MaxInputImageCount = 6;
     private const long MaxInputImageSizeBytes = 10 * 1024 * 1024;
+    private const long MaxGeneratedImageSizeBytes = 25 * 1024 * 1024;
     private const int NanoBanana1KLongSide = 1024;
     private const int NanoBanana2KLongSide = 2048;
     private const int NanoBanana4KLongSide = 4096;
     private const string AutoSize = "auto";
     private const string AiImageSiteCode = "ai_image";
+    private static readonly TimeSpan GenerateWaitTimeout = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan GenerateWaitPollInterval = TimeSpan.FromSeconds(1);
 
     public async Task<GenerateNanoBananaImageResponse> GenerateAsync(GenerateNanoBananaImageRequest request, CancellationToken cancellationToken)
     {
-        var imageUrls = ValidateImageUrls(request.ImageUrls);
-        var parameters = ResolveNanoBananaParameters(request.ResolutionCode, ResolveAspectRatioInput(request.AspectRatioCode, request.AspectRatios), request.Size, imageUrls);
-        var imageCount = ValidateImageCount(request.ImageCount);
-        var modelCode = ResolveRequestModelCode(request.ModelCode, request.ModelName, AiImageModelConfigService.DefaultNanoBananaModelCode);
-        var modelConfig = await modelConfigService.ResolveAsync(modelCode, null, cancellationToken);
-        var userId = currentUser.UserId ?? throw new AppException(ErrorCodes.Unauthorized, "User is not authenticated");
-        var pointCost = await GetNanoBananaImageCostAsync(modelConfig.ModelCode, parameters, imageCount, cancellationToken);
-
-        await pointService.ConsumeForImageAsync(userId, 0, modelConfig.ModelCode, pointCost.ResolutionCode, string.Empty, pointCost.Points, cancellationToken);
-        try
+        var taskId = await CreateAsync(new CreateNanoBananaImageTaskRequest
         {
-            GenerateNanoBananaImageResponse? firstResponse = null;
-            var urls = new List<string>(imageCount);
-            for (var i = 0; i < imageCount; i++)
-            {
-                var response = await GenerateCoreAsync(request, cancellationToken);
-                firstResponse ??= response;
-                urls.Add(response.Url);
-            }
-
-            return BuildMultiImageResponse(firstResponse!, urls);
-        }
-        catch
+            IdempotencyKey = request.IdempotencyKey,
+            SourcePromptId = request.SourcePromptId,
+            Prompt = request.Prompt,
+            ModelCode = request.ModelCode,
+            ModelName = request.ModelName,
+            ResolutionCode = request.ResolutionCode,
+            AspectRatioCode = request.AspectRatioCode,
+            AspectRatios = request.AspectRatios,
+            Size = request.Size,
+            ImageCount = request.ImageCount,
+            ImageUrls = request.ImageUrls
+        }, cancellationToken);
+        var task = await WaitForGeneratedTaskAsync(taskId, cancellationToken);
+        var urls = DeserializeImageUrls(task.ResultUrls);
+        if (urls.Count == 0)
         {
-            await pointService.RefundForImageAsync(userId, 0, pointCost.Points, CancellationToken.None);
-            throw;
+            throw new AppException(
+                task.Status == 2 ? ErrorCodes.BadRequest : ErrorCodes.ServerError,
+                task.ErrorMessage ?? "Nano Banana2 image generation did not return an image");
         }
-    }
 
-    private static GenerateNanoBananaImageResponse BuildMultiImageResponse(GenerateNanoBananaImageResponse source, IReadOnlyList<string> urls)
-    {
+        var modelConfig = await modelConfigService.ResolveAsync(task.ModelName ?? string.Empty, null, cancellationToken);
+        var storedImage = await ReadStoredImageAsync(urls[0], cancellationToken);
+        var imageUrls = DeserializeImageUrls(task.ReferenceImageUrls);
         return new GenerateNanoBananaImageResponse
         {
-            ModelName = source.ModelName,
-            ModelCode = source.ModelCode,
-            ProviderModel = source.ProviderModel,
-            Prompt = source.Prompt,
-            Size = source.Size,
-            Quality = source.Quality,
-            MimeType = source.MimeType,
-            Url = source.Url,
+            TaskId = task.Id,
+            SourcePromptId = task.SourcePromptId,
+            ModelName = modelConfig.ModelName,
+            ModelCode = modelConfig.ModelCode,
+            ProviderModel = modelConfig.ProviderModel,
+            Prompt = task.Prompt,
+            Size = task.Size,
+            Quality = task.Quality,
+            MimeType = storedImage.MimeType,
+            Url = urls[0],
             Urls = urls,
-            Base64 = source.Base64,
-            DataUrl = source.DataUrl,
-            IsImageToImage = source.IsImageToImage,
-            ImageUrls = source.ImageUrls,
-            RevisedPrompt = source.RevisedPrompt
+            Base64 = storedImage.Base64,
+            DataUrl = $"data:{storedImage.MimeType};base64,{storedImage.Base64}",
+            IsImageToImage = imageUrls.Count > 0,
+            ImageUrls = imageUrls,
+            RevisedPrompt = null
         };
     }
 
-    private async Task<GenerateNanoBananaImageResponse> GenerateCoreAsync(GenerateNanoBananaImageRequest request, CancellationToken cancellationToken)
+    private async Task<GenerateNanoBananaImageResponse> GenerateCoreAsync(GenerateNanoBananaImageRequest request, long ownerUserId, CancellationToken cancellationToken)
     {
         var imageUrls = ValidateImageUrls(request.ImageUrls);
-        var normalizedPrompt = ValidatePrompt(request.Prompt, imageUrls.Count > 0);
+        var normalizedPrompt = AiImagePromptValidator.Validate(request.Prompt, imageUrls.Count > 0);
         var parameters = ResolveNanoBananaParameters(request.ResolutionCode, ResolveAspectRatioInput(request.AspectRatioCode, request.AspectRatios), request.Size, imageUrls);
         var modelCode = ResolveRequestModelCode(request.ModelCode, request.ModelName, AiImageModelConfigService.DefaultNanoBananaModelCode);
         var modelConfig = await modelConfigService.ResolveAsync(modelCode, null, cancellationToken);
@@ -103,12 +108,12 @@ public sealed class NanoBananaImageService(
 
         if (!response.IsSuccessStatusCode)
         {
-            throw new AppException(ErrorCodes.BadRequest, $"Nano Banana2 image generation failed: {ReadProviderError(document.RootElement)}");
+            throw new AppException(ErrorCodes.BadRequest, "Nano Banana2 image generation service temporarily failed. Please try again later.");
         }
 
         var image = ReadFirstImage(document.RootElement);
         var base64 = image.Base64;
-        var url = await SaveImageAsync(base64, cancellationToken);
+        var savedImage = await SaveImageAsync(base64, ownerUserId, cancellationToken);
         return new GenerateNanoBananaImageResponse
         {
             ModelName = modelConfig.ModelName,
@@ -117,11 +122,11 @@ public sealed class NanoBananaImageService(
             Prompt = normalizedPrompt,
             Size = parameters.Size,
             Quality = string.Empty,
-            MimeType = image.MimeType,
-            Url = url,
-            Urls = [url],
-            Base64 = base64,
-            DataUrl = $"data:{image.MimeType};base64,{base64}",
+            MimeType = savedImage.MimeType,
+            Url = savedImage.Url,
+            Urls = [savedImage.Url],
+            Base64 = savedImage.Base64,
+            DataUrl = $"data:{savedImage.MimeType};base64,{savedImage.Base64}",
             IsImageToImage = imageUrls.Count > 0,
             ImageUrls = imageUrls,
             RevisedPrompt = null
@@ -133,20 +138,79 @@ public sealed class NanoBananaImageService(
         var imageCount = ValidateImageCount(request.ImageCount);
         var imageUrls = ValidateImageUrls(request.ImageUrls);
         var parameters = ResolveNanoBananaParameters(request.ResolutionCode, ResolveAspectRatioInput(request.AspectRatioCode, request.AspectRatios), request.Size, imageUrls);
-        var normalizedPrompt = ValidatePrompt(request.Prompt, imageUrls.Count > 0);
+        var normalizedPrompt = AiImagePromptValidator.Validate(request.Prompt, imageUrls.Count > 0);
         var modelCode = ResolveRequestModelCode(request.ModelCode, request.ModelName, AiImageModelConfigService.DefaultNanoBananaModelCode);
         var modelConfig = await modelConfigService.ResolveAsync(modelCode, null, cancellationToken);
         var userId = currentUser.UserId ?? throw new AppException(ErrorCodes.Unauthorized, "User is not authenticated");
+        var sourcePromptId = await ValidateSourcePromptIdAsync(request.SourcePromptId, cancellationToken);
+        foreach (var imageUrl in imageUrls)
+        {
+            _ = ResolveInputImageFile(imageUrl);
+        }
         var siteId = await ResolveAiImageSiteIdAsync(cancellationToken);
         var pointCost = await GetNanoBananaImageCostAsync(modelConfig.ModelCode, parameters, imageCount, cancellationToken);
+        object canonicalRequest = sourcePromptId.HasValue
+            ? new
+            {
+                Endpoint = "nano-banana",
+                SourcePromptId = sourcePromptId.Value,
+                Prompt = normalizedPrompt,
+                ModelCode = modelConfig.ModelCode,
+                ImageCount = imageCount,
+                parameters.ResolutionCode,
+                parameters.AspectRatioCode,
+                parameters.Size,
+                ImageUrls = imageUrls
+            }
+            : new
+            {
+                Endpoint = "nano-banana",
+                Prompt = normalizedPrompt,
+                ModelCode = modelConfig.ModelCode,
+                ImageCount = imageCount,
+                parameters.ResolutionCode,
+                parameters.AspectRatioCode,
+                parameters.Size,
+                ImageUrls = imageUrls
+            };
+        var identity = AiImageIdempotency.Create(request.IdempotencyKey, canonicalRequest);
+        var existingTask = await FindIdempotentTaskAsync(userId, identity, cancellationToken);
+        if (existingTask is not null)
+        {
+            return existingTask.Id;
+        }
+
+        var promptPolicy = await promptFilter.EnsureAllowedAsync(normalizedPrompt, "prompt", cancellationToken);
+
+        var admission = await admissionService.ReserveAsync(
+            userId,
+            identity.KeyHash,
+            identity.RequestFingerprint,
+            imageCount,
+            pointCost.Points,
+            cancellationToken);
+        if (admission.IsDuplicate)
+        {
+            return admission.ExistingTaskId > 0
+                ? admission.ExistingTaskId
+                : (await WaitForIdempotentTaskAsync(userId, identity, cancellationToken)).Id;
+        }
 
         var entity = new AiImageTaskEntity
         {
             SiteId = siteId,
             UserId = userId,
+            SourcePromptId = sourcePromptId,
             Prompt = normalizedPrompt,
+            PromptPolicyVersion = promptPolicy.Revision,
+            PromptCheckedAt = HongKongNow(),
             ModelName = modelConfig.ModelCode,
             ImageCount = imageCount,
+            CompletedImageCount = 0,
+            IdempotencyKey = identity.KeyHash,
+            RequestFingerprint = identity.RequestFingerprint,
+            PointCost = pointCost.Points,
+            BillingStatus = 0,
             ResolutionCode = parameters.ResolutionCode,
             QualityCode = string.Empty,
             AspectRatioCode = parameters.AspectRatioCode,
@@ -160,26 +224,57 @@ public sealed class NanoBananaImageService(
             IsDeleted = false
         };
 
-        entity.Id = await db.Insertable(entity).ExecuteReturnBigIdentityAsync();
-        await pointService.ConsumeForImageAsync(userId, entity.Id, modelConfig.ModelCode, pointCost.ResolutionCode, string.Empty, pointCost.Points, cancellationToken);
-        if (!taskQueue.TryQueue(entity.Id))
+        var persisted = false;
+        try
         {
-            await db.Updateable<AiImageTaskEntity>()
-                .SetColumns(x => new AiImageTaskEntity
-                {
-                    Status = 2,
-                    ErrorMessage = "Nano Banana2 image task queue is full",
-                    UpdatedAt = HongKongNow()
-                })
-                .Where(x => x.Id == entity.Id)
-                .ExecuteCommandAsync();
-            throw new AppException(ErrorCodes.ServerError, "Nano Banana2 image task queue is full");
-        }
+            var reservation = await pointService.ReserveImageTaskAsync(
+                entity,
+                modelConfig.ModelCode,
+                pointCost.ResolutionCode,
+                string.Empty,
+                cancellationToken);
+            entity.Id = reservation.TaskId;
+            persisted = reservation.Created;
+            if (!reservation.Created)
+            {
+                await admissionService.CancelAsync(admission);
+                return reservation.TaskId;
+            }
 
-        return entity.Id;
+            await admissionService.BindTaskAsync(admission, entity.Id, cancellationToken);
+            if (!taskQueue.TryQueue(entity.Id))
+            {
+                throw new AppException(ErrorCodes.ServiceUnavailable, "Nano Banana2 image task queue is full");
+            }
+
+            return entity.Id;
+        }
+        catch (Exception ex)
+        {
+            if (persisted)
+            {
+                var settlement = await pointService.SettleImageTaskAsync(
+                    entity.Id,
+                    2,
+                    null,
+                    ex is AppException ? ex.Message : "Nano Banana2 task admission failed",
+                    0,
+                    CancellationToken.None);
+                if (settlement.Transitioned)
+                {
+                    await admissionService.CompleteAsync(entity, 0, settlement.RefundedPoints);
+                }
+            }
+            else
+            {
+                await admissionService.CancelAsync(admission);
+            }
+
+            throw;
+        }
     }
 
-    public Task<GenerateNanoBananaImageResponse> GenerateFromTaskAsync(string prompt, string? modelCode, string resolutionCode, string aspectRatioCode, string size, IReadOnlyList<string> imageUrls, CancellationToken cancellationToken)
+    public Task<GenerateNanoBananaImageResponse> GenerateFromTaskAsync(string prompt, string? modelCode, string resolutionCode, string aspectRatioCode, string size, IReadOnlyList<string> imageUrls, long ownerUserId, CancellationToken cancellationToken)
     {
         return GenerateCoreAsync(new GenerateNanoBananaImageRequest
         {
@@ -189,7 +284,119 @@ public sealed class NanoBananaImageService(
             AspectRatioCode = aspectRatioCode,
             Size = size,
             ImageUrls = imageUrls
-        }, cancellationToken);
+        }, ownerUserId, cancellationToken);
+    }
+
+    private async Task<AiImageTaskEntity?> FindIdempotentTaskAsync(
+        long userId,
+        AiImageRequestIdentity identity,
+        CancellationToken cancellationToken)
+    {
+        var existing = await db.Queryable<AiImageTaskEntity>()
+            .FirstAsync(
+                x => x.UserId == userId && x.IdempotencyKey == identity.KeyHash,
+                cancellationToken);
+        if (existing is not null
+            && !string.Equals(existing.RequestFingerprint, identity.RequestFingerprint, StringComparison.Ordinal))
+        {
+            throw new ConflictException("Idempotency key was already used with a different request");
+        }
+
+        return existing;
+    }
+
+    private async Task<AiImageTaskEntity> WaitForIdempotentTaskAsync(
+        long userId,
+        AiImageRequestIdentity identity,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; attempt < 20; attempt++)
+        {
+            var existing = await FindIdempotentTaskAsync(userId, identity, cancellationToken);
+            if (existing is not null)
+            {
+                return existing;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken);
+        }
+
+        throw new ConflictException("The idempotent Nano Banana2 request is still being committed; retry shortly");
+    }
+
+    private async Task<AiImageTaskEntity> WaitForGeneratedTaskAsync(long taskId, CancellationToken cancellationToken)
+    {
+        using var timeout = new CancellationTokenSource(GenerateWaitTimeout);
+        while (!timeout.IsCancellationRequested)
+        {
+            var task = await db.Queryable<AiImageTaskEntity>()
+                .FirstAsync(x => x.Id == taskId && !x.IsDeleted, cancellationToken);
+            if (task is null)
+            {
+                throw new NotFoundException($"AI image task does not exist: {taskId}");
+            }
+            if (task.Status is not 0 and not 3)
+            {
+                return task;
+            }
+
+            try
+            {
+                await Task.Delay(GenerateWaitPollInterval, timeout.Token);
+            }
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+            {
+                break;
+            }
+        }
+
+        return await db.Queryable<AiImageTaskEntity>()
+            .FirstAsync(x => x.Id == taskId && !x.IsDeleted, cancellationToken)
+            ?? throw new NotFoundException($"AI image task does not exist: {taskId}");
+    }
+
+    private async Task<StoredImage> ReadStoredImageAsync(string imageUrl, CancellationToken cancellationToken)
+    {
+        const string mediaPrefix = "/api/media/ai/";
+        if (!imageUrl.StartsWith(mediaPrefix, StringComparison.Ordinal))
+        {
+            throw new AppException(ErrorCodes.ServerError, "Generated image URL is invalid");
+        }
+
+        var relativePath = imageUrl[mediaPrefix.Length..].Split('?', '#')[0];
+        string fullPath;
+        try
+        {
+            fullPath = mediaPathResolver.ResolveFilePath(relativePath);
+        }
+        catch (InvalidOperationException)
+        {
+            throw new AppException(ErrorCodes.ServerError, "Generated image URL is invalid");
+        }
+        if (!File.Exists(fullPath))
+        {
+            throw new AppException(ErrorCodes.ServerError, "Generated image file does not exist");
+        }
+
+        var bytes = await File.ReadAllBytesAsync(fullPath, cancellationToken);
+        return new StoredImage(Convert.ToBase64String(bytes), GetImageMimeType(Path.GetExtension(fullPath)));
+    }
+
+    private static IReadOnlyList<string> DeserializeImageUrls(string? imageUrls)
+    {
+        if (string.IsNullOrWhiteSpace(imageUrls))
+        {
+            return [];
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<IReadOnlyList<string>>(imageUrls) ?? [];
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
     }
 
     private static DateTime HongKongNow()
@@ -375,6 +582,31 @@ public sealed class NanoBananaImageService(
         return siteId;
     }
 
+    private async Task<long?> ValidateSourcePromptIdAsync(long? sourcePromptId, CancellationToken cancellationToken)
+    {
+        if (!sourcePromptId.HasValue)
+        {
+            return null;
+        }
+        if (sourcePromptId.Value <= 0)
+        {
+            throw new AppException(ErrorCodes.BadRequest, "sourcePromptId must be a positive integer");
+        }
+
+        var exists = await db.Queryable<PromptLibraryItemEntity>()
+            .AnyAsync(
+                x => x.Id == sourcePromptId.Value
+                    && x.Source == promptLibraryOptions.Value.Source
+                    && x.IsActive,
+                cancellationToken);
+        if (!exists)
+        {
+            throw new NotFoundException($"Prompt does not exist: {sourcePromptId.Value}");
+        }
+
+        return sourcePromptId.Value;
+    }
+
     private static int ValidateImageCount(int imageCount)
     {
         const int maxImageCount = AiImageModelConfigService.DefaultNanoBananaMaxImageCount;
@@ -402,27 +634,6 @@ public sealed class NanoBananaImageService(
         }
 
         return Math.Abs(left);
-    }
-
-    private static string ValidatePrompt(string prompt, bool allowEmptyForImageToImage = false)
-    {
-        if (string.IsNullOrWhiteSpace(prompt))
-        {
-            if (allowEmptyForImageToImage)
-            {
-                return string.Empty;
-            }
-
-            throw new AppException(ErrorCodes.BadRequest, "Prompt is required");
-        }
-
-        var trimmed = prompt.Trim();
-        if (trimmed.Length > 4000)
-        {
-            throw new AppException(ErrorCodes.BadRequest, "Prompt is too long");
-        }
-
-        return trimmed;
     }
 
     private static string ResolveRequestModelCode(string? modelCode, string? modelName, string defaultModelCode)
@@ -509,7 +720,7 @@ public sealed class NanoBananaImageService(
         return new Uri($"{normalizedBaseUrl}{normalizedPath}", UriKind.Absolute);
     }
 
-    private async Task<string> SaveImageAsync(string base64, CancellationToken cancellationToken)
+    private async Task<SavedImage> SaveImageAsync(string base64, long ownerUserId, CancellationToken cancellationToken)
     {
         byte[] bytes;
         try
@@ -521,26 +732,37 @@ public sealed class NanoBananaImageService(
             throw new AppException(ErrorCodes.BadRequest, "Nano Banana2 image generation returned invalid base64 image data");
         }
 
-        var storageKey = $"nano-banana2-images/{DateTime.UtcNow:yyyyMM}/{Guid.NewGuid():N}.png";
-        var webRootPath = environment.WebRootPath
-            ?? Path.Combine(environment.ContentRootPath, "wwwroot");
-        var savePath = Path.Combine(webRootPath, storageKey);
+        var image = await ImageUploadValidator.ValidateAsync(bytes, MaxGeneratedImageSizeBytes, cancellationToken);
+        var storageKey = $"{ownerUserId}/{DateTime.UtcNow:yyyyMM}/{Guid.NewGuid():N}{image.Extension}";
+        var savePath = mediaPathResolver.ResolveFilePath(storageKey);
 
         Directory.CreateDirectory(Path.GetDirectoryName(savePath)!);
-        await File.WriteAllBytesAsync(savePath, bytes, cancellationToken);
+        await File.WriteAllBytesAsync(savePath, image.Content, cancellationToken);
 
-        return $"/{storageKey.Replace('\\', '/')}";
+        return new SavedImage(
+            $"/api/media/ai/{storageKey.Replace('\\', '/')}",
+            Convert.ToBase64String(image.Content),
+            image.MimeType);
     }
 
     private ReferenceImageFile ResolveInputImageFile(string imageUrl)
     {
-        var webRootPath = environment.WebRootPath
-            ?? Path.Combine(environment.ContentRootPath, "wwwroot");
-        var webRootFullPath = Path.GetFullPath(webRootPath);
-        var relativeUrl = imageUrl.Split('?', '#')[0].TrimStart('/');
-        var fullPath = Path.GetFullPath(Path.Combine(webRootFullPath, relativeUrl.Replace('/', Path.DirectorySeparatorChar)));
-
-        if (!fullPath.StartsWith(webRootFullPath + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+        const string mediaPrefix = "/api/media/ai/";
+        if (!imageUrl.StartsWith(mediaPrefix, StringComparison.Ordinal))
+        {
+            throw new AppException(ErrorCodes.BadRequest, "Input image must be private media");
+        }
+        var relativeUrl = imageUrl[mediaPrefix.Length..].Split('?', '#')[0];
+        if (currentUser.UserId.HasValue && !currentUser.IsSuperAdmin && !relativeUrl.StartsWith($"{currentUser.UserId.Value}/", StringComparison.Ordinal))
+        {
+            throw new AppException(ErrorCodes.NotFound, "Input image does not exist");
+        }
+        string fullPath;
+        try
+        {
+            fullPath = mediaPathResolver.ResolveFilePath(relativeUrl);
+        }
+        catch (InvalidOperationException)
         {
             throw new AppException(ErrorCodes.BadRequest, "Invalid input image URL");
         }
@@ -776,7 +998,9 @@ public sealed class NanoBananaImageService(
             }
 
             var trimmed = imageUrl.Trim();
-            if (!Uri.TryCreate(trimmed, UriKind.Relative, out var uri) || trimmed.StartsWith("//", StringComparison.Ordinal))
+            if (!Uri.TryCreate(trimmed, UriKind.Relative, out var uri)
+                || trimmed.StartsWith("//", StringComparison.Ordinal)
+                || trimmed.IndexOfAny(['?', '#']) >= 0)
             {
                 throw new AppException(ErrorCodes.BadRequest, "Input image URL must be an internal URL");
             }
@@ -854,4 +1078,8 @@ public sealed class NanoBananaImageService(
     }
 
     private sealed record ReferenceImageFile(string Path, string FileName, string MimeType);
+
+    private sealed record SavedImage(string Url, string Base64, string MimeType);
+
+    private sealed record StoredImage(string Base64, string MimeType);
 }

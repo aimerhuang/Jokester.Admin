@@ -26,7 +26,10 @@ public sealed class GlobalExceptionMiddleware(RequestDelegate next, ILogger<Glob
                 return;
             }
 
-            logger.LogWarning(ex, "Request operation was canceled.");
+            logger.LogWarning(
+                "Request operation was canceled. FailureType={FailureType}, TraceId={TraceId}",
+                ex.GetType().Name,
+                context.TraceIdentifier);
 
             if (!context.Response.HasStarted)
             {
@@ -47,7 +50,10 @@ public sealed class GlobalExceptionMiddleware(RequestDelegate next, ILogger<Glob
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Unhandled exception");
+            logger.LogError(
+                "Unhandled exception. FailureType={FailureType}, TraceId={TraceId}",
+                ex.GetType().Name,
+                context.TraceIdentifier);
 
             context.Response.StatusCode = StatusCodes.Status500InternalServerError;
             context.Response.ContentType = "application/json; charset=utf-8";
@@ -63,6 +69,10 @@ public sealed class GlobalExceptionMiddleware(RequestDelegate next, ILogger<Glob
         ErrorCodes.Unauthorized => StatusCodes.Status401Unauthorized,
         ErrorCodes.Forbidden => StatusCodes.Status403Forbidden,
         ErrorCodes.NotFound => StatusCodes.Status404NotFound,
+        ErrorCodes.Conflict => StatusCodes.Status409Conflict,
+        ErrorCodes.TooManyRequests => StatusCodes.Status429TooManyRequests,
+        ErrorCodes.ServiceUnavailable => StatusCodes.Status503ServiceUnavailable,
+        ErrorCodes.ServerError => StatusCodes.Status500InternalServerError,
         _ => StatusCodes.Status400BadRequest
     };
 }

@@ -23,6 +23,9 @@ public sealed class UserPointDetailEntity
     [SugarColumn(ColumnName = "source")]
     public string Source { get; set; } = string.Empty;
 
+    [SugarColumn(ColumnName = "business_key")]
+    public string? BusinessKey { get; set; }
+
     [SugarColumn(ColumnName = "remark")]
     public string? Remark { get; set; }
 

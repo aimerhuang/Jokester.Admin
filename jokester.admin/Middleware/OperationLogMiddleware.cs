@@ -16,12 +16,6 @@ public sealed class OperationLogMiddleware(RequestDelegate next, ILogger<Operati
         }
 
         var stopwatch = Stopwatch.StartNew();
-        var requestBody = await ReadRequestBodyAsync(context.Request);
-        var originalResponseBody = context.Response.Body;
-
-        await using var responseBuffer = new MemoryStream();
-        context.Response.Body = responseBuffer;
-
         try
         {
             await next(context);
@@ -29,10 +23,6 @@ public sealed class OperationLogMiddleware(RequestDelegate next, ILogger<Operati
         finally
         {
             stopwatch.Stop();
-            var responseBody = await ReadResponseBodyAsync(responseBuffer);
-            responseBuffer.Position = 0;
-            await responseBuffer.CopyToAsync(originalResponseBody, context.RequestAborted);
-            context.Response.Body = originalResponseBody;
 
             try
             {
@@ -42,15 +32,18 @@ public sealed class OperationLogMiddleware(RequestDelegate next, ILogger<Operati
                     action?.ControllerName,
                     action?.ActionName,
                     context.Request.Method,
-                    $"{context.Request.Path}{context.Request.QueryString}",
-                    requestBody,
-                    responseBody,
+                    context.Request.Path,
+                    null,
+                    null,
                     (int)stopwatch.ElapsedMilliseconds,
                     context.RequestAborted);
             }
             catch (Exception ex)
             {
-                logger.LogWarning(ex, "Failed to write operation log");
+                logger.LogWarning(
+                    "Failed to write operation log. FailureType={FailureType}, TraceId={TraceId}",
+                    ex.GetType().Name,
+                    context.TraceIdentifier);
             }
         }
     }
@@ -65,26 +58,4 @@ public sealed class OperationLogMiddleware(RequestDelegate next, ILogger<Operati
         return !context.Request.Path.StartsWithSegments("/swagger");
     }
 
-    private static async Task<string?> ReadRequestBodyAsync(HttpRequest request)
-    {
-        if (request.ContentLength is null or 0)
-        {
-            return null;
-        }
-
-        request.EnableBuffering();
-        request.Body.Position = 0;
-        using var reader = new StreamReader(request.Body, Encoding.UTF8, leaveOpen: true);
-        var body = await reader.ReadToEndAsync();
-        request.Body.Position = 0;
-        return string.IsNullOrWhiteSpace(body) ? null : body;
-    }
-
-    private static async Task<string?> ReadResponseBodyAsync(Stream responseBuffer)
-    {
-        responseBuffer.Position = 0;
-        using var reader = new StreamReader(responseBuffer, Encoding.UTF8, leaveOpen: true);
-        var body = await reader.ReadToEndAsync();
-        return string.IsNullOrWhiteSpace(body) ? null : body;
-    }
 }
