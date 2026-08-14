@@ -18,7 +18,10 @@ public sealed class PermissionMiddleware(RequestDelegate next)
 
         if (!currentUser.UserId.HasValue)
         {
-            throw new AppException(ErrorCodes.Unauthorized, "未登录");
+            throw new AppException(
+                ErrorCodes.Unauthorized,
+                MachineErrorCodes.Unauthorized,
+                "Authentication is required.");
         }
 
         if (currentUser.IsSuperAdmin)
@@ -31,7 +34,10 @@ public sealed class PermissionMiddleware(RequestDelegate next)
         var missing = requiredPermissions.FirstOrDefault(x => !permissions.Contains(x.Code, StringComparer.OrdinalIgnoreCase));
         if (missing is not null)
         {
-            throw new AppException(ErrorCodes.Forbidden, $"缺少权限: {missing.Code}");
+            throw new AppException(
+                ErrorCodes.Forbidden,
+                MachineErrorCodes.ResourceForbidden,
+                "The authenticated user is not allowed to access this resource.");
         }
 
         await next(context);

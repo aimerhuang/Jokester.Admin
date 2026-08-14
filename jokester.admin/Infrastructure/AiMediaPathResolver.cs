@@ -37,6 +37,12 @@ public sealed class AiMediaPathResolver : IAiMediaPathResolver
             {
                 throw new InvalidOperationException("AI media path must be relative to its storage root.");
             }
+            if (normalizedPath
+                .Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries)
+                .Any(segment => segment is "." or ".."))
+            {
+                throw new InvalidOperationException("AI media path cannot contain dot segments.");
+            }
 
             var fullPath = Path.GetFullPath(Path.Combine(RootPath, normalizedPath));
             if (!fullPath.StartsWith(_rootWithSeparator, PathComparison))

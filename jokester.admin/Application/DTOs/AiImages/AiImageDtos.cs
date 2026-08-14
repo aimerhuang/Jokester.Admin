@@ -24,6 +24,8 @@ public sealed class AiImageTaskDto
 {
     public long Id { get; init; }
 
+    public long TaskId { get; init; }
+
     public long SiteId { get; init; }
 
     public long? SourcePromptId { get; init; }
@@ -70,7 +72,33 @@ public sealed class AiImageTaskDto
 
     public DateTime? UpdatedAt { get; init; }
 
-    public int Status { get; init; }
+    public string Status { get; init; } = "queued";
+
+    public int StatusCode { get; init; }
+
+    public int Progress { get; init; }
+
+    public int PollAfterSeconds { get; init; }
+
+    public DateTime ExpiresAt { get; init; }
+
+    public IReadOnlyList<AiImageTaskAssetDto> Assets { get; init; } = [];
+}
+
+public sealed class AiImageTaskAssetDto
+{
+    public string Url { get; init; } = string.Empty;
+}
+
+public sealed class CreateAiImageTasksResponse
+{
+    public long Id { get; init; }
+
+    public long TaskId { get; init; }
+
+    public IReadOnlyList<long> Ids { get; init; } = [];
+
+    public IReadOnlyList<long> TaskIds { get; init; } = [];
 }
 
 public sealed class AiImageModelOptionDto
@@ -81,7 +109,28 @@ public sealed class AiImageModelOptionDto
 
     public string Provider { get; init; } = string.Empty;
 
+    public string ProviderCode { get; init; } = string.Empty;
+
+    public AiImageModelCapabilitiesDto Capabilities { get; init; } = new();
+
+    public IReadOnlyList<string> Resolutions { get; init; } = [];
+
+    public IReadOnlyList<string> Qualities { get; init; } = [];
+
+    public IReadOnlyList<string> AspectRatios { get; init; } = [];
+
     public int Sort { get; init; }
+}
+
+public sealed class AiImageModelCapabilitiesDto
+{
+    public bool SupportsReferenceImages { get; init; } = true;
+
+    public int MaxReferenceImages { get; init; } = 6;
+
+    public bool SupportsQuality { get; init; }
+
+    public IReadOnlyList<int> SupportedImageCounts { get; init; } = [];
 }
 
 public sealed class AiImageParameterOptionDto
@@ -111,6 +160,8 @@ public sealed class AiImagePointPriceDto
 
     public decimal PriceAmount { get; init; }
 
+    public long PriceMinorUnits { get; init; }
+
     public string Currency { get; init; } = "CNY";
 
     public int Sort { get; init; }
@@ -127,6 +178,8 @@ public sealed class AiImagePricingOptionDto
     public int Points { get; init; }
 
     public decimal PriceAmount { get; init; }
+
+    public long PriceMinorUnits { get; init; }
 
     public string Currency { get; init; } = "CNY";
 
@@ -202,7 +255,11 @@ public sealed class CreateAiImageTaskRequest
 
     public IReadOnlyList<string> ReferenceImageUrls { get; init; } = [];
 
+    public IReadOnlyList<string> ReferenceAssetIds { get; init; } = [];
+
     public string? MaskImageUrl { get; init; }
+
+    public string? MaskAssetId { get; init; }
 }
 
 public sealed class GenerateAiImageRequest
@@ -229,7 +286,11 @@ public sealed class GenerateAiImageRequest
 
     public IReadOnlyList<string> ReferenceImageUrls { get; init; } = [];
 
+    public IReadOnlyList<string> ReferenceAssetIds { get; init; } = [];
+
     public string? MaskImageUrl { get; init; }
+
+    public string? MaskAssetId { get; init; }
 }
 
 public sealed class UploadAiImageRequest
@@ -246,13 +307,27 @@ public sealed class FavoriteAiImageRequest
 
 public sealed class UploadAiImageResponse
 {
+    public string AssetId { get; init; } = string.Empty;
+
     public string Url { get; init; } = string.Empty;
+
+    public string ThumbnailUrl { get; init; } = string.Empty;
 
     public string FileName { get; init; } = string.Empty;
 
     public string MimeType { get; init; } = string.Empty;
 
     public long FileSize { get; init; }
+
+    public long SizeBytes { get; init; }
+
+    public int Width { get; init; }
+
+    public int Height { get; init; }
+
+    public bool MetadataStripped { get; init; }
+
+    public DateTime CreatedAt { get; init; }
 }
 
 public sealed class GenerateAiImageResponse

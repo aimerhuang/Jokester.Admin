@@ -25,10 +25,10 @@ public sealed class AiPromptFilterPipelineTests
 
         await middleware.InvokeAsync(context);
 
-        Assert.Equal(StatusCodes.Status400BadRequest, context.Response.StatusCode);
+        Assert.Equal(StatusCodes.Status422UnprocessableEntity, context.Response.StatusCode);
         context.Response.Body.Position = 0;
         using var document = await JsonDocument.ParseAsync(context.Response.Body);
-        Assert.Equal(ErrorCodes.AiPromptRejected, document.RootElement.GetProperty("Code").GetInt32());
+        Assert.Equal(MachineErrorCodes.PromptBlocked, document.RootElement.GetProperty("code").GetString());
         Assert.DoesNotContain("private-rule-term", document.RootElement.GetRawText(), StringComparison.Ordinal);
     }
 }

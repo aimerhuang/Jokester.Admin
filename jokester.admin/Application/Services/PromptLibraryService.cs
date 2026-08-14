@@ -398,7 +398,9 @@ public sealed class PromptLibraryService : IPromptLibraryService
         AuthorName = entity.AuthorName,
         AuthorUrl = entity.AuthorUrl,
         SourceUrl = entity.SourceUrl,
-        SourcePublishedAt = entity.SourcePublishedAt,
+        SourcePublishedAt = entity.SourcePublishedAt.HasValue
+            ? ApiDateTime.FromUtcStorage(entity.SourcePublishedAt.Value)
+            : null,
         Language = entity.Language,
         SourcePosition = entity.SourcePosition
     };

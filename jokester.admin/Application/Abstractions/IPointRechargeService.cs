@@ -4,7 +4,7 @@ namespace jokester.admin.Application.Abstractions;
 
 public interface IPointRechargeService
 {
-    Task<IReadOnlyList<RechargePackageDto>> GetPackagesAsync(CancellationToken cancellationToken);
+    Task<IReadOnlyList<RechargePackageDto>> GetPackagesAsync(string? platform, CancellationToken cancellationToken);
 
     Task<RechargeOrderDto> CreateOrderAsync(CreateRechargeOrderRequest request, CancellationToken cancellationToken);
 

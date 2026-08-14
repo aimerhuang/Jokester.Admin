@@ -1,5 +1,6 @@
 using jokester.admin.Application.Abstractions;
 using jokester.admin.Application.DTOs.Auth;
+using jokester.admin.Common;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
@@ -9,24 +10,26 @@ namespace jokester.admin.Controllers;
 [Route("api/auth")]
 public sealed class AuthController(
     IAuthService authService,
-    IRegistrationService registrationService) : BaseApiController
+    IRegistrationService registrationService,
+    IAccountDeletionService accountDeletionService) : BaseApiController
 {
     /// <summary>
     /// 发送注册邮箱验证码。
     /// </summary>
     /// <remarks>
-    /// 请求体只需要传 email；验证码用于邮箱注册。
+    /// 先调用 GET /api/blog/comments/captcha 获取图片验证码，再传 email、captchaId 和 captchaAnswer。
     /// </remarks>
     [AllowAnonymous]
     [EnableRateLimiting("AuthAbuseProtection")]
     [RequestSizeLimit(1 * 1024 * 1024)]
     [HttpPost("register/email-code")]
+    [ProducesResponseType(typeof(ApiResponse<SendRegisterEmailCodeResponse>), StatusCodes.Status200OK)]
     public async Task<IActionResult> SendRegisterEmailCode(
         [FromBody] SendRegisterEmailCodeRequest request,
         CancellationToken cancellationToken)
     {
-        await registrationService.SendEmailCodeAsync(request, cancellationToken);
-        return Success();
+        var result = await registrationService.SendEmailCodeAsync(request, cancellationToken);
+        return Success(result);
     }
 
     /// <summary>
@@ -36,6 +39,7 @@ public sealed class AuthController(
     [EnableRateLimiting("AuthAbuseProtection")]
     [RequestSizeLimit(1 * 1024 * 1024)]
     [HttpPost("register")]
+    [ProducesResponseType(typeof(ApiResponse<RegisterResponse>), StatusCodes.Status200OK)]
     public async Task<IActionResult> Register([FromBody] RegisterRequest request, CancellationToken cancellationToken)
     {
         var result = await registrationService.RegisterAsync(request, cancellationToken);
@@ -52,6 +56,7 @@ public sealed class AuthController(
     [EnableRateLimiting("AuthAbuseProtection")]
     [RequestSizeLimit(1 * 1024 * 1024)]
     [HttpPost("login")]
+    [ProducesResponseType(typeof(ApiResponse<LoginResponse>), StatusCodes.Status200OK)]
     public async Task<IActionResult> Login([FromBody] LoginRequest request, CancellationToken cancellationToken)
     {
         try
@@ -73,6 +78,7 @@ public sealed class AuthController(
     [EnableRateLimiting("AuthAbuseProtection")]
     [RequestSizeLimit(1 * 1024 * 1024)]
     [HttpPost("refresh")]
+    [ProducesResponseType(typeof(ApiResponse<LoginResponse>), StatusCodes.Status200OK)]
     public async Task<IActionResult> Refresh([FromBody] RefreshTokenRequest request, CancellationToken cancellationToken)
     {
         var result = await authService.RefreshAsync(request, cancellationToken);
@@ -86,6 +92,7 @@ public sealed class AuthController(
     /// RefreshToken 仅通过 X-Refresh-Token 请求头传入，避免出现在 URL 和访问日志中。
     /// </remarks>
     [HttpPost("logout")]
+    [ProducesResponseType(typeof(ApiResponse), StatusCodes.Status200OK)]
     public async Task<IActionResult> Logout(CancellationToken cancellationToken)
     {
         var refreshToken = Request.Headers["X-Refresh-Token"].FirstOrDefault();
@@ -94,13 +101,57 @@ public sealed class AuthController(
     }
 
     /// <summary>
+    /// 撤销当前用户的全部登录会话。
+    /// </summary>
+    [Authorize]
+    [HttpPost("logout-all")]
+    [ProducesResponseType(typeof(ApiResponse), StatusCodes.Status200OK)]
+    public async Task<IActionResult> LogoutAll(CancellationToken cancellationToken)
+    {
+        await authService.LogoutAllAsync(cancellationToken);
+        return Success();
+    }
+
+    /// <summary>
     /// 获取当前登录用户信息。
     /// </summary>
     [Authorize]
     [HttpGet("profile")]
+    [ProducesResponseType(typeof(ApiResponse<UserProfileDto>), StatusCodes.Status200OK)]
     public async Task<IActionResult> Profile(CancellationToken cancellationToken)
     {
         var result = await authService.GetProfileAsync(cancellationToken);
+        return Success(result);
+    }
+
+    [Authorize]
+    [HttpPost("account-deletion/requests")]
+    [ProducesResponseType(typeof(ApiResponse<AccountDeletionRequestDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> RequestAccountDeletion(
+        [FromBody] CreateAccountDeletionRequest request,
+        CancellationToken cancellationToken)
+    {
+        var result = await accountDeletionService.CreateAsync(request, cancellationToken);
+        return Success(result);
+    }
+
+    [Authorize]
+    [HttpGet("account-deletion/requests/current")]
+    [ProducesResponseType(typeof(ApiResponse<AccountDeletionRequestDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetAccountDeletionRequest(CancellationToken cancellationToken)
+    {
+        var result = await accountDeletionService.GetCurrentAsync(cancellationToken);
+        return Success(result);
+    }
+
+    [Authorize]
+    [HttpDelete("account-deletion/requests/{requestId}")]
+    [ProducesResponseType(typeof(ApiResponse<AccountDeletionRequestDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> CancelAccountDeletion(
+        string requestId,
+        CancellationToken cancellationToken)
+    {
+        var result = await accountDeletionService.CancelAsync(requestId, cancellationToken);
         return Success(result);
     }
 }

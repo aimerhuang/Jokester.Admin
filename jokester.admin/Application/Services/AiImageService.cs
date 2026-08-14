@@ -29,6 +29,8 @@ public sealed class AiImageService(
     IOptions<PromptLibraryOptions> promptLibraryOptions,
     IAiMediaPathResolver mediaPathResolver,
     IAiPromptFilter promptFilter,
+    IUserConsentService userConsentService,
+    IMediaAssetService mediaAssetService,
     ILogger<AiImageService> logger) : IAiImageService
 {
     private const string MimeType = "image/png";
@@ -111,11 +113,13 @@ public sealed class AiImageService(
             .OrderBy(x => x.Sort)
             .OrderBy(x => x.Id)
             .ToListAsync(cancellationToken);
-        var pointPrices = await db.Queryable<AiImagePointPriceEntity>()
+        var pointPriceEntities = await db.Queryable<AiImagePointPriceEntity>()
             .Where(x => !x.IsDeleted && x.Status == 1)
             .OrderBy(x => x.ModelCode)
             .OrderBy(x => x.Sort)
             .OrderBy(x => x.Id)
+            .ToListAsync(cancellationToken);
+        var pointPrices = pointPriceEntities
             .Select(x => new AiImagePointPriceDto
             {
                 ModelCode = x.ModelCode,
@@ -123,10 +127,11 @@ public sealed class AiImageService(
                 QualityCode = x.QualityCode,
                 Points = x.Points,
                 PriceAmount = x.PriceAmount,
+                PriceMinorUnits = Money.ToMinorUnits(x.PriceAmount),
                 Currency = x.Currency,
                 Sort = x.Sort
             })
-            .ToListAsync(cancellationToken);
+            .ToArray();
 
         return new AiImageParameterOptionsDto
         {
@@ -170,6 +175,7 @@ public sealed class AiImageService(
                     QualityCode = price.QualityCode,
                     Points = price.Points,
                     PriceAmount = price.PriceAmount,
+                    PriceMinorUnits = Money.ToMinorUnits(price.PriceAmount),
                     Currency = price.Currency,
                     Sort = price.Sort
                 };
@@ -338,14 +344,16 @@ public sealed class AiImageService(
                 QualityCode = request.QualityCode,
                 AspectRatioCode = request.AspectRatioCode,
                 ReferenceImageUrls = request.ReferenceImageUrls,
-                MaskImageUrl = request.MaskImageUrl
+                ReferenceAssetIds = request.ReferenceAssetIds,
+                MaskImageUrl = request.MaskImageUrl,
+                MaskAssetId = request.MaskAssetId
             }, cancellationToken);
 
             var generatedTasks = await Task.WhenAll(
                 taskIds.Select(taskId => WaitForGeneratedTaskAsync(taskId, cancellationToken)));
 
             var resultUrls = generatedTasks.SelectMany(x => x.ResultUrls).ToArray();
-            if (resultUrls.Length == 0 && generatedTasks.All(x => x.Status == 2))
+            if (resultUrls.Length == 0 && generatedTasks.All(x => x.StatusCode == 2))
             {
                 throw new AppException(
                     ErrorCodes.BadRequest,
@@ -401,24 +409,8 @@ public sealed class AiImageService(
             throw new AppException(ErrorCodes.BadRequest, "文件大小不能超过 10MB");
         }
 
-        var image = await ImageUploadValidator.ValidateAsync(file, MaxReferenceImageSizeBytes, cancellationToken);
-        var mimeType = image.MimeType;
-        var ext = image.Extension;
-
         var owner = currentUser.UserId ?? throw new AppException(ErrorCodes.Unauthorized, "Unauthorized");
-        var storageKey = $"{owner}/{DateTime.UtcNow:yyyyMM}/{Guid.NewGuid():N}{ext}";
-        var savePath = mediaPathResolver.ResolveFilePath(storageKey);
-
-        Directory.CreateDirectory(Path.GetDirectoryName(savePath)!);
-        await File.WriteAllBytesAsync(savePath, image.Content, cancellationToken);
-
-        return new UploadAiImageResponse
-        {
-            Url = $"/api/media/ai/{storageKey.Replace('\\', '/')}",
-            FileName = file.FileName,
-            MimeType = mimeType,
-            FileSize = file.Length
-        };
+        return await mediaAssetService.UploadAsync(owner, file, cancellationToken);
     }
 
     public async Task<GenerateAiImageResponse> GenerateFromResolvedAsync(string prompt, string? modelCode, ResolveAiImageParametersResponse parameters, IReadOnlyList<string> referenceImageUrls, string? maskImageUrl, long ownerUserId, CancellationToken cancellationToken)
@@ -656,7 +648,7 @@ public sealed class AiImageService(
                 throw new NotFoundException($"AI image task does not exist: {taskId}");
             }
 
-            if (!IsTaskActive(task.Status))
+            if (!IsTaskActive(task.StatusCode))
             {
                 return task;
             }
@@ -693,9 +685,21 @@ public sealed class AiImageService(
             QualityCode = request.QualityCode,
             AspectRatioCode = request.AspectRatioCode
         }, cancellationToken);
-        var referenceImageUrls = ValidateReferenceImageUrls(request.ReferenceImageUrls);
-        var maskImageUrl = ValidateMaskImageUrl(request.MaskImageUrl, referenceImageUrls);
         var userId = currentUser.UserId ?? throw new AppException(ErrorCodes.Unauthorized, "User is not authenticated");
+        var resolvedReferenceUrls = await mediaAssetService.ResolveOwnedReferenceUrlsAsync(
+            userId,
+            currentUser.IsSuperAdmin,
+            request.ReferenceAssetIds,
+            request.ReferenceImageUrls,
+            cancellationToken);
+        var referenceImageUrls = ValidateReferenceImageUrls(resolvedReferenceUrls);
+        var resolvedMaskUrl = await mediaAssetService.ResolveOwnedMaskUrlAsync(
+            userId,
+            currentUser.IsSuperAdmin,
+            request.MaskAssetId,
+            request.MaskImageUrl,
+            cancellationToken);
+        var maskImageUrl = ValidateMaskImageUrl(resolvedMaskUrl, referenceImageUrls);
         var sourcePromptId = await ValidateSourcePromptIdAsync(request.SourcePromptId, cancellationToken);
         foreach (var referenceImageUrl in referenceImageUrls)
         {
@@ -758,6 +762,8 @@ public sealed class AiImageService(
         {
             return existingTasks.Select(task => task.Id).ToArray();
         }
+
+        await userConsentService.EnsureAiProcessingConsentAsync(userId, modelConfig.ConsentProviderCode, cancellationToken);
 
         var promptPolicyVersion = await promptFilter.EnsureAllAllowedAsync(
             [
@@ -1229,9 +1235,11 @@ public sealed class AiImageService(
     private static AiImageTaskDto MapTaskDto(AiImageTaskEntity entity, IReadOnlyList<string>? favoriteUrls = null)
     {
         var normalizedFavoriteUrls = favoriteUrls ?? [];
+        var resultUrls = DeserializeImageUrls(entity.ResultUrls);
         return new AiImageTaskDto
         {
             Id = entity.Id,
+            TaskId = entity.Id,
             SiteId = entity.SiteId,
             SourcePromptId = entity.SourcePromptId,
             Prompt = entity.Prompt,
@@ -1249,15 +1257,43 @@ public sealed class AiImageService(
             Quality = entity.Quality,
             ReferenceImageUrls = DeserializeReferenceImageUrls(entity.ReferenceImageUrls),
             MaskImageUrl = entity.MaskImageUrl,
-            ResultUrls = DeserializeImageUrls(entity.ResultUrls),
+            ResultUrls = resultUrls,
             FavoriteUrls = normalizedFavoriteUrls,
             IsFavorite = normalizedFavoriteUrls.Count > 0,
             ErrorMessage = entity.ErrorMessage,
-            CreatedAt = entity.CreatedAt,
-            UpdatedAt = entity.UpdatedAt,
-            Status = entity.Status
+            CreatedAt = HongKongTimeToUtc(entity.CreatedAt),
+            UpdatedAt = entity.UpdatedAt.HasValue
+                ? HongKongTimeToUtc(entity.UpdatedAt.Value)
+                : null,
+            Status = MapTaskStatus(entity.Status),
+            StatusCode = entity.Status,
+            Progress = CalculateTaskProgress(entity),
+            PollAfterSeconds = entity.Status switch { 0 => 3, 3 => 5, _ => 0 },
+            ExpiresAt = HongKongTimeToUtc(entity.CreatedAt.AddMinutes(120)),
+            Assets = resultUrls.Select(url => new AiImageTaskAssetDto { Url = url }).ToArray()
         };
     }
+
+    private static string MapTaskStatus(int status) => status switch
+    {
+        0 => "queued",
+        3 => "processing",
+        1 => "succeeded",
+        2 => "failed",
+        4 => "cancelled",
+        _ => "failed"
+    };
+
+    private static int CalculateTaskProgress(AiImageTaskEntity entity)
+    {
+        if (entity.Status is 1 or 2 or 4) return 100;
+        if (entity.Status == 0) return 0;
+        if (entity.ImageCount <= 0) return 10;
+        return Math.Clamp(10 + (int)Math.Round(80d * entity.CompletedImageCount / entity.ImageCount), 10, 90);
+    }
+
+    private static DateTime HongKongTimeToUtc(DateTime value) =>
+        DateTime.SpecifyKind(value.AddHours(-8), DateTimeKind.Utc);
 
     private static IReadOnlyList<AiImageParameterOptionDto> MapOptions(IReadOnlyList<AiImageParameterEntity> parameters, string paramType)
     {

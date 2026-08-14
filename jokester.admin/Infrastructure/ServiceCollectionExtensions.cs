@@ -1,4 +1,6 @@
 using System.Text;
+using System.Text.Json;
+using jokester.admin.Common;
 using jokester.admin.Application.Abstractions;
 using jokester.admin.Application.Services;
 using jokester.admin.Infrastructure.Email;
@@ -31,6 +33,10 @@ public static class ServiceCollectionExtensions
         services.Configure<RedisOptions>(configuration.GetSection(RedisOptions.SectionName));
         services.Configure<MailOptions>(configuration.GetSection(MailOptions.SectionName));
         services.Configure<EmailValidationOptions>(configuration.GetSection(EmailValidationOptions.SectionName));
+        services.AddSingleton<IValidateOptions<AppleAppStoreOptions>, AppleAppStoreOptionsValidator>();
+        services.AddOptions<AppleAppStoreOptions>()
+            .Bind(configuration.GetSection(AppleAppStoreOptions.SectionName))
+            .ValidateOnStart();
         services.AddSingleton<IValidateOptions<AiMediaStorageOptions>, AiMediaStorageOptionsValidator>();
         services.AddOptions<AiMediaStorageOptions>()
             .Bind(configuration.GetSection(AiMediaStorageOptions.SectionName))
@@ -70,6 +76,13 @@ public static class ServiceCollectionExtensions
                     && options.MinimumActiveWordCount is >= 1 and <= 1_000_000,
                 "AiPromptFilter values are outside the supported safety bounds.")
             .ValidateOnStart();
+        services.AddOptions<MobileConfigurationOptions>()
+            .Bind(configuration.GetSection(MobileConfigurationOptions.SectionName))
+            .Validate(
+                options => IsValidAppVersion(options.MinimumSupportedVersion)
+                    && IsValidAppVersion(options.LatestVersion),
+                "Mobile version values must use dotted numeric version syntax.")
+            .ValidateOnStart();
         services.AddHttpContextAccessor();
         services.AddSingleton<IConnectionMultiplexer>(serviceProvider =>
         {
@@ -99,6 +112,12 @@ public static class ServiceCollectionExtensions
         services.AddScoped<ITokenService, JwtTokenService>();
         services.AddScoped<IAuditLogWriter, AuditLogWriter>();
         services.AddScoped<IEmailSender, MailKitEmailSender>();
+        services.AddSingleton<IAppleJwsVerifier, AppleJwsVerifier>();
+        services.AddSingleton<IAppleAppAccountTokenService, AppleAppAccountTokenService>();
+        services.AddHttpClient<IAppleAppStoreClient, AppleAppStoreClient>(client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(20);
+        });
         services.AddSingleton<IAiMediaPathResolver, AiMediaPathResolver>();
         services.AddSingleton<IPromptReadmeParser, MarkdigPromptReadmeParser>();
         services.AddScoped<IBlogMediaService, BlogMediaService>();
@@ -119,6 +138,39 @@ public static class ServiceCollectionExtensions
                     IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtOptions.SecretKey)),
                     ValidAlgorithms = [SecurityAlgorithms.HmacSha256],
                     ClockSkew = TimeSpan.Zero
+                };
+                options.Events = new JwtBearerEvents
+                {
+                    OnChallenge = async context =>
+                    {
+                        context.HandleResponse();
+                        if (context.Response.HasStarted) return;
+
+                        var code = context.AuthenticateFailure is SecurityTokenExpiredException
+                            ? MachineErrorCodes.AccessTokenExpired
+                            : MachineErrorCodes.Unauthorized;
+                        var message = code == MachineErrorCodes.AccessTokenExpired
+                            ? "Access token has expired."
+                            : "Authentication is required.";
+                        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                        context.Response.ContentType = "application/json; charset=utf-8";
+                        await context.Response.WriteAsJsonAsync(
+                            ApiErrorResponse.Failure(code, message, context.HttpContext.TraceIdentifier),
+                            cancellationToken: context.HttpContext.RequestAborted);
+                    },
+                    OnForbidden = async context =>
+                    {
+                        if (context.Response.HasStarted) return;
+
+                        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                        context.Response.ContentType = "application/json; charset=utf-8";
+                        await context.Response.WriteAsJsonAsync(
+                            ApiErrorResponse.Failure(
+                                MachineErrorCodes.ResourceForbidden,
+                                "The authenticated user is not allowed to access this resource.",
+                                context.HttpContext.TraceIdentifier),
+                            cancellationToken: context.HttpContext.RequestAborted);
+                    }
                 };
             });
         services.AddAuthorization(options =>
@@ -214,4 +266,9 @@ public static class ServiceCollectionExtensions
             _ => throw new InvalidOperationException($"Unsupported Database:Provider value: {provider}")
         };
     }
+
+    private static bool IsValidAppVersion(string value) =>
+        !string.IsNullOrWhiteSpace(value)
+        && value.Length <= 32
+        && Version.TryParse(value, out _);
 }

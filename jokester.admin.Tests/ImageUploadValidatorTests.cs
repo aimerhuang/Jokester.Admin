@@ -73,6 +73,27 @@ public sealed class ImageUploadValidatorTests
             default));
     }
 
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task ValidateAsync_DecodesConfiguredHeicSample()
+    {
+        var path = Environment.GetEnvironmentVariable("JOKESTER_TEST_HEIC_SAMPLE");
+        if (string.IsNullOrWhiteSpace(path)) return;
+
+        var bytes = await File.ReadAllBytesAsync(path);
+        var result = await ImageUploadValidator.ValidateAsync(
+            CreateFile(bytes, "sample.heic", "image/heic"),
+            MaxBytes,
+            default);
+
+        Assert.Equal("image/png", result.MimeType);
+        Assert.Equal(".png", result.Extension);
+        Assert.True(result.Width > 0);
+        Assert.True(result.Height > 0);
+        using var sanitized = Image.Load(result.Content);
+        Assert.True(sanitized.Metadata.ExifProfile is null || sanitized.Metadata.ExifProfile.Values.Count == 0);
+    }
+
     private static FormFile CreateFile(byte[] bytes, string fileName, string contentType)
     {
         var stream = new MemoryStream(bytes);

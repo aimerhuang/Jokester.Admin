@@ -5,12 +5,17 @@ namespace jokester.admin.Application.DTOs.Common;
 /// </summary>
 public class PageQuery
 {
+    private int _pageIndex = 1;
     private int _pageSize = 20;
 
     /// <summary>
     /// 当前页码，从 1 开始。
     /// </summary>
-    public int PageIndex { get; init; } = 1;
+    public int PageIndex
+    {
+        get => _pageIndex;
+        init => _pageIndex = Math.Max(1, value);
+    }
 
     /// <summary>
     /// 每页数据条数。

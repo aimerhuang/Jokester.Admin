@@ -23,6 +23,8 @@ public sealed class GenerateNanoBananaImageRequest
     public int ImageCount { get; init; } = 1;
 
     public IReadOnlyList<string> ImageUrls { get; init; } = [];
+
+    public IReadOnlyList<string> ImageAssetIds { get; init; } = [];
 }
 
 public sealed class CreateNanoBananaImageTaskRequest
@@ -48,6 +50,8 @@ public sealed class CreateNanoBananaImageTaskRequest
     public int ImageCount { get; init; } = 1;
 
     public IReadOnlyList<string> ImageUrls { get; init; } = [];
+
+    public IReadOnlyList<string> ImageAssetIds { get; init; } = [];
 }
 
 public sealed class GenerateNanoBananaImageResponse

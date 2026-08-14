@@ -13,6 +13,8 @@ public sealed class PromptLibraryQuery
 
 public sealed class PromptLibraryListItemDto
 {
+    public string ContentSource { get; init; } = "curated";
+
     public long Id { get; init; }
 
     public string Title { get; init; } = string.Empty;
@@ -28,6 +30,8 @@ public sealed class PromptLibraryListItemDto
 
 public sealed class PromptLibraryDetailDto
 {
+    public string ContentSource { get; init; } = "curated";
+
     public long Id { get; init; }
 
     public string Source { get; init; } = string.Empty;

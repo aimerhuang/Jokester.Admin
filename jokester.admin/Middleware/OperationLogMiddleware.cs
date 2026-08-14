@@ -1,5 +1,8 @@
 using System.Diagnostics;
+using System.Text.Json;
 using jokester.admin.Application.Abstractions;
+using jokester.admin.Common;
+using jokester.admin.Common.Exceptions;
 using Microsoft.AspNetCore.Mvc.Controllers;
 
 namespace jokester.admin.Middleware;
@@ -15,9 +18,15 @@ public sealed class OperationLogMiddleware(RequestDelegate next, ILogger<Operati
         }
 
         var stopwatch = Stopwatch.StartNew();
+        Exception? failure = null;
         try
         {
             await next(context);
+        }
+        catch (Exception ex)
+        {
+            failure = ex;
+            throw;
         }
         finally
         {
@@ -34,7 +43,7 @@ public sealed class OperationLogMiddleware(RequestDelegate next, ILogger<Operati
                     context.Request.Method,
                     context.Request.Path,
                     null,
-                    null,
+                    BuildOutcome(context, failure),
                     (int)stopwatch.ElapsedMilliseconds,
                     context.RequestAborted);
             }
@@ -47,6 +56,49 @@ public sealed class OperationLogMiddleware(RequestDelegate next, ILogger<Operati
             }
         }
     }
+
+    private static string BuildOutcome(HttpContext context, Exception? failure)
+    {
+        var statusCode = failure switch
+        {
+            AppException ex => MapHttpStatusCode(ex.Code),
+            OperationCanceledException when context.RequestAborted.IsCancellationRequested => 499,
+            OperationCanceledException => StatusCodes.Status408RequestTimeout,
+            not null => StatusCodes.Status500InternalServerError,
+            _ => context.Response.StatusCode
+        };
+        var errorCode = failure switch
+        {
+            AppException ex => ex.MachineCode,
+            OperationCanceledException => MachineErrorCodes.ServerError,
+            not null => MachineErrorCodes.ServerError,
+            _ when statusCode == StatusCodes.Status429TooManyRequests => MachineErrorCodes.RateLimited,
+            _ when statusCode >= StatusCodes.Status500InternalServerError => MachineErrorCodes.ServerError,
+            _ => null
+        };
+
+        return JsonSerializer.Serialize(new
+        {
+            statusCode,
+            succeeded = statusCode < StatusCodes.Status400BadRequest,
+            errorCode
+        });
+    }
+
+    private static int MapHttpStatusCode(int code) => code switch
+    {
+        ErrorCodes.BadRequest => StatusCodes.Status400BadRequest,
+        ErrorCodes.Unauthorized => StatusCodes.Status401Unauthorized,
+        ErrorCodes.Forbidden => StatusCodes.Status403Forbidden,
+        ErrorCodes.NotFound => StatusCodes.Status404NotFound,
+        ErrorCodes.Conflict => StatusCodes.Status409Conflict,
+        ErrorCodes.PreconditionFailed => StatusCodes.Status412PreconditionFailed,
+        ErrorCodes.UnprocessableEntity or ErrorCodes.AiPromptRejected => StatusCodes.Status422UnprocessableEntity,
+        ErrorCodes.TooManyRequests => StatusCodes.Status429TooManyRequests,
+        ErrorCodes.ServiceUnavailable => StatusCodes.Status503ServiceUnavailable,
+        ErrorCodes.ServerError => StatusCodes.Status500InternalServerError,
+        _ => StatusCodes.Status400BadRequest
+    };
 
     private static bool ShouldLog(HttpContext context)
     {

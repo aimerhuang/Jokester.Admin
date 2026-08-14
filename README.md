@@ -3,7 +3,10 @@
 基于 `.NET 10 Web API` 的后台管理系统后端，当前已接入以下能力：
 
 - JWT 登录、刷新、登出、当前用户信息
-- 用户注册赠送积分、每日签到、积分充值兑换、AI 生图扣积分与失败返还
+- iOS StoreKit 交易履约、App Store Server Notifications V2 和退款负债处理
+- 法律文档版本、第三方 AI 授权、账户删除和公开移动端配置
+- 用户注册赠送积分、每日签到、积分明细、充值兑换、AI 生图扣积分与失败返还
+- 私有 AI Asset ID、缩略图、资源归属校验和统一模型任务路由
 - YouMind 官方中文提示词库同步、搜索、行为统计和历史快照切换
 - 用户、角色、站点、菜单、日志审计接口
 - 权限码校验中间件
@@ -79,8 +82,15 @@ dotnet run --launch-profile http
 - `BootstrapAdmin.Password`
 - `BootstrapAdmin.Secret`
 - `OpenAI.PrimaryTimeoutSeconds`（默认 120 秒，超时后切换回退路由）
+- `AppleAppStore.*`（仅启用 Apple IAP 时必填；私钥必须由 Secret Manager 或部署密钥注入）
+- `Mobile.MinimumSupportedVersion`
+- `Mobile.LatestVersion`
+- `Mobile.MaintenanceMode`
+- `Mobile.Features.*`
 
-当前实现不会再从代码内回退任何 JWT / MySQL / Redis 默认值。如缺少上述配置，应用会在启动时直接失败。
+完整环境变量模板见 [.env.example](./.env.example)。GPT Image2 与 Nano Banana2 的 Provider 地址、模型、Key 和请求路径以数据库 `ai_image_model_config` 为准，不从 `.env` 或 `appsettings.json` 读取。
+
+JWT、MySQL 和 Redis 的核心配置没有代码内兜底，缺失时应用会在启动阶段失败。生产环境还必须配置至少一个精确的 `Security.AllowedOrigins`。Mail、第三方邮箱验证、开发管理员引导和提示词库等配置只在对应功能启用或调用时要求提供。
 
 MySQL 连接串当前需要包含：
 
@@ -140,7 +150,7 @@ POST /api/dev/bootstrap/super-admin
 X-Bootstrap-Secret: <BootstrapAdmin.Secret>
 ```
 
-辅助脚本见 [scripts/reset-super-admin.ps1](./scripts/reset-super-admin.ps1)。
+辅助脚本见 [scripts/reset-super-admin.ps1](./scripts/reset-super-admin.ps1)，调用时必须通过 `-Secret <BootstrapAdmin.Secret>` 提供引导密钥。
 
 ## 鉴权接口
 
@@ -149,20 +159,29 @@ X-Bootstrap-Secret: <BootstrapAdmin.Secret>
 - `POST /api/auth/register`
 - `POST /api/auth/refresh`
 - `POST /api/auth/logout`
+- `POST /api/auth/logout-all`
 - `GET /api/auth/profile`
+- `POST /api/auth/account-deletion/requests`
+- `GET /api/auth/account-deletion/requests/current`
+- `DELETE /api/auth/account-deletion/requests/{requestId}`
 
 注册邮箱验证码流程：
-- 前端先调用 `POST /api/auth/register/email-code`，请求体只传 `{ "email": "user@163.com" }`
-- 后端生成 6 位验证码，写入 Redis，键前缀为 `register_email_code:` 加上配置的 `Redis.InstanceName`，有效期 10 分钟，并通过 SMTP 发信
+- 前端先调用 `GET /api/blog/comments/captcha` 获取 `captchaId`、`imageBase64`、`mimeType` 和 `expiresInSeconds`
+- 图片验证码是 6 位大写字母/数字，5 分钟过期且校验时一次性消费
+- 调用 `POST /api/auth/register/email-code` 时必须同时传 `email`、`captchaId` 和 `captchaAnswer`
+- 后端生成 6 位验证码，写入 Redis，键前缀为 `register_email_code:` 加上配置的 `Redis.InstanceName`，有效期 10 分钟，并通过 SMTP 发信；成功响应的 `data.retryAfterSeconds=60` 用于客户端发送按钮倒计时
 - 用户收到验证码后，前端再调用 `POST /api/auth/register`
-- 注册请求体需要传 `userName`、`nickName`、`password`、`email`、`emailCode`
+- 注册前按客户端平台调用 `GET /api/legal/documents/current?platform=<ios|android|web>&locale=zh-CN` 获取当前版本；三类文档任一未配置时接口返回 503 并暂停注册
+- 注册请求体除账号字段外，还必须传 `acceptedPrivacyPolicy=true`、`privacyPolicyVersion`、`acceptedTermsOfService=true`、`termsOfServiceVersion`、`clientPlatform` 和 `locale`
 - 注册时后端会用同一个 `email` 去 Redis 查验证码；验证成功后创建用户并删除验证码键
 
 登录成功返回：
 
 - `accessToken`
 - `refreshToken`
+- `sessionId`
 - `accessTokenExpiresAt`
+- `refreshTokenExpiresAt`
 - `user`
 - `sites`
 - `permissions`
@@ -178,6 +197,15 @@ Authorization: Bearer <accessToken>
 ```http
 X-Refresh-Token: <refreshToken>
 ```
+
+Refresh Token 单次轮换并只按 SHA-256 哈希定位。旧 Token 在 10 秒并发宽限内返回同一轮换结果；超出宽限后的重放会撤销整个 session family。错误响应通过 `ACCESS_TOKEN_EXPIRED`、`REFRESH_TOKEN_EXPIRED` 和 `SESSION_REVOKED` 区分处理方式。
+
+公开移动端元数据接口：
+
+- `GET /api/legal/documents/current`
+- `GET /api/mobile/config`
+
+登录用户可通过 `GET /api/users/me/consents` 和 `PUT /api/users/me/consents/ai-processing` 管理第三方 AI 数据处理授权。缺少当前模型 Provider 所需授权时，生图入口返回 HTTP 412 和 `AI_CONSENT_REQUIRED`。
 
 ## 用户管理接口
 
@@ -274,18 +302,20 @@ X-Refresh-Token: <refreshToken>
 ## AI 生图接口约定
 
 - `POST /api/ai/images/generate`：直接生成 GPT Image2 图片；后端会先创建历史任务、扣除积分，再由后台 worker 执行并最多等待 5 分钟返回结果
-- `POST /api/ai/images`：创建 GPT Image2 后台生图任务
+- `POST /api/ai/images`：按 `modelCode` 解析 Provider 协议并创建后台任务，是移动端统一创建入口
 - `POST /api/ai/images/nanoBananaImage/generate`：直接生成 Nano Banana2 图片
 - `POST /api/ai/images/nanoBananaImage`：创建 Nano Banana2 后台生图任务
-- `GET /api/ai/images`：查询 AI 生图任务记录，支持 `isFavorite`、`prompt`、`startDate`、`endDate` 筛选；列表会隐藏已写入错误信息且没有结果图片的任务
+- `GET /api/ai/images`：查询 AI 生图任务记录，支持 `isFavorite`、`prompt`、`startDate`、`endDate` 筛选；失败任务保留在列表中并返回 `errorMessage`
 - `GET /api/ai/images/{id}`：查询 AI 生图任务详情
 - `GET /api/ai/images/models`：查询启用的 AI 图片模型
 - `GET /api/ai/images/parameters`：查询 GPT Image2 参数选项和积分价格表
 - `GET /api/ai/images/pricing-options`：查询 AI 图片积分定价列表，每项包含模型、分辨率、画质和消耗积分
 - `POST /api/ai/images/parameters/resolve`：解析 GPT Image2 参数为实际宽高和供应商画质
 - `POST /api/ai/images/upload`：上传 AI 图片引用文件
+- `GET /api/assets/{assetId}/content`、`GET /api/assets/{assetId}/thumbnail`：鉴权读取当前用户的 Asset 原图和缩略图
+- `DELETE /api/assets/{assetId}`：由 Asset 所有者软删除记录并清理原图和缩略图；跨用户与不存在统一返回 404
 - `POST /api/ai/images/{id}/favorite`：收藏或取消收藏任务中的单张结果图片
-- `DELETE /api/ai/images/{id}`：删除 AI 生图任务记录
+- `DELETE /api/ai/images/{id}`：软删除 AI 生图任务记录，不级联删除上传 Asset 或生成文件
 
 ## 提示词库接口约定
 
@@ -312,25 +342,27 @@ X-Refresh-Token: <refreshToken>
 - 列表查询支持 `isFavorite=true` 只返回包含当前用户收藏图片的任务，`isFavorite=false` 返回不包含当前用户收藏图片的任务
 - 请求体记录 `prompt`、`resolutionCode`、`qualityCode`、`aspectRatioCode`；GPT 多图请求按 `imageCount` 创建同等数量的单图任务，每条任务固定 `imageCount=1`
 - GPT Image2 分辨率档位按长边计算：`1k=1024`、`2k=2048`、`4k=3840`；最终尺寸会压到 `16px` 倍数且总像素不超过 `8,294,400`，例如 `4k + 1:1` 为 `2880x2880`
-- 直接生成和后台任务请求体都支持 `referenceImageUrls`，前端传已上传到后端的图片 URL JSON 数组，最多 6 张
+- 上传响应返回 `assetId`、同源内容/缩略图地址、真实 MIME、尺寸、字节数和 `metadataStripped`；HEIC/HEIF 主图解码并规范化为 PNG，JPEG、PNG、WebP 清除元数据后保持原格式，512px 缩略图统一保存为 WebP；新版 iOS 通过 `referenceAssetIds` / `maskAssetId` 引用资源
+- 兼容期仍接受当前用户私有 `/api/media/ai/...` 的 `referenceImageUrls` / `maskImageUrl`，不接受任意远程 URL；后端在入队前校验 Asset 所有权和文件存在性
 - 直接生成响应包含 `taskId`、`taskIds` 和 `url`；创建接口返回首个 `id` 和完整 `ids`。用户关闭网页不会取消已入队任务，完成后仍可在历史记录中找回图片
 - 请求体传入的 `modelCode` 是业务模型编码，后端按 `model_code` + `resolution_code` 分别解析 `route_role=primary/fallback`；每条路由自己的 `provider_model` 会原样作为上游 `model` 参数
 - GPT 主备地址、Key、Provider 模型和请求路径统一保存在 `ai_image_model_config`。主备均启用时先主后备；禁用主路由后会直接使用备用路由
 - AI 上传图和生成图保存在 `private-media/ai`（不在 `wwwroot`）；响应 URL 使用 `/api/media/ai/...`，下载时必须携带 Access Token
-- 后台任务完成后，`GET /api/ai/images` 和 `GET /api/ai/images/{id}` 返回 `resultUrls` 图片 URL 数组、`favoriteUrls` 当前用户已收藏的结果图 URL 数组，以及 `isFavorite` 是否存在收藏；列表接口会隐藏已写入错误信息且 `resultUrls` 为空的任务，详情接口仍可按 id 查询；`ai_image_task.result_urls` 保存图片 URL 的 JSON 数组，`ai_image_task.reference_image_urls` 保存参考图 URL 的 JSON 数组
+- 后台任务列表和详情返回字符串 `status`（`queued/processing/succeeded/failed/cancelled`）、兼容数字 `statusCode`、`progress`、`pollAfterSeconds`、UTC 时间和结果 Asset；失败任务保留并返回 `errorMessage`
 - 收藏接口请求体示例：`{ "imageUrl": "/api/media/ai/tasks/202608/xxx.png", "isFavorite": true }`；取消收藏传 `isFavorite=false`，`imageUrl` 必须属于该任务的 `resultUrls`
 
+## 已知环境问题
 
 - 启动时可能出现 `DataProtection` 的 DPAPI / 文件权限告警
   - 当前不影响 API 启动与本地联调
   - 若要彻底消除，需要单独调整密钥持久化目录或开发环境 DataProtection 策略
 - 2026-08-08 已完成一次本地 Redis `PING/SET/GET` 和 Refresh Token Lua 集成测试；仍需在完整登录链路中继续验收权限缓存键与长期稳定性
   - 如果要做完整验收，需要先把本机 Redis 实例自身校验清楚，再确认登录后 refresh token / 权限缓存键写入
-- 设计书存在明显编码异常，实际实现应以当前代码和接口为准
 
 ## 积分与 AI 生图接口约定
 
 - `GET /api/points/balance`：查询当前用户积分余额和今日签到状态。
+- `GET /api/points/details`：分页查询当前用户积分流水。
 - `POST /api/points/sign-in`：每日签到领取 25 积分；同一自然日只能领取一次。
 - 注册成功自动赠送 50 积分。
 - 签到积分当天有效；第二天调用积分查询、签到或生图扣分时会清理上一日未使用签到积分。
@@ -341,5 +373,6 @@ X-Refresh-Token: <refreshToken>
 
 ## 当前完成范围
 
-- 已完成：认证、权限链路、用户/角色/站点/菜单管理、日志审计、管理员初始化、Redis 缓存、Swagger、博客文章、媒体、评论与仪表盘统计接口、积分余额/签到接口、GPT Image2 与 Nano Banana2 生图任务及积分扣减
-- 未完成：更完整的博客内容模型和真实前台发布链路
+- 已完成：API-01 至 API-14 的服务端代码、数据库脚本、Swagger 强类型契约和自动化测试；Web/Android 旧充值与参考图 URL 仍保留兼容期
+- 待部署配置：执行 `docs/migrations/20260812-ios-api-upgrade.sql`，按 [runbook](./docs/runbook.md#ios-api-升级与发布检查) 使用维护命令配置已审批法律文档和真实 StoreKit Product 映射，通过秘密存储注入 Apple 凭据，并先完成 Sandbox/TestFlight 验收
+- 其他未完成：更完整的博客内容模型和真实前台发布链路；公网发布仍需关闭 [安全加固 PRD](./docs/security-hardening-prd.md#42-当前未关闭的发布阻断) 中的生产环境阻断项

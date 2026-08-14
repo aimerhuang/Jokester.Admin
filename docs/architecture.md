@@ -26,6 +26,34 @@
 4. 超级管理员绕过权限检查。
 5. 普通用户权限优先从 Redis 读取，失败或未命中时回退数据库。
 
+Refresh Token 以 SHA-256 哈希作为 Redis 定位键，明文只返回给客户端。每个登录有独立 `sessionId`/token family；轮换时旧 Token 原子消费，并在 10 秒宽限内缓存加密后的同一轮换结果。宽限后重放会撤销 family。登出全部设备、禁用、改密、角色/站点/超级管理员上下文变化和账户删除都会撤销用户 Refresh Token 会话。
+
+移动端错误响应使用独立 `ApiErrorResponse`，`code` 是稳定字符串而非成功响应的数值 `0`。Swagger Operation Filter 为移动端操作统一声明错误 Schema；业务时间在 DTO 边界转换为 UTC，旧积分/充值表的本地时间存储约定不被业务重构破坏。
+
+## iOS 合规与 StoreKit 数据流
+
+相关表：
+
+- `legal_document`：按文档类型、平台、语言和版本保存已审批文档。
+- `user_consent`：追加式保存隐私/条款/AI 处理的接受或撤回历史。
+- `account_deletion_request`：保存删除申请、计划、数据删除、邮件通知和重试状态。
+- `apple_iap_product`：一对一映射现有积分套餐与 StoreKit 消耗型商品。
+- `apple_transaction`：已验证 Apple 交易的幂等履约账本，只保存 JWS 哈希。
+- `apple_server_notification`：App Store Server Notifications V2 接收和重试账本。
+- `apple_iap_debt`：退款时余额不足的待清偿积分负债。
+
+注册先读取当前隐私政策和服务条款，再在创建用户的同一流程记录两个版本；AI processing 告知独立查询，不依赖同平台的隐私政策或服务条款是否存在。AI 授权写入时使用请求的真实客户端平台，后续生图校验按用户最近一条 AI 授权记录的平台解析精确 scope 或 `all` 告知，不再固定读取 `ios`。生图创建和 Worker 调 Provider 前都用实际路由的 `ConsentProviderCode` 检查最新 AI 告知和授权：告知未配置时服务不可用，告知已配置但授权缺失时要求用户同意，避免平台或 Provider 配置切换后发送未获授权的数据。
+
+StoreKit 履约流程：
+
+1. 客户端提交交易 ID、Product ID、确定性 `appAccountToken` 和幂等键，不提交积分或可信价格。
+2. 服务端用 App Store Connect ES256 凭据读取交易并验证 Apple JWS 证书链、Bundle、环境、商品、数量、撤销状态和账户令牌。
+3. 在一个 MySQL 事务内插入唯一交易行、锁定并更新余额、写入 `source=apple_iap` 流水；重复交易返回首次结果。
+4. Apple 退款通知再次验证内层交易，在事务内扣回可用积分并更新交易。差额写入唯一 open debt；存在负债时 `IPointService` 拒绝新生图预留。
+5. 通知安全接收与业务处理分离；UUID 唯一保证重放幂等，失败状态由 Worker 重试。
+
+账户删除创建后立即撤销会话。Worker 可原子认领 `scheduled/failed` 或陈旧 `processing` 记录，删除用户私有数据并匿名化必须保留的财务/审计主体。数据已删除但邮件失败时进入 `notification_pending`，只重试通知，不重复执行数据删除。
+
 ## 站点模型
 
 `sys_site.site_code` 是站点业务编码。后台仍保留多站点模型，但博客接口当前固定绑定 `siteCode=blog`：
@@ -110,7 +138,8 @@
 
 相关表：
 
-- `ai_image_task`：后台生图任务，保存 `prompt`、参数编码、`size`、`quality`、`image_count`、`reference_image_urls`、`result_urls`、`status`
+- `ai_image_task`：后台生图任务，保存 `prompt`、参数编码、`size`、`quality`、`image_count`、参考图快照、`result_urls`、`status`
+- `media_asset`：用户私有上传 Asset，保存不可枚举 ID、所有者、存储/缩略图 key、真实 MIME、尺寸、哈希和删除状态
 - `ai_image_point_price`：按 `model_code + resolution_code + quality_code` 定义出图积分价格
 - `sys_user.point_balance`：用户当前可用积分余额
 - `sys_user_point_detail`：积分流水，记录注册赠送、签到赠送、出图扣减、过期清理和失败返还
@@ -123,16 +152,16 @@
 4. 创建生图任务前，服务按价格表组合计算 `points * imageCount`，余额不足或价格缺失时拒绝创建任务。
 5. 任务创建时预留积分并写入 `source=image_generate` 流水；后台生成失败或超时时，仅对未完成图片写入一次 `source=image_refund` 流水。
 
-GPT Image2 流程：
+统一任务路由与 GPT Image2 流程：
 
-1. 后端校验 `prompt`、分辨率编码、质量编码、画幅比例编码和最多 6 个 `referenceImageUrls`。
-2. 按 `modelCode + resolutionCode + route_role` 从 `ai_image_model_config` 解析启用的主、备路由，并通过 `ai_image_point_price` 查询扣分价格。
-3. 使用 Redis Lua 原子占用幂等键、用户每日额度、用户活动任务位和全局积压位；成本熔断打开时拒绝创建。
-4. 按 `imageCount` 创建同等数量的单图 `ai_image_task`（每条 `image_count=1`），在同一 MySQL 事务中锁定用户余额、扣除整批积分并写入逐任务唯一预留流水，然后把全部任务 id 写入后台队列。
-5. `AiImageTaskWorker` 原子把每个任务从 `status=0` 认领为 `status=3`，并通过 Redis 租约限制全局 Provider 并发；同一批任务可并发执行。GPT 先调用启用的 `primary` 路由，失败后切换到同槽位启用的 `fallback` 路由；禁用主路由可强制直连备用。
-6. 成功时把任务和 `billing_status` 确认为完成；失败时在同一事务内按未完成图片数退款并写入唯一退款流水，重复回调不会二次退款。
-7. 接口侧最多等待 5 分钟并行轮询本批任务结果；完成后返回 `taskId`、`taskIds` 和 `/api/media/ai/...` 鉴权图片 URL。
-8. 如果用户关闭网页，后台任务仍继续执行，完成后把私有图片 URL 写入 `result_urls`，历史记录接口仍可查询。
+1. 移动端统一调用 `POST /api/ai/images` 并传 `modelCode`。后端按数据库配置的 `provider` 协议路由到 OpenAI Images 或 Gemini Images，不根据模型名称包含的单词猜测服务。
+2. 后端校验 `prompt`、参数编码和最多 6 个 `referenceAssetIds`。Asset 必须属于当前用户；服务端只把自己解析出的私有文件交给 Provider。兼容期 URL 也只允许当前用户的同源私有媒体路径，从根源上阻止任意远程 URL/SSRF。
+3. 上传先检查 magic bytes 和可解码格式，再限制文件字节、边长、总像素、解码时间与资源占用。HEIC/HEIF 通过受限的原生解码器读取主图并规范化为 PNG；JPEG、PNG、WebP 清除 EXIF/ICC/IPTC/XMP 后保持各自格式；生成 512px WebP 缩略图后才持久化 `media_asset`。
+4. 按 `modelCode + resolutionCode + route_role` 从 `ai_image_model_config` 解析启用路由，并通过 `ai_image_point_price` 查询扣分价格。
+5. 使用 Redis Lua 原子占用幂等键、用户每日额度、用户活动任务位和全局积压位；成本熔断打开时拒绝创建。
+6. 按 `imageCount` 创建同等数量的单图任务，在同一 MySQL 事务中锁定用户余额、扣除整批积分并写入逐任务唯一预留流水，然后入队。
+7. Worker 认领任务、复检授权和提示词，再取得 Redis Provider 租约。OpenAI 协议支持同槽位主备；Gemini 协议使用当前启用路由。
+8. 成功确认预留；失败按未完成图片数退款，重复回调不二次退款。任务 DTO 返回字符串状态、进度、建议轮询间隔和 UTC 时间，同时保留数字状态兼容字段。
 
 Nano Banana2 流程：
 
@@ -147,10 +176,10 @@ Nano Banana2 流程：
 2. GPT 多图请求已拆成多个单图任务并发调用外部生图服务；每个任务复用本批请求中的参考图 URL。
 3. 每张图按任务 `user_id` 落盘到 `private-media/ai/{userId}/...`，把鉴权图片 URL 写入 `result_urls` JSON 数组，并通过任务列表和详情接口返回 `resultUrls`；任务 owner 可继续把结果图作为参考图。
 4. 任务状态为 `0待处理/3处理中/1成功/2失败`；失败时按未完成图片数退款，失败记录保留在列表中便于审计。
-5. 普通用户只能查询或删除自己的任务；超级管理员可查看全部任务。
+5. 普通用户只能查询或删除自己的任务；超级管理员可查看全部任务。任务删除只软删除任务记录，不级联删除上传 Asset 或生成文件，避免清除仍可能被其他任务引用的媒体；账户删除流程负责清理该用户的全部私有媒体。
 6. `AiImageTaskRecoveryWorker` 周期性把进程重启后遗留的待处理任务重新入队，并对超时的处理中任务执行同一个幂等退款状态机。
 
-媒体边界：博客图片和头像分别通过公开 `/blog`、`/avatar` 前缀提供；AI 参考图与生成图不进入 `wwwroot`，下载接口再次检查登录主体和任务/路径所有权。后台任务入队前完成参考图所有权校验，避免 worker 无请求主体时跨用户读取。
+媒体边界：博客图片和头像分别通过公开 `/blog`、`/avatar` 前缀提供；AI Asset 与生成图不进入 `wwwroot`。`/api/assets/{assetId}/...` 和 `/api/media/ai/...` 在下载时检查主体和所有权，跨用户资源对普通用户表现为不存在。Asset 所有者可调用 `DELETE /api/assets/{assetId}` 软删除记录并清理原图和缩略图；跨用户删除与不存在统一返回 404。路径解析先规范化并确认仍位于配置根目录，拒绝 `..` 和混合分隔符穿越。Worker 始终显式使用任务 `user_id`，不依赖后台线程中不存在的 `ICurrentUser`。
 
 提示词安全边界：创建阶段在 Redis 准入和积分预留前通过 `IAiPromptFilter` 检查，Worker 在取得
 Provider 租约前按最新快照复检。MySQL 保存权威规则，进程内不可变快照执行关键词匹配，Redis
@@ -166,6 +195,9 @@ Provider 租约前按最新快照复检。MySQL 保存权威规则，进程内�
 - `POST /api/auth/register/email-code`
 - `POST /api/auth/register`
 - `POST /api/auth/refresh`
+- `GET /api/legal/documents/current`
+- `GET /api/mobile/config`
+- `POST /api/integrations/apple/app-store-server-notifications/v2`（Apple JWS 验签）
 - `GET /api/sites/site_code`
 - `GET /api/blog/articles`
 - `GET /api/blog/articles/{id}`
@@ -182,7 +214,7 @@ Provider 租约前按最新快照复检。MySQL 保存权威规则，进程内�
 - `POST /api/prompts/{id}/events`
 - `POST /api/dev/bootstrap/super-admin`（仅 Development 且要求 `X-Bootstrap-Secret`）
 
-`GET /api/blog/comments/captcha` 返回 SVG 图片验证码的 Base64 数据，答案存入 Redis，校验后一次性失效。
+`GET /api/blog/comments/captcha` 返回 6 位大写字母/数字的 SVG 图片验证码 Base64 数据，答案在 Redis 中保存 5 分钟并在校验时一次性消费。评论提交、注册邮件发送和登录失败后的二次验证共用该验证码接口。注册邮件发送成功返回 `retryAfterSeconds=60`；邮箱/IP 共享限流返回 `429 RATE_LIMITED` 和 `Retry-After`。
 
 ### 后台接口
 
@@ -204,7 +236,15 @@ Provider 租约前按最新快照复检。MySQL 保存权威规则，进程内�
 - `POST /api/ai/images/nanoBananaImage/generate`
 - `POST /api/ai/images/nanoBananaImage`
 - `POST /api/ai/images/upload`
+- `GET /api/assets/{assetId}/content`
+- `GET /api/assets/{assetId}/thumbnail`
+- `DELETE /api/assets/{assetId}`
 - `GET /api/points/balance`
+- `GET /api/points/details`
 - `POST /api/points/sign-in`
+- `GET /api/points/recharge/packages`
+- `POST /api/points/recharge/apple/transactions`
+- `GET/PUT /api/users/me/consents`
+- `POST/GET/DELETE /api/auth/account-deletion/requests`
 - `GET/DELETE /api/logs/login`
 - `GET/DELETE /api/logs/operation`

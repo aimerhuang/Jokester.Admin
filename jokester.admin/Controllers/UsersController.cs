@@ -28,6 +28,7 @@ public sealed class UsersController(IUserService userService) : BaseApiControlle
     /// </summary>
 
     [HttpGet("{id:long}/point-details")]
+    [ProducesResponseType(typeof(ApiResponse<PagedResult<UserPointDetailDto>>), StatusCodes.Status200OK)]
     public async Task<IActionResult> GetPointDetails(long id, [FromQuery] PageQuery query, CancellationToken cancellationToken)
     {
         var result = await userService.GetPointDetailsAsync(id, query, cancellationToken);
@@ -89,6 +90,7 @@ public sealed class UsersController(IUserService userService) : BaseApiControlle
     /// </summary>
     
     [HttpPut("{id:long}/nickname")]
+    [ProducesResponseType(typeof(ApiResponse), StatusCodes.Status200OK)]
     public async Task<IActionResult> UpdateNickName(long id, [FromBody] UpdateUserNickNameRequest request, CancellationToken cancellationToken)
     {
         await userService.UpdateNickNameAsync(id, request, cancellationToken);
@@ -100,6 +102,7 @@ public sealed class UsersController(IUserService userService) : BaseApiControlle
     /// </summary>
     [Permission("System.User.Update")]
     [HttpPut("{id:long}/password")]
+    [ProducesResponseType(typeof(ApiResponse), StatusCodes.Status200OK)]
     public async Task<IActionResult> UpdatePassword(long id, [FromBody] UpdateUserPasswordRequest request, CancellationToken cancellationToken)
     {
         await userService.UpdatePasswordAsync(id, request, cancellationToken);
@@ -115,6 +118,7 @@ public sealed class UsersController(IUserService userService) : BaseApiControlle
     [Permission("System.User.Update")]
     [HttpPost("{id:long}/avatar")]
     [Consumes("multipart/form-data")]
+    [ProducesResponseType(typeof(ApiResponse<UploadUserAvatarResponse>), StatusCodes.Status200OK)]
     public async Task<IActionResult> UploadAvatar(long id, [FromForm] UploadUserAvatarRequest request, CancellationToken cancellationToken)
     {
         if (request.File is null)
@@ -123,7 +127,7 @@ public sealed class UsersController(IUserService userService) : BaseApiControlle
         }
 
         var url = await userService.UploadAvatarAsync(id, request.File, cancellationToken);
-        return Success(new { url });
+        return Success(new UploadUserAvatarResponse { Url = url });
     }
 
     /// <summary>

@@ -1,4 +1,6 @@
 using jokester.admin.Application.DTOs.Points;
+using jokester.admin.Application.DTOs.Common;
+using jokester.admin.Common;
 using jokester.admin.Domain.Entities;
 
 namespace jokester.admin.Application.Abstractions;
@@ -6,6 +8,8 @@ namespace jokester.admin.Application.Abstractions;
 public interface IPointService
 {
     Task<PointBalanceDto> GetBalanceAsync(CancellationToken cancellationToken);
+
+    Task<PagedResult<PointDetailDto>> GetDetailsAsync(PageQuery query, CancellationToken cancellationToken);
 
     Task<SignInPointResponse> SignInAsync(CancellationToken cancellationToken);
 

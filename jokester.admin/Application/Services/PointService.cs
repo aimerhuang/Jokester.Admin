@@ -1,5 +1,6 @@
 using jokester.admin.Application.Abstractions;
 using jokester.admin.Application.DTOs.Points;
+using jokester.admin.Application.DTOs.Common;
 using jokester.admin.Common;
 using jokester.admin.Common.Exceptions;
 using jokester.admin.Domain.Entities;
@@ -47,6 +48,51 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
             await db.Ado.RollbackTranAsync();
             throw;
         }
+    }
+
+    public async Task<PagedResult<PointDetailDto>> GetDetailsAsync(
+        PageQuery query,
+        CancellationToken cancellationToken)
+    {
+        var userId = currentUser.UserId
+            ?? throw new AppException(
+                ErrorCodes.Unauthorized,
+                MachineErrorCodes.Unauthorized,
+                "User is not authenticated");
+        var exists = await db.Queryable<SysUserEntity>()
+            .AnyAsync(x => x.Id == userId && !x.IsDeleted && x.Status == 1, cancellationToken);
+        if (!exists)
+        {
+            throw new AppException(
+                ErrorCodes.Unauthorized,
+                MachineErrorCodes.SessionRevoked,
+                "The login session has been revoked.");
+        }
+
+        RefAsync<int> total = 0;
+        var entities = await db.Queryable<UserPointDetailEntity>()
+            .Where(x => x.UserId == userId)
+            .OrderBy(x => x.CreatedAt, OrderByType.Desc)
+            .OrderBy(x => x.Id, OrderByType.Desc)
+            .ToPageListAsync(query.PageIndex, query.PageSize, total);
+        var items = entities.Select(x => new PointDetailDto
+        {
+            Id = x.Id,
+            ChangePoints = x.ChangePoints,
+            BalanceAfter = x.BalanceAfter,
+            ChangeType = x.ChangeType,
+            Source = x.Source,
+            Remark = x.Remark,
+            CreatedAt = ApiDateTime.FromLocalStorage(x.CreatedAt)
+        }).ToArray();
+
+        return new PagedResult<PointDetailDto>
+        {
+            Total = total,
+            PageIndex = query.PageIndex,
+            PageSize = query.PageSize,
+            Items = items
+        };
     }
 
     public async Task<SignInPointResponse> SignInAsync(CancellationToken cancellationToken)
@@ -106,7 +152,7 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
             return new SignInPointResponse
             {
                 Points = SignInGiftPoints,
-                ExpireAt = expireAt,
+                ExpireAt = ApiDateTime.FromLocalStorage(expireAt),
                 AvailablePoints = balanceAfter
             };
         }
@@ -219,6 +265,16 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
 
                 await db.Ado.CommitTranAsync();
                 return new ImageTaskBatchReservationResult(orderedExistingIds, false);
+            }
+
+            var hasAppleDebt = await db.Queryable<AppleIapDebtEntity>()
+                .AnyAsync(x => x.UserId == userId && x.Status == "open" && x.PointsOwed > 0, cancellationToken);
+            if (hasAppleDebt)
+            {
+                throw new AppException(
+                    ErrorCodes.Forbidden,
+                    MachineErrorCodes.ResourceForbidden,
+                    "AI image generation is unavailable while an Apple IAP refund balance is outstanding.");
             }
 
             await ExpirePreviousSignInPointsAsync(user, DateTime.Today, cancellationToken);

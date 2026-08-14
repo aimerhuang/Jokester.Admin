@@ -21,6 +21,10 @@ public sealed class ResolvedAiImageModelConfig
 
     public string Provider { get; init; } = string.Empty;
 
+    public string ProviderProtocol { get; init; } = string.Empty;
+
+    public string ConsentProviderCode { get; init; } = string.Empty;
+
     public string ProviderModel { get; init; } = string.Empty;
 
     public string? ResolutionCode { get; init; }

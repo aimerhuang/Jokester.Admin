@@ -1,5 +1,21 @@
 # Third-Party Notices
 
+## Magick.NET / ImageMagick
+
+HEIC/HEIF uploads are decoded with `Magick.NET-Q8-AnyCPU` 14.16.0 before the
+application performs its normal ImageSharp validation and metadata stripping:
+
+- Source: https://github.com/dlemstra/Magick.NET
+- Package repository commit: `474ebe6f28152415426a1791f6cc3b76c8067a39`
+- Magick.NET license: Apache License 2.0; see [licenses/Apache-2.0.txt](licenses/Apache-2.0.txt)
+- Bundled ImageMagick version: `7.1.2-29`
+- ImageMagick license and bundled codec notices: distributed in the NuGet
+  package as `Notice.txt` (SHA-256
+  `8CC37261F943609B6F2B3C55BEFC32926B606F7F335A20CC7EAC0EA6E1FFFB63`)
+
+Deployment packages must retain the Magick.NET/ImageMagick attribution and the
+license/codec notices shipped with the corresponding NuGet package.
+
 ## houbb/sensitive-word-data
 
 The curated, disabled candidate terms in

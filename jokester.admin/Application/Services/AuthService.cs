@@ -21,6 +21,8 @@ public sealed class AuthService(
     IHttpContextAccessor httpContextAccessor,
     IBlogCaptchaService captchaService,
     IConnectionMultiplexer connectionMultiplexer,
+    IAppleAppAccountTokenService appleAccountIdService,
+    IOptions<AppleAppStoreOptions> appleOptions,
     IOptions<JwtOptions> jwtOptions) : IAuthService
 {
     private static readonly TimeSpan LoginWindow = TimeSpan.FromMinutes(15);
@@ -70,12 +72,21 @@ public sealed class AuthService(
 
     public async Task<LoginResponse> RefreshAsync(RefreshTokenRequest request, CancellationToken cancellationToken)
     {
+        if (string.IsNullOrWhiteSpace(request.RefreshToken))
+        {
+            throw RefreshTokenExpired();
+        }
+
         var consumed = await refreshTokenStore.ConsumeAsync(request.RefreshToken, cancellationToken);
-        if (consumed.Status != RefreshTokenConsumeStatus.Succeeded
+        if (consumed.Status == RefreshTokenConsumeStatus.Invalid)
+        {
+            throw RefreshTokenExpired();
+        }
+        if (consumed.Status is RefreshTokenConsumeStatus.Replayed or RefreshTokenConsumeStatus.Revoked
             || !consumed.UserId.HasValue
             || string.IsNullOrWhiteSpace(consumed.SessionId))
         {
-            throw new AppException(ErrorCodes.InvalidRefreshToken, "RefreshToken 无效或已过期");
+            throw SessionRevoked();
         }
 
         var user = await db.Queryable<SysUserEntity>()
@@ -83,10 +94,38 @@ public sealed class AuthService(
 
         if (user is null || user.Status != 1)
         {
-            throw new AppException(ErrorCodes.InvalidRefreshToken, "RefreshToken 无效或已过期");
+            await refreshTokenStore.RevokeUserSessionsAsync(consumed.UserId.Value, cancellationToken);
+            throw SessionRevoked();
         }
 
-        return await BuildLoginResponseAsync(user, cancellationToken, consumed.SessionId);
+        if (consumed.Status == RefreshTokenConsumeStatus.Concurrent)
+        {
+            if (consumed.Tokens is null)
+            {
+                throw new AppException(
+                    ErrorCodes.ServiceUnavailable,
+                    MachineErrorCodes.ServiceUnavailable,
+                    "Refresh token rotation is still in progress.");
+            }
+            return await BuildLoginResponseAsync(user, cancellationToken, consumed.SessionId, consumed.Tokens);
+        }
+
+        var response = await BuildLoginResponseAsync(user, cancellationToken, consumed.SessionId);
+        var completed = await refreshTokenStore.CompleteRotationAsync(
+            request.RefreshToken,
+            response.RefreshToken,
+            new RefreshTokenRotationTokens(
+                response.AccessToken,
+                response.RefreshToken,
+                response.AccessTokenExpiresAt,
+                response.RefreshTokenExpiresAt),
+            cancellationToken);
+        if (!completed)
+        {
+            await refreshTokenStore.RevokeAsync(response.RefreshToken, CancellationToken.None);
+            throw SessionRevoked();
+        }
+        return response;
     }
 
     public async Task LogoutAsync(string? refreshToken, CancellationToken cancellationToken)
@@ -95,6 +134,15 @@ public sealed class AuthService(
         {
             await refreshTokenStore.RevokeAsync(refreshToken, cancellationToken);
         }
+    }
+
+    public async Task LogoutAllAsync(CancellationToken cancellationToken)
+    {
+        if (!currentUser.UserId.HasValue)
+        {
+            throw new AppException(ErrorCodes.Unauthorized, MachineErrorCodes.Unauthorized, "User is not authenticated.");
+        }
+        await refreshTokenStore.RevokeUserSessionsAsync(currentUser.UserId.Value, cancellationToken);
     }
 
     public async Task<UserProfileDto> GetProfileAsync(CancellationToken cancellationToken)
@@ -124,7 +172,20 @@ public sealed class AuthService(
             throw new AppException(ErrorCodes.Unauthorized, "未登录");
         }
 
-        return user;
+        if (!appleOptions.Value.Enabled) return user;
+
+        return new UserProfileDto
+        {
+            Id = user.Id,
+            UserName = user.UserName,
+            NickName = user.NickName,
+            Email = user.Email,
+            AvatarUrl = user.AvatarUrl,
+            Signature = user.Signature,
+            PointBalance = user.PointBalance,
+            IsSuperAdmin = user.IsSuperAdmin,
+            AppleAppAccountToken = appleAccountIdService.GetForUser(user.Id)
+        };
     }
 
     public async Task RecordLoginFailureAsync(string? userName, string errorMessage, CancellationToken cancellationToken)
@@ -157,7 +218,12 @@ public sealed class AuthService(
         var saved = await refreshTokenStore.SaveAsync(refreshToken, user.Id, sessionId, refreshExpiresAt, cancellationToken);
         if (!saved)
         {
-            throw new AppException(ErrorCodes.InvalidRefreshToken, "RefreshToken 会话已失效，请重新登录");
+            if (existingSessionId is not null) throw SessionRevoked();
+
+            throw new AppException(
+                ErrorCodes.ServiceUnavailable,
+                MachineErrorCodes.ServiceUnavailable,
+                "Login session storage is temporarily unavailable.");
         }
 
         return new LoginResponse
@@ -165,6 +231,8 @@ public sealed class AuthService(
             AccessToken = accessToken,
             RefreshToken = refreshToken,
             AccessTokenExpiresAt = accessTokenExpiresAt,
+            RefreshTokenExpiresAt = refreshExpiresAt,
+            SessionId = sessionId,
             User = new UserProfileDto
             {
                 Id = user.Id,
@@ -174,12 +242,68 @@ public sealed class AuthService(
                 AvatarUrl = user.AvatarUrl,
                 Signature = user.Signature,
                 PointBalance = user.PointBalance,
-                IsSuperAdmin = user.IsSuperAdmin
+                IsSuperAdmin = user.IsSuperAdmin,
+                AppleAppAccountToken = appleOptions.Value.Enabled
+                    ? appleAccountIdService.GetForUser(user.Id)
+                    : null
             },
             Sites = sites,
             Permissions = permissions
         };
     }
+
+    private async Task<LoginResponse> BuildLoginResponseAsync(
+        SysUserEntity user,
+        CancellationToken cancellationToken,
+        string sessionId,
+        RefreshTokenRotationTokens tokens)
+    {
+        var sites = await db.Queryable<SysUserSiteEntity, SysSiteEntity>((us, s) => new JoinQueryInfos(JoinType.Inner, us.SiteId == s.Id))
+            .Where((us, s) => us.UserId == user.Id && !s.IsDeleted && s.Status == 1)
+            .OrderBy((us, s) => s.Sort)
+            .Select((us, s) => new SiteAccessDto
+            {
+                Id = s.Id,
+                SiteCode = s.SiteCode,
+                SiteName = s.SiteName
+            })
+            .ToListAsync(cancellationToken);
+        var permissions = await permissionService.GetPermissionsAsync(user.Id, user.IsSuperAdmin, cancellationToken);
+        return new LoginResponse
+        {
+            SessionId = sessionId,
+            AccessToken = tokens.AccessToken,
+            RefreshToken = tokens.RefreshToken,
+            AccessTokenExpiresAt = tokens.AccessTokenExpiresAt,
+            RefreshTokenExpiresAt = tokens.RefreshTokenExpiresAt,
+            User = new UserProfileDto
+            {
+                Id = user.Id,
+                UserName = user.UserName,
+                NickName = user.NickName ?? string.Empty,
+                Email = user.Email,
+                AvatarUrl = user.AvatarUrl,
+                Signature = user.Signature,
+                PointBalance = user.PointBalance,
+                IsSuperAdmin = user.IsSuperAdmin,
+                AppleAppAccountToken = appleOptions.Value.Enabled
+                    ? appleAccountIdService.GetForUser(user.Id)
+                    : null
+            },
+            Sites = sites,
+            Permissions = permissions
+        };
+    }
+
+    private static AppException RefreshTokenExpired() => new(
+        ErrorCodes.Unauthorized,
+        MachineErrorCodes.RefreshTokenExpired,
+        "Refresh token is missing or expired.");
+
+    private static AppException SessionRevoked() => new(
+        ErrorCodes.Unauthorized,
+        MachineErrorCodes.SessionRevoked,
+        "The login session has been revoked.");
 
     private async Task RecordSuccessfulLoginAsync(SysUserEntity user, CancellationToken cancellationToken)
     {

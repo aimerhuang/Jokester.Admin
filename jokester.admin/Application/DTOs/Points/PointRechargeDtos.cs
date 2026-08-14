@@ -12,6 +12,8 @@ public sealed class RechargePackageDto
 
     public decimal PriceAmount { get; init; }
 
+    public long PriceMinorUnits { get; init; }
+
     public string Currency { get; init; } = "CNY";
 
     public int? ValidityDays { get; init; }
@@ -25,6 +27,16 @@ public sealed class RechargePackageDto
     public bool IsFirstPurchaseEligible { get; init; }
 
     public bool PurchaseEnabled { get; init; }
+
+    public string PurchaseMethod { get; init; } = "external";
+
+    public string? AppleProductId { get; init; }
+
+    public string? AppleProductType { get; init; }
+
+    public int Sort { get; init; }
+
+    public bool Enabled { get; init; } = true;
 
     public IReadOnlyList<string> Benefits { get; init; } = [];
 }
@@ -43,6 +55,8 @@ public sealed class RechargeOrderDto
     public int Points { get; init; }
 
     public decimal PriceAmount { get; init; }
+
+    public long PriceMinorUnits { get; init; }
 
     public string Currency { get; init; } = "CNY";
 
@@ -71,7 +85,9 @@ public sealed class RedeemPointCodeResponse
 
 public sealed class IssuePointRedeemCodesRequest
 {
-    public string PackageCode { get; init; } = string.Empty;
+    public string? PackageCode { get; init; }
+
+    public int? Points { get; init; }
 
     public int Count { get; init; } = 1;
 
@@ -82,7 +98,7 @@ public sealed class IssuePointRedeemCodesRequest
 
 public sealed class IssuedPointRedeemCodesResponse
 {
-    public string PackageCode { get; init; } = string.Empty;
+    public string? PackageCode { get; init; }
 
     public int Points { get; init; }
 

@@ -23,7 +23,9 @@ public sealed class NanoBananaImageService(
     IAiImageAdmissionService admissionService,
     IOptions<PromptLibraryOptions> promptLibraryOptions,
     IAiMediaPathResolver mediaPathResolver,
-    IAiPromptFilter promptFilter) : INanoBananaImageService
+    IAiPromptFilter promptFilter,
+    IUserConsentService userConsentService,
+    IMediaAssetService mediaAssetService) : INanoBananaImageService
 {
     private const string MimeType = "image/png";
     private const int MaxInputImageCount = 6;
@@ -51,7 +53,8 @@ public sealed class NanoBananaImageService(
             AspectRatios = request.AspectRatios,
             Size = request.Size,
             ImageCount = request.ImageCount,
-            ImageUrls = request.ImageUrls
+            ImageUrls = request.ImageUrls,
+            ImageAssetIds = request.ImageAssetIds
         }, cancellationToken);
         var task = await WaitForGeneratedTaskAsync(taskId, cancellationToken);
         var urls = DeserializeImageUrls(task.ResultUrls);
@@ -136,12 +139,18 @@ public sealed class NanoBananaImageService(
     public async Task<long> CreateAsync(CreateNanoBananaImageTaskRequest request, CancellationToken cancellationToken)
     {
         var imageCount = ValidateImageCount(request.ImageCount);
-        var imageUrls = ValidateImageUrls(request.ImageUrls);
+        var userId = currentUser.UserId ?? throw new AppException(ErrorCodes.Unauthorized, "User is not authenticated");
+        var resolvedImageUrls = await mediaAssetService.ResolveOwnedReferenceUrlsAsync(
+            userId,
+            currentUser.IsSuperAdmin,
+            request.ImageAssetIds,
+            request.ImageUrls,
+            cancellationToken);
+        var imageUrls = ValidateImageUrls(resolvedImageUrls);
         var parameters = ResolveNanoBananaParameters(request.ResolutionCode, ResolveAspectRatioInput(request.AspectRatioCode, request.AspectRatios), request.Size, imageUrls);
         var normalizedPrompt = AiImagePromptValidator.Validate(request.Prompt, imageUrls.Count > 0);
         var modelCode = ResolveRequestModelCode(request.ModelCode, request.ModelName, AiImageModelConfigService.DefaultNanoBananaModelCode);
         var modelConfig = await modelConfigService.ResolveAsync(modelCode, null, cancellationToken);
-        var userId = currentUser.UserId ?? throw new AppException(ErrorCodes.Unauthorized, "User is not authenticated");
         var sourcePromptId = await ValidateSourcePromptIdAsync(request.SourcePromptId, cancellationToken);
         foreach (var imageUrl in imageUrls)
         {
@@ -179,6 +188,8 @@ public sealed class NanoBananaImageService(
         {
             return existingTask.Id;
         }
+
+        await userConsentService.EnsureAiProcessingConsentAsync(userId, modelConfig.ConsentProviderCode, cancellationToken);
 
         var promptPolicy = await promptFilter.EnsureAllowedAsync(normalizedPrompt, "prompt", cancellationToken);
 

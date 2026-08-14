@@ -12,12 +12,20 @@ using System.Net;
 
 var rootDirectory = Directory.GetCurrentDirectory();
 var isAiMediaMigration = args.Contains("--migrate-ai-media", StringComparer.OrdinalIgnoreCase);
+var isLegalDocumentConfiguration = args.Contains("--configure-legal-documents", StringComparer.OrdinalIgnoreCase);
+if (isAiMediaMigration && isLegalDocumentConfiguration)
+{
+    throw new InvalidOperationException("Only one maintenance command can run at a time.");
+}
+var applicationArgs = args
+    .Where(x => !string.Equals(x, "--configure-legal-documents", StringComparison.OrdinalIgnoreCase))
+    .ToArray();
 DotEnvConfiguration.LoadToEnvironment(
     rootDirectory,
     Path.Combine(rootDirectory, "jokester.admin"),
     AppContext.BaseDirectory);
 
-var builder = WebApplication.CreateBuilder(args);
+var builder = WebApplication.CreateBuilder(applicationArgs);
 const string CorsPolicyName = "DefaultCors";
 const string AuthPolicyName = "AuthAbuseProtection";
 var swaggerEnabled = builder.Environment.IsDevelopment()
@@ -34,7 +42,10 @@ builder.Logging.AddConsole();
 builder.Logging.AddDebug();
 
 var securityOptions = builder.Configuration.GetSection(SecurityOptions.SectionName).Get<SecurityOptions>() ?? new SecurityOptions();
-if (!isAiMediaMigration && !builder.Environment.IsDevelopment() && securityOptions.AllowedOrigins.Length == 0)
+if (!isAiMediaMigration
+    && !isLegalDocumentConfiguration
+    && !builder.Environment.IsDevelopment()
+    && securityOptions.AllowedOrigins.Length == 0)
 {
     throw new InvalidOperationException("Security:AllowedOrigins must contain explicit production origins.");
 }
@@ -63,10 +74,16 @@ builder.Services.AddCors(options =>
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
-    options.OnRejected = static (context, cancellationToken) =>
+    options.OnRejected = static async (context, cancellationToken) =>
     {
         context.HttpContext.Response.Headers.RetryAfter = "60";
-        return ValueTask.CompletedTask;
+        await context.HttpContext.Response.WriteAsJsonAsync(
+            jokester.admin.Common.ApiErrorResponse.Failure(
+                jokester.admin.Common.MachineErrorCodes.RateLimited,
+                "Too many requests.",
+                context.HttpContext.TraceIdentifier,
+                new { retryAfterSeconds = 60 }),
+            cancellationToken);
     };
 
     options.AddPolicy(AuthPolicyName, context =>
@@ -126,6 +143,22 @@ if (isAiMediaMigration)
     return;
 }
 
+if (isLegalDocumentConfiguration)
+{
+    var options = builder.Configuration
+        .GetSection(LegalDocumentConfigurationOptions.SectionName)
+        .Get<LegalDocumentConfigurationOptions>() ?? new LegalDocumentConfigurationOptions();
+    await using var scope = app.Services.CreateAsyncScope();
+    var db = scope.ServiceProvider.GetRequiredService<SqlSugar.ISqlSugarClient>();
+    var result = await LegalDocumentConfiguration.RunAsync(db, options);
+    Console.WriteLine(
+        $"Configured legal documents for {result.Platform}/{result.Locale}: "
+        + $"types={string.Join(',', result.DocumentTypes)}, "
+        + $"providers={string.Join(',', result.ProviderCodes)}, "
+        + $"effectiveAt={result.EffectiveAt:O}");
+    return;
+}
+
 app.UseMiddleware<GlobalExceptionMiddleware>();
 
 if (swaggerEnabled)
@@ -155,8 +188,8 @@ app.UseCors(CorsPolicyName);
 app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();
-app.UseMiddleware<SecurityRateLimitMiddleware>();
 app.UseMiddleware<OperationLogMiddleware>();
+app.UseMiddleware<SecurityRateLimitMiddleware>();
 app.UseMiddleware<PermissionMiddleware>();
 app.MapControllers();
 

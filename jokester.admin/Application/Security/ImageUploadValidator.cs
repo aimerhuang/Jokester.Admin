@@ -1,5 +1,6 @@
 using jokester.admin.Common;
 using jokester.admin.Common.Exceptions;
+using ImageMagick;
 using Microsoft.AspNetCore.Http;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Formats;
@@ -18,6 +19,20 @@ public static class ImageUploadValidator
     private static readonly TimeSpan DecodeTimeout = TimeSpan.FromSeconds(10);
     private static readonly SixLabors.ImageSharp.Configuration ImageConfiguration = CreateImageConfiguration();
 
+    static ImageUploadValidator()
+    {
+        ResourceLimits.Width = MaxWidth;
+        ResourceLimits.Height = MaxHeight;
+        ResourceLimits.Area = 128 * 1024 * 1024;
+        ResourceLimits.Memory = 128 * 1024 * 1024;
+        ResourceLimits.Disk = 256 * 1024 * 1024;
+        ResourceLimits.MaxMemoryRequest = 64 * 1024 * 1024;
+        ResourceLimits.MaxProfileSize = 8 * 1024 * 1024;
+        ResourceLimits.ListLength = 32;
+        ResourceLimits.Thread = 2;
+        ResourceLimits.Time = checked((ulong)DecodeTimeout.TotalSeconds);
+    }
+
     public static async Task<ValidatedImage> ValidateAsync(IFormFile file, long maxBytes, CancellationToken cancellationToken)
     {
         if (file.Length <= 0 || file.Length > maxBytes)
@@ -28,6 +43,11 @@ public static class ImageUploadValidator
         await using var source = new MemoryStream((int)file.Length);
         await file.CopyToAsync(source, cancellationToken);
         source.Position = 0;
+
+        if (IsHeifContainer(source.GetBuffer().AsSpan(0, checked((int)source.Length))))
+        {
+            return await ValidateHeifAsync(source.ToArray(), maxBytes, cancellationToken);
+        }
 
         using var timeout = new CancellationTokenSource(DecodeTimeout);
         using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
@@ -143,6 +163,63 @@ public static class ImageUploadValidator
 
     private static AppException InvalidImage() =>
         new(ErrorCodes.BadRequest, "The file is not a valid supported image.");
+
+    private static async Task<ValidatedImage> ValidateHeifAsync(
+        byte[] content,
+        long maxBytes,
+        CancellationToken cancellationToken)
+    {
+        using var timeout = new CancellationTokenSource(DecodeTimeout);
+        using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
+        try
+        {
+            var png = await Task.Run(() =>
+            {
+                using var image = new MagickImage(content);
+                ValidateDimensions(checked((int)image.Width), checked((int)image.Height));
+                image.AutoOrient();
+                image.Strip();
+                image.Format = MagickFormat.Png;
+                return image.ToByteArray();
+            }, linkedCancellation.Token);
+
+            linkedCancellation.Token.ThrowIfCancellationRequested();
+            return await ValidateAsync(png, maxBytes, linkedCancellation.Token);
+        }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            throw new AppException(ErrorCodes.BadRequest, "Image decoding timed out.");
+        }
+        catch (MagickException)
+        {
+            throw InvalidImage();
+        }
+        catch (OverflowException)
+        {
+            throw InvalidImage();
+        }
+    }
+
+    private static bool IsHeifContainer(ReadOnlySpan<byte> content)
+    {
+        if (content.Length < 12 || !content.Slice(4, 4).SequenceEqual("ftyp"u8)) return false;
+        var boxSize = (uint)(content[0] << 24 | content[1] << 16 | content[2] << 8 | content[3]);
+        var scanLength = Math.Min(content.Length, boxSize is >= 16 and <= 1024 ? checked((int)boxSize) : 32);
+        for (var offset = 8; offset + 4 <= scanLength; offset += 4)
+        {
+            var brand = content.Slice(offset, 4);
+            if (brand.SequenceEqual("heic"u8)
+                || brand.SequenceEqual("heix"u8)
+                || brand.SequenceEqual("hevc"u8)
+                || brand.SequenceEqual("hevx"u8)
+                || brand.SequenceEqual("mif1"u8)
+                || brand.SequenceEqual("msf1"u8))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
 
     private static SixLabors.ImageSharp.Configuration CreateImageConfiguration()
     {

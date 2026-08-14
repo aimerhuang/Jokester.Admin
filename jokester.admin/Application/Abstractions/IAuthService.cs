@@ -10,6 +10,8 @@ public interface IAuthService
 
     Task LogoutAsync(string? refreshToken, CancellationToken cancellationToken);
 
+    Task LogoutAllAsync(CancellationToken cancellationToken);
+
     Task<UserProfileDto> GetProfileAsync(CancellationToken cancellationToken);
 
     Task RecordLoginFailureAsync(string? userName, string errorMessage, CancellationToken cancellationToken);

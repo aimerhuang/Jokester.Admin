@@ -29,3 +29,20 @@ public sealed class SignInPointResponse
 
     public int AvailablePoints { get; init; }
 }
+
+public sealed class PointDetailDto
+{
+    public long Id { get; init; }
+
+    public int ChangePoints { get; init; }
+
+    public int BalanceAfter { get; init; }
+
+    public string ChangeType { get; init; } = string.Empty;
+
+    public string Source { get; init; } = string.Empty;
+
+    public string? Remark { get; init; }
+
+    public DateTime CreatedAt { get; init; }
+}

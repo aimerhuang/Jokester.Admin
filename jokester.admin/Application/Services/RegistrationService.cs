@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using jokester.admin.Application.Abstractions;
 using jokester.admin.Application.DTOs.Auth;
+using jokester.admin.Application.Security;
 using jokester.admin.Common;
 using jokester.admin.Common.Exceptions;
 using jokester.admin.Domain.Entities;
@@ -17,17 +18,21 @@ public sealed class RegistrationService(
     IEmailValidationService emailValidationService,
     IEmailSender emailSender,
     IBlogCaptchaService captchaService,
+    ILegalDocumentService legalDocumentService,
     IConnectionMultiplexer connectionMultiplexer,
     IOptions<RedisOptions> redisOptions) : IRegistrationService
 {
     private const int RegisterGiftPoints = 50;
+    private const int EmailCodeRetryAfterSeconds = 60;
     private const string DefaultRegisteredUserRoleCode = "ai_operator";
     private const string DefaultRegisteredUserSiteCode = "ai_image";
     private static readonly TimeSpan CodeLifetime = TimeSpan.FromMinutes(10);
     private readonly IDatabase _redis = connectionMultiplexer.GetDatabase();
     private readonly string _emailCodePrefix = $"{redisOptions.Value.InstanceName}register_email_code:";
 
-    public async Task SendEmailCodeAsync(SendRegisterEmailCodeRequest request, CancellationToken cancellationToken)
+    public async Task<SendRegisterEmailCodeResponse> SendEmailCodeAsync(
+        SendRegisterEmailCodeRequest request,
+        CancellationToken cancellationToken)
     {
         var email = await emailValidationService.ValidateAndNormalizeAsync(request.Email, cancellationToken);
         if (!await captchaService.ValidateAsync(request.CaptchaId, request.CaptchaAnswer, cancellationToken))
@@ -43,20 +48,22 @@ public sealed class RegistrationService(
             "Jokester registration code",
             $"Your registration verification code is {code}. It expires in 10 minutes.",
             cancellationToken);
+
+        return new SendRegisterEmailCodeResponse { RetryAfterSeconds = EmailCodeRetryAfterSeconds };
     }
 
     public async Task<RegisterResponse> RegisterAsync(RegisterRequest request, CancellationToken cancellationToken)
     {
-        ValidateRegisterRequest(request);
+        var userName = ValidateRegisterRequest(request);
         var email = await emailValidationService.ValidateAndNormalizeAsync(request.Email, cancellationToken);
         await ValidateEmailCodeAsync(email, request.GetEmailCode());
-        await EnsureUserAvailableAsync(request.UserName.Trim(), email, cancellationToken);
+        await EnsureUserAvailableAsync(userName, email, cancellationToken);
 
         var hashed = passwordHasher.HashPassword(request.Password);
         var entity = new SysUserEntity
         {
-            UserName = request.UserName.Trim(),
-            NickName = string.IsNullOrWhiteSpace(request.NickName) ? request.UserName.Trim() : request.NickName.Trim(),
+            UserName = userName,
+            NickName = string.IsNullOrWhiteSpace(request.NickName) ? userName : request.NickName.Trim(),
             PasswordHash = hashed.Hash,
             Salt = hashed.Salt,
             Email = email,
@@ -72,6 +79,7 @@ public sealed class RegistrationService(
         try
         {
             var userId = await db.Insertable(entity).ExecuteReturnBigIdentityAsync();
+            await legalDocumentService.ValidateAndRecordRegistrationConsentsAsync(userId, request, cancellationToken);
             await AssignDefaultAiImageAccessAsync(userId, cancellationToken);
             await db.Insertable(new UserPointDetailEntity
             {
@@ -80,7 +88,7 @@ public sealed class RegistrationService(
                 BalanceAfter = RegisterGiftPoints,
                 ChangeType = "gift",
                 Source = "register",
-                BusinessKey = $"register:{email}",
+                BusinessKey = $"register:user:{userId}",
                 Remark = "注册赠送积分",
                 CreatedAt = DateTime.Now
             }).ExecuteCommandAsync(cancellationToken);
@@ -150,16 +158,15 @@ public sealed class RegistrationService(
         }
     }
 
-    private static void ValidateRegisterRequest(RegisterRequest request)
+    private static string ValidateRegisterRequest(RegisterRequest request)
     {
-        if (string.IsNullOrWhiteSpace(request.UserName) || request.UserName.Length > 50)
-        {
-            throw new AppException(ErrorCodes.BadRequest, "Invalid user name");
-        }
+        var userName = RegistrationUserNameValidator.Validate(request.UserName);
 
         if (request.Password.Length < 8 || request.Password.Length > 64)
         {
             throw new AppException(ErrorCodes.BadRequest, "Password length must be between 8 and 64");
         }
+
+        return userName;
     }
 }

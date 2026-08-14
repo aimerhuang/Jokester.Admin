@@ -572,7 +572,7 @@ public sealed class PromptLibrarySyncRunner(
         return DateTime.TryParse(
             value,
             CultureInfo.InvariantCulture,
-            DateTimeStyles.AllowWhiteSpaces | DateTimeStyles.AssumeUniversal,
+            DateTimeStyles.AllowWhiteSpaces | DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
             out var result)
             ? result
             : null;

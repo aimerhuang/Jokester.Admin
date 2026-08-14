@@ -24,6 +24,11 @@ public sealed class LoginRequest
     /// 验证码答案。
     /// </summary>
     public string? CaptchaAnswer { get; init; }
+
+    /// <summary>
+    /// Client-generated stable identifier for the current device login session.
+    /// </summary>
+    public string? DeviceSessionId { get; init; }
 }
 
 /// <summary>
@@ -59,12 +64,23 @@ public sealed class SendRegisterEmailCodeRequest
 }
 
 /// <summary>
+/// 注册邮箱验证码发送结果。
+/// </summary>
+public sealed class SendRegisterEmailCodeResponse
+{
+    /// <summary>
+    /// 再次发送前建议等待的秒数。
+    /// </summary>
+    public int RetryAfterSeconds { get; init; }
+}
+
+/// <summary>
 /// 邮箱验证码注册请求。
 /// </summary>
 public sealed class RegisterRequest
 {
     /// <summary>
-    /// 登录用户名。
+    /// 登录用户名，须为 6-20 位 ASCII 字母和数字组合，且两者都必须包含。
     /// </summary>
     public string UserName { get; init; } = string.Empty;
 
@@ -87,6 +103,18 @@ public sealed class RegisterRequest
     /// 邮箱验证码。
     /// </summary>
     public string EmailCode { get; init; } = string.Empty;
+
+    public bool AcceptedPrivacyPolicy { get; init; }
+
+    public string? PrivacyPolicyVersion { get; init; }
+
+    public bool AcceptedTermsOfService { get; init; }
+
+    public string? TermsOfServiceVersion { get; init; }
+
+    public string ClientPlatform { get; init; } = "ios";
+
+    public string Locale { get; init; } = "zh-CN";
 
 
     public string GetEmailCode()
@@ -112,6 +140,11 @@ public sealed class RegisterResponse
 public sealed class LoginResponse
 {
     /// <summary>
+    /// 当前会话 ID。
+    /// </summary>
+    public string SessionId { get; init; } = string.Empty;
+
+    /// <summary>
     /// AccessToken。
     /// </summary>
     public string AccessToken { get; init; } = string.Empty;
@@ -125,6 +158,11 @@ public sealed class LoginResponse
     /// AccessToken 过期时间。
     /// </summary>
     public DateTime AccessTokenExpiresAt { get; init; }
+
+    /// <summary>
+    /// RefreshToken 过期时间。
+    /// </summary>
+    public DateTime RefreshTokenExpiresAt { get; init; }
 
     /// <summary>
     /// 当前用户信息。
@@ -186,6 +224,11 @@ public sealed class UserProfileDto
     /// 是否超级管理员。
     /// </summary>
     public bool IsSuperAdmin { get; init; }
+
+    /// <summary>
+    /// StoreKit 购买时使用的稳定用户绑定 UUID。
+    /// </summary>
+    public string? AppleAppAccountToken { get; init; }
 }
 
 /// <summary>

@@ -348,6 +348,11 @@ public sealed class UploadUserAvatarRequest
     public IFormFile? File { get; init; }
 }
 
+public sealed class UploadUserAvatarResponse
+{
+    public string Url { get; init; } = string.Empty;
+}
+
 /// <summary>
 /// 修改用户个性签名请求。
 /// </summary>

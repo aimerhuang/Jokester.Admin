@@ -14,6 +14,8 @@ public sealed class AiImageModelConfigService(ISqlSugarClient db) : IAiImageMode
     public const string NanoBananaProModelCode = "nano-banana-pro";
     public const string PrimaryRouteRole = "primary";
     public const string FallbackRouteRole = "fallback";
+    public const string OpenAiImageProtocol = "openai-image";
+    public const string GeminiImageProtocol = "gemini-image";
 
     // 单次请求可生成的最大图片数量，依据各供应商官方限制。
     // OpenAI Images API（gpt-image）：n 取值 1-10。
@@ -35,6 +37,18 @@ public sealed class AiImageModelConfigService(ISqlSugarClient db) : IAiImageMode
             .OrderBy(x => x.Sort)
             .OrderBy(x => x.Id)
             .ToListAsync(cancellationToken);
+        var parameters = await db.Queryable<AiImageParameterEntity>()
+            .Where(x => !x.IsDeleted && x.Status == 1)
+            .OrderBy(x => x.Sort)
+            .OrderBy(x => x.Id)
+            .ToListAsync(cancellationToken);
+        var qualities = parameters.Where(x => x.ParamType == "quality").Select(x => x.ParamCode).Distinct().ToArray();
+        var aspectRatios = parameters.Where(x => x.ParamType == "aspect_ratio").Select(x => x.ParamCode).Distinct().ToArray();
+        var enabledPrices = await db.Queryable<AiImagePointPriceEntity>()
+            .Where(x => !x.IsDeleted && x.Status == 1)
+            .OrderBy(x => x.Sort)
+            .OrderBy(x => x.Id)
+            .ToListAsync(cancellationToken);
 
         return configs
             .Where(x => IsSupportedRouteRole(x.RouteRole))
@@ -46,11 +60,42 @@ public sealed class AiImageModelConfigService(ISqlSugarClient db) : IAiImageMode
                     .ThenBy(x => x.Sort)
                     .ThenBy(x => x.Id)
                     .First();
+                var modelCode = NormalizeModelCode(config.ModelCode);
+                var providerProtocol = ResolveProviderProtocol(config.Provider);
+                var isGeminiImage = providerProtocol == GeminiImageProtocol;
+                var pricedResolutions = enabledPrices
+                    .Where(x => string.Equals(NormalizeModelCode(x.ModelCode), modelCode, StringComparison.OrdinalIgnoreCase))
+                    .Select(x => (x.ResolutionCode ?? string.Empty).Trim().ToLowerInvariant())
+                    .Where(x => x.Length > 0)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+                var routedResolutions = group
+                    .Select(x => (x.ResolutionCode ?? string.Empty).Trim().ToLowerInvariant())
+                    .Where(x => x.Length > 0)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+                var hasGenericRoute = group.Any(x => string.IsNullOrWhiteSpace(x.ResolutionCode));
+                var supportedResolutions = hasGenericRoute
+                    ? pricedResolutions
+                    : routedResolutions
+                        .Where(x => pricedResolutions.Contains(x, StringComparer.OrdinalIgnoreCase))
+                        .ToArray();
                 return new AiImageModelOptionDto
                 {
-                    Code = NormalizeModelCode(config.ModelCode),
+                    Code = modelCode,
                     Name = config.ModelName,
                     Provider = config.Provider,
+                    ProviderCode = ResolveConsentProviderCode(providerProtocol),
+                    Capabilities = new AiImageModelCapabilitiesDto
+                    {
+                        SupportsReferenceImages = true,
+                        MaxReferenceImages = 6,
+                        SupportsQuality = !isGeminiImage,
+                        SupportedImageCounts = Enumerable.Range(1, GetMaxImageCountForProtocol(providerProtocol)).ToArray()
+                    },
+                    Resolutions = supportedResolutions,
+                    Qualities = isGeminiImage ? [] : qualities,
+                    AspectRatios = aspectRatios,
                     Sort = config.Sort
                 };
             })
@@ -131,6 +176,31 @@ public sealed class AiImageModelConfigService(ISqlSugarClient db) : IAiImageMode
             || string.Equals(normalized, NanoBananaProModelCode, StringComparison.OrdinalIgnoreCase);
     }
 
+    public static string ResolveProviderProtocol(string? provider)
+    {
+        var normalized = LegalDocumentService.NormalizeProviderCode(provider);
+        if (normalized is "openai" or OpenAiImageProtocol
+            || normalized.EndsWith("-openai-image", StringComparison.Ordinal))
+        {
+            return OpenAiImageProtocol;
+        }
+        if (normalized is "google" or "google-image" or GeminiImageProtocol
+            || normalized.EndsWith("-gemini-image", StringComparison.Ordinal))
+        {
+            return GeminiImageProtocol;
+        }
+        throw new AppException(
+            ErrorCodes.ServiceUnavailable,
+            MachineErrorCodes.ServiceUnavailable,
+            $"AI image provider protocol is unsupported: {normalized}");
+    }
+
+    public static string ResolveConsentProviderCode(string providerProtocol) =>
+        ResolveProviderProtocol(providerProtocol) == GeminiImageProtocol ? "google" : "openai";
+
+    public static bool UsesGeminiImageProtocol(ResolvedAiImageModelConfig config) =>
+        string.Equals(config.ProviderProtocol, GeminiImageProtocol, StringComparison.Ordinal);
+
     // 根据模型返回单次生图请求允许的最大图片数量。
     public static int GetMaxImageCount(string? modelCode)
     {
@@ -138,6 +208,14 @@ public sealed class AiImageModelConfigService(ISqlSugarClient db) : IAiImageMode
             ? DefaultNanoBananaMaxImageCount
             : DefaultGptMaxImageCount;
     }
+
+    public static int GetMaxImageCountForProvider(string? provider) =>
+        GetMaxImageCountForProtocol(ResolveProviderProtocol(provider));
+
+    private static int GetMaxImageCountForProtocol(string providerProtocol) =>
+        providerProtocol == GeminiImageProtocol
+            ? DefaultNanoBananaMaxImageCount
+            : DefaultGptMaxImageCount;
 
     private static string NormalizeResolutionCode(string? resolutionCode)
     {
@@ -176,6 +254,7 @@ public sealed class AiImageModelConfigService(ISqlSugarClient db) : IAiImageMode
 
         var normalizedModelCode = NormalizeModelCode(config.ModelCode);
         var providerModel = config.ProviderModel.Trim();
+        var providerProtocol = ResolveProviderProtocol(config.Provider);
         var routeRole = NormalizeRouteRole(config.RouteRole);
         if (!IsSupportedRouteRole(routeRole))
         {
@@ -188,6 +267,8 @@ public sealed class AiImageModelConfigService(ISqlSugarClient db) : IAiImageMode
             ModelCode = normalizedModelCode,
             ModelName = config.ModelName.Trim(),
             Provider = config.Provider.Trim(),
+            ProviderProtocol = providerProtocol,
+            ConsentProviderCode = ResolveConsentProviderCode(providerProtocol),
             ProviderModel = providerModel,
             ResolutionCode = string.IsNullOrWhiteSpace(config.ResolutionCode) ? null : config.ResolutionCode.Trim().ToLowerInvariant(),
             RouteRole = routeRole,

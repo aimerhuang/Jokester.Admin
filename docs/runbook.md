@@ -35,6 +35,8 @@ UI 和 OpenAPI 文档，不会开放仅限 Development 的管理员引导接口�
 - `BootstrapAdmin.Password`
 - `BootstrapAdmin.Secret`
 
+移动端基础配置使用 `Mobile.MinimumSupportedVersion`、`Mobile.LatestVersion`、`Mobile.MaintenanceMode` 和 `Mobile.Features.*`。默认版本为 `0.0.0`，Apple IAP 功能还会与 `AppleAppStore.Enabled` 运行时状态相与；未配置 Apple 凭据时公开配置不会误报 IAP 可用。
+
 MySQL 连接串建议包含：
 
 ```text
@@ -137,6 +139,110 @@ docs/migrations/20260809-add-point-recharge.sql
 
 充值接口和安全约束见 [point-recharge.md](./point-recharge.md)。
 
+## iOS API 升级与发布检查
+
+已有数据库在 `20260809-add-point-recharge.sql`、提示词/AI 路由等前置迁移完成后执行：
+
+```text
+docs/migrations/20260812-ios-api-upgrade.sql
+```
+
+该迁移创建法律文档、用户授权、账户删除、私有 Asset、Apple 商品/交易/通知/负债表，不写入部署专属法律版本、URL、Product ID 或密钥。根目录 `jokester.admin.sql` 已包含同样的 8 个建表块，不能同时对同一新库重复使用两种初始化路径。
+
+恢复注册前，必须配置当前已审批的两类法律文档：
+
+- `privacy_policy`
+- `terms_of_service`
+
+`ai_processing` 与注册所需的两类文档独立。未启用时 `GET /api/legal/documents/current` 返回 `aiProcessingNotice=null`，客户端不显示 AI 授权提示，Web/iOS 注册仍可读取和接受隐私政策、服务条款；所有第三方 AI 生图入口则在 Provider 调用、Redis 准入和积分预留前 fail-closed，返回 HTTP 503、`SERVICE_UNAVAILABLE`。小范围使用或 TestFlight 不得绕过该限制。本轮已启用独立 AI 数据处理授权声明。
+
+前端仓库的 `public/legal/privacy/index.html`、`public/legal/terms/index.html` 和 `public/legal/ai-processing/index.html` 已构建并部署。本轮版本分别为 `privacy-2026-08-14`、`terms-2026-08-14` 和 `ai-processing-2026-08-14`，正式页面位于 `https://ai.jokester.cc:8011/legal/privacy/index.html`、`https://ai.jokester.cc:8011/legal/terms/index.html` 和 `https://ai.jokester.cc:8011/legal/ai-processing/index.html`。运行配置命令前应确认三个地址仍可匿名访问；`Approved=true` 是操作者对该次审批结果的明确确认。
+
+从项目根目录执行下面的幂等维护命令，两次配置共用同一个实际 UTC 生效时间。`Approved=true` 只表示操作者确认本次启用的输入已经完成业务/法务审批；命令不会替代审批。由于数据库可能存在旧的 `web/zh-CN` 精确版本，先更新 `web`，再写入 `all`，避免精确版本遮蔽通用版本：
+
+```powershell
+$env:LegalDocuments__Approved = 'true'
+$env:LegalDocuments__Locale = 'zh-CN'
+$env:LegalDocuments__EffectiveAt = '2026-08-14T06:31:54Z'
+$env:LegalDocuments__PrivacyPolicy__Version = 'privacy-2026-08-14'
+$env:LegalDocuments__PrivacyPolicy__Url = 'https://ai.jokester.cc:8011/legal/privacy/index.html'
+$env:LegalDocuments__PrivacyPolicy__RequiresReconsent = 'false'
+$env:LegalDocuments__TermsOfService__Version = 'terms-2026-08-14'
+$env:LegalDocuments__TermsOfService__Url = 'https://ai.jokester.cc:8011/legal/terms/index.html'
+$env:LegalDocuments__TermsOfService__RequiresReconsent = 'false'
+$env:LegalDocuments__AiProcessing__Enabled = 'true'
+$env:LegalDocuments__AiProcessing__Version = 'ai-processing-2026-08-14'
+$env:LegalDocuments__AiProcessing__Url = 'https://ai.jokester.cc:8011/legal/ai-processing/index.html'
+$env:LegalDocuments__AiProcessing__RequiresReconsent = 'true'
+$env:LegalDocuments__AiProcessing__ProviderCodes__0 = 'openai'
+$env:LegalDocuments__AiProcessing__ProviderCodes__1 = 'google'
+
+foreach ($platform in @('web', 'all')) {
+  $env:LegalDocuments__Platform = $platform
+  dotnet run --project .\jokester.admin --configuration Release --no-build --no-launch-profile -- --configure-legal-documents
+  if ($LASTEXITCODE -ne 0) { throw "Legal document configuration failed for $platform." }
+}
+
+Remove-Item Env:LegalDocuments__Approved,Env:LegalDocuments__Platform,Env:LegalDocuments__Locale,
+  Env:LegalDocuments__EffectiveAt,
+  Env:LegalDocuments__PrivacyPolicy__Version,Env:LegalDocuments__PrivacyPolicy__Url,
+  Env:LegalDocuments__PrivacyPolicy__RequiresReconsent,
+  Env:LegalDocuments__TermsOfService__Version,Env:LegalDocuments__TermsOfService__Url,
+  Env:LegalDocuments__TermsOfService__RequiresReconsent,
+  Env:LegalDocuments__AiProcessing__Enabled,Env:LegalDocuments__AiProcessing__Version,
+  Env:LegalDocuments__AiProcessing__Url,Env:LegalDocuments__AiProcessing__RequiresReconsent,
+  Env:LegalDocuments__AiProcessing__ProviderCodes__0,
+  Env:LegalDocuments__AiProcessing__ProviderCodes__1 -ErrorAction SilentlyContinue
+```
+
+命令在同一事务内停用目标 scope 的旧活动版本、插入或重新启用本次目标版本，并回读验证当前集合；`AiProcessing.Enabled=false` 还会停用相同 scope 的活动 AI 告知。同一个 `version` 的 URL、生效时间、重授权标记和 provider 集合不可变；内容变化必须使用新版本。审批标记缺失、非 HTTPS URL、未来生效时间或同版本内容冲突时零写入。完成后再做独立审计查询：
+
+`Platform=all` 会分别回读 `ios`、`android` 和 `web`；若仍有其他活动的精确平台版本遮蔽通用版本，命令会回滚并指出冲突平台，应先用相同版本更新该精确 scope 后再重试 `all`。`ProviderCodes` 必须覆盖 `ai_image_model_config` 当前全部启用路由映射出的 `openai` / `google`。AI 声明使用 `RequiresReconsent=true`；以后更换声明内容必须发布新版本并重新取得授权。
+
+```sql
+SELECT document_type, version, platform, locale, url, provider_codes_json,
+       effective_at, requires_reconsent, status
+FROM legal_document
+WHERE status = 1
+ORDER BY document_type, platform, locale, effective_at DESC;
+```
+
+Apple IAP 默认关闭。启用前通过环境变量、Secret Manager 或部署密钥提供：
+
+- `AppleAppStore.Enabled=true`
+- `BundleId`、App Store Connect `IssuerId`、`KeyId`
+- P-256 `.p8` 私钥 PEM（必须保留真实换行）
+- 至少 32 字节的随机 `AppAccountTokenKey`
+- `Environment=Sandbox`（TestFlight/Sandbox 验收阶段）
+
+仓库的简单 `.env` 加载器只支持单行值，因此多行 `PrivateKeyPem` 不应通过仓库 `.env` 文件配置；使用 `dotnet user-secrets` 或部署平台的多行 Secret。不得提交 `.p8`、真实 Product ID、Bundle ID、Issuer ID 或 `AppAccountTokenKey`。
+
+Apple JWS 信任根固定随项目发布为 `certificates/apple/AppleRootCA-G3.pem`。发布产物中必须存在该文件；可额外通过 `TrustedRootCertificatePaths` 配置审计过的根证书。启用前确认系统时间正确，证书链校验依赖 UTC 有效期。
+
+将每个现有积分套餐映射到一个真实消耗型 StoreKit 商品，且 `package_id` 和 `apple_product_id` 都唯一。生产映射不要写回仓库 SQL。核对：
+
+```sql
+SELECT p.package_code, p.points AS package_points,
+       a.apple_product_id, a.points AS apple_points,
+       a.product_type, a.environment, a.status, a.is_deleted
+FROM point_recharge_package p
+LEFT JOIN apple_iap_product a ON a.package_id = p.id
+ORDER BY p.sort, p.id;
+```
+
+Sandbox/TestFlight 门禁：
+
+1. `GET /api/legal/documents/current` 返回三类当前文档，时间带 `Z`。
+2. `GET /api/mobile/config` 在 Apple 配置有效时才返回 `features.appleIap=true`。
+3. `GET /api/points/recharge/packages?platform=ios` 只返回已映射商品且不含外部购买 URL。
+4. 同一 Sandbox Transaction ID 连续/并发重放只增加一次积分；同 key 改 payload 返回 409。
+5. App Store Server `TEST`、退款和撤销通知验签成功；通知重放不重复扣分，处理失败保持可重试。
+6. 余额不足的退款产生 open debt，随后生图返回 403；产品/财务确认债务清偿流程后再开放生产。
+7. 未授权当前 Provider 时生成请求返回 412；敏感提示词返回 422；限流返回 429 和 `Retry-After`。
+8. 账户删除申请立即撤销会话，完成后无法登录、私有 Asset 不可访问，完成邮件失败会重试。
+
+切换生产前把商品映射和 Apple 环境改为 `Production`，再启用 `Mobile.Features.AppleIap`。生产通知处理失败、open debt、账户删除 `failed/notification_pending` 都应接入告警；本仓库只实现状态和重试，不包含外部告警平台配置。
+
 ## 提示词库上线与回滚
 
 已有数据库先执行：
@@ -183,7 +289,9 @@ POST /api/admin/prompt-sync/snapshots/{snapshotId}/activate
 
 `GET /api/blog/comments/captcha` 返回 `imageBase64` 和 `mimeType`，前端应拼成 `data:${mimeType};base64,${imageBase64}` 作为图片地址展示。
 
-验证码答案是图片中的 4 位数字，提交评论时通过 `captchaAnswer` 传回。验证码校验后会一次性失效，过期时间由 `expiresInSeconds` 返回。
+验证码答案是图片中的 6 位大写字母/数字。评论提交、注册邮件发送和登录失败后的二次验证都通过 `captchaId`、`captchaAnswer` 传回；验证码校验后会一次性失效，过期时间由 `expiresInSeconds` 返回（当前为 5 分钟）。
+
+注册邮件发送成功时检查 `data.retryAfterSeconds=60`。重复请求若返回 429，应同时包含 `Retry-After`、`code=RATE_LIMITED` 和 `details.retryAfterSeconds`；不要只依赖客户端本地倒计时。
 
 ## 已知环境问题
 
@@ -266,8 +374,10 @@ WHERE model_code = 'gpt-image-2'
 排查要点：
 
 - 直接生成响应应包含 `taskId` 和 `url`；携带该用户 Access Token 访问 URL 应返回图片，匿名访问应为 `401`，其他用户访问应为 `404`。如果前端中途退出，应通过历史记录接口确认同一个 `taskId` 最终写入 `resultUrls`。
+- 上传 HEIC/HEIF 后响应 `mimeType` 应为 `image/png`，文件内容可由 PNG 解码；JPEG、PNG、WebP 应保持对应真实 MIME。所有格式都应清除元数据，Asset 缩略图应为 WebP。Windows/Linux 发布目录必须包含对应 RID 的 `Magick.Native-Q8` 原生库，否则 HEIC/HEIF 会在运行时解码失败。
+- Asset 所有者调用 `DELETE /api/assets/{assetId}` 后，内容和缩略图接口都应返回 404，数据库记录应为软删除，原图和缩略图应从私有目录移除；其他用户删除同一 Asset 也应返回 404 且文件保持不变。删除 AI 任务不会级联清理媒体。
 - 传 `referenceImageUrls` 调试时，确认数组长度不超过 6，且每个 URL 都由当前用户的上传接口返回并能解析到 `private-media/ai` 下的文件。
-- 后台任务成功后，`GET /api/ai/images/{id}` 应返回 `status=1` 和非空 `resultUrls`；数据库中的 `ai_image_task.result_urls` 应是图片 URL 的 JSON 数组。
+- 后台任务成功后，`GET /api/ai/images/{id}` 应返回 `status=succeeded`、兼容字段 `statusCode=1` 和非空 `resultUrls`；数据库中的 `ai_image_task.result_urls` 应是图片 URL 的 JSON 数组。
 - `imageCount=4` 时，创建接口应返回 4 个不同的 `ids`，数据库应新增 4 条 `image_count=1` 记录；四条预留流水与总积分扣减应在同一事务提交。
 - 既有数据库如果仍把 `4k` 配成 `4096`，或 GPT Image2 的 1K / 4K 配置展示名相同导致排查困难，需要执行：
 

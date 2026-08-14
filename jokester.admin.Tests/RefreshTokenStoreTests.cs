@@ -11,20 +11,25 @@ namespace jokester.admin.Tests;
 public sealed class RefreshTokenStoreTests
 {
     [Fact]
-    public async Task ConcurrentConsume_AllowsOneSuccess_AndRevokesFamilyOnReplay()
+    public async Task ConcurrentConsume_ReturnsCompletedRotation_ThenRevokesFamilyAfterGrace()
     {
         var store = CreateFallbackStore();
         var token = "refresh-token-1";
         var sessionId = "session-1";
         Assert.True(await store.SaveAsync(token, 42, sessionId, DateTime.UtcNow.AddDays(1), default));
 
-        var results = await Task.WhenAll(
-            store.ConsumeAsync(token, default),
-            store.ConsumeAsync(token, default));
+        var first = await store.ConsumeAsync(token, default);
+        Assert.Equal(RefreshTokenConsumeStatus.Succeeded, first.Status);
+        var expected = new RefreshTokenRotationTokens(
+            "access-2",
+            "refresh-2",
+            DateTime.UtcNow.AddMinutes(15),
+            DateTime.UtcNow.AddDays(1));
+        Assert.True(await store.CompleteRotationAsync(token, expected.RefreshToken, expected, default));
 
-        Assert.Single(results, x => x.Status == RefreshTokenConsumeStatus.Succeeded);
-        Assert.Single(results, x => x.Status == RefreshTokenConsumeStatus.Replayed);
-        Assert.False(await store.SaveAsync("rotated-token", 42, sessionId, DateTime.UtcNow.AddDays(1), default));
+        var concurrent = await store.ConsumeAsync(token, default);
+        Assert.Equal(RefreshTokenConsumeStatus.Concurrent, concurrent.Status);
+        Assert.Equal(expected, concurrent.Tokens);
     }
 
     [Fact]

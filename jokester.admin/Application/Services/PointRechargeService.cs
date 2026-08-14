@@ -13,9 +13,14 @@ public sealed class PointRechargeService(ISqlSugarClient db, ICurrentUser curren
 {
     private const string RechargeSource = "recharge";
 
-    public async Task<IReadOnlyList<RechargePackageDto>> GetPackagesAsync(CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<RechargePackageDto>> GetPackagesAsync(string? platform, CancellationToken cancellationToken)
     {
         var userId = GetCurrentUserId();
+        var normalizedPlatform = string.IsNullOrWhiteSpace(platform) ? "web" : platform.Trim().ToLowerInvariant();
+        if (normalizedPlatform is not ("ios" or "android" or "web"))
+        {
+            throw new AppException(ErrorCodes.BadRequest, MachineErrorCodes.ValidationError, "Unsupported recharge platform.");
+        }
         var packages = await db.Queryable<PointRechargePackageEntity>()
             .Where(x => !x.IsDeleted && x.Status == 1)
             .OrderBy(x => x.Sort)
@@ -30,6 +35,14 @@ public sealed class PointRechargeService(ISqlSugarClient db, ICurrentUser curren
             .Where(x => x.PackageId.HasValue)
             .Select(x => x.PackageId!.Value)
             .ToHashSet();
+        var appleProducts = normalizedPlatform == "ios"
+            ? await db.Queryable<AppleIapProductEntity>()
+                .Where(x => x.Status == 1 && !x.IsDeleted)
+                .ToListAsync(cancellationToken)
+            : [];
+        var appleProductLookup = appleProducts
+            .GroupBy(x => x.PackageId)
+            .ToDictionary(x => x.Key, x => x.OrderBy(item => item.Id).First());
 
         return packages.Select(package =>
         {
@@ -38,24 +51,31 @@ public sealed class PointRechargeService(ISqlSugarClient db, ICurrentUser curren
                 ? package.RepeatPoints.Value
                 : package.Points;
             var purchaseUrl = ExpandPurchaseUrl(package.PurchaseUrl, string.Empty, package.PackageCode, userId);
+            appleProductLookup.TryGetValue(package.Id, out var appleProduct);
 
             return new RechargePackageDto
             {
                 Code = package.PackageCode,
                 Name = package.Name,
                 Description = package.Description,
-                Points = points,
+                Points = normalizedPlatform == "ios" ? appleProduct?.Points ?? points : points,
                 PriceAmount = package.PriceAmount,
+                PriceMinorUnits = Money.ToMinorUnits(package.PriceAmount),
                 Currency = package.Currency,
                 ValidityDays = package.ValidityDays,
                 BonusPercent = package.BonusPercent,
                 BadgeCode = package.BadgeCode,
                 IsFeatured = package.IsFeatured,
                 IsFirstPurchaseEligible = isFirstPurchaseEligible,
-                PurchaseEnabled = purchaseUrl is not null,
+                PurchaseEnabled = normalizedPlatform == "ios" ? appleProduct is not null : purchaseUrl is not null,
+                PurchaseMethod = normalizedPlatform == "ios" ? "apple_iap" : "external",
+                AppleProductId = appleProduct?.AppleProductId,
+                AppleProductType = appleProduct?.ProductType,
+                Sort = package.Sort,
+                Enabled = normalizedPlatform != "ios" || appleProduct is not null,
                 Benefits = ParseBenefits(package.BenefitsJson)
             };
-        }).ToArray();
+        }).Where(x => normalizedPlatform != "ios" || x.AppleProductId is not null).ToArray();
     }
 
     public async Task<RechargeOrderDto> CreateOrderAsync(
@@ -205,7 +225,7 @@ public sealed class PointRechargeService(ISqlSugarClient db, ICurrentUser curren
             {
                 AddedPoints = awardedPoints,
                 AvailablePoints = balanceAfter,
-                RedeemedAt = now
+                RedeemedAt = ApiDateTime.FromLocalStorage(now)
             };
         }
         catch
@@ -219,6 +239,7 @@ public sealed class PointRechargeService(ISqlSugarClient db, ICurrentUser curren
         IssuePointRedeemCodesRequest request,
         CancellationToken cancellationToken)
     {
+        var currentUserId = GetCurrentUserId();
         if (!currentUser.IsSuperAdmin)
         {
             throw new AppException(ErrorCodes.Forbidden, "Only super administrators can issue redeem codes");
@@ -227,18 +248,49 @@ public sealed class PointRechargeService(ISqlSugarClient db, ICurrentUser curren
         {
             throw new AppException(ErrorCodes.BadRequest, "Count must be between 1 and 100");
         }
-        if (request.ExpiresAt.HasValue && request.ExpiresAt.Value <= DateTime.Now)
+        DateTime? expiresAt = request.ExpiresAt.HasValue
+            ? ApiDateTime.ToLocalStorage(request.ExpiresAt.Value)
+            : null;
+        if (expiresAt.HasValue && expiresAt.Value <= DateTime.Now)
         {
             throw new AppException(ErrorCodes.BadRequest, "Expiration time must be in the future");
         }
 
-        var package = await GetEnabledPackageAsync(NormalizePackageCode(request.PackageCode), cancellationToken);
+        var hasPackageCode = !string.IsNullOrWhiteSpace(request.PackageCode);
+        var hasCustomPoints = request.Points.HasValue;
+        if (hasPackageCode == hasCustomPoints)
+        {
+            throw new AppException(ErrorCodes.BadRequest, "Provide either packageCode or points");
+        }
+        if (request.Points is <= 0 or > 1_000_000)
+        {
+            throw new AppException(ErrorCodes.BadRequest, "Points must be between 1 and 1000000");
+        }
+        if (hasCustomPoints && !string.IsNullOrWhiteSpace(request.OrderNo))
+        {
+            throw new AppException(ErrorCodes.BadRequest, "Custom point codes cannot fulfill recharge orders");
+        }
+
+        var package = hasPackageCode
+            ? await GetEnabledPackageAsync(NormalizePackageCode(request.PackageCode!), cancellationToken)
+            : null;
         PointRechargeOrderEntity? order = null;
         var now = DateTime.Now;
 
         await db.Ado.BeginTranAsync();
         try
         {
+            var issuingUser = await db.Queryable<SysUserEntity>()
+                .TranLock(DbLockType.Wait)
+                .FirstAsync(x => x.Id == currentUserId, cancellationToken);
+            if (issuingUser is null
+                || issuingUser.IsDeleted
+                || issuingUser.Status != 1
+                || !issuingUser.IsSuperAdmin)
+            {
+                throw new AppException(ErrorCodes.Forbidden, "Only active super administrators can issue redeem codes");
+            }
+
             if (!string.IsNullOrWhiteSpace(request.OrderNo))
             {
                 if (request.Count != 1)
@@ -250,13 +302,13 @@ public sealed class PointRechargeService(ISqlSugarClient db, ICurrentUser curren
                 order = await db.Queryable<PointRechargeOrderEntity>()
                     .TranLock(DbLockType.Wait)
                     .FirstAsync(x => x.OrderNo == orderNo, cancellationToken);
-                if (order is null || order.PackageId != package.Id || order.Status != 0 || order.ExpiresAt <= now)
+                if (order is null || order.PackageId != package!.Id || order.Status != 0 || order.ExpiresAt <= now)
                 {
                     throw new AppException(ErrorCodes.BadRequest, "Recharge order is invalid or already fulfilled");
                 }
             }
 
-            var points = order?.Points ?? package.Points;
+            var points = order?.Points ?? package?.Points ?? request.Points!.Value;
             var codes = Enumerable.Range(0, request.Count)
                 .Select(_ => PointRedeemCodeSecurity.Generate())
                 .ToArray();
@@ -264,12 +316,12 @@ public sealed class PointRechargeService(ISqlSugarClient db, ICurrentUser curren
             {
                 CodeHash = PointRedeemCodeSecurity.Hash(code),
                 CodeMask = PointRedeemCodeSecurity.Mask(code),
-                PackageId = package.Id,
+                PackageId = package?.Id,
                 OrderId = order?.Id,
                 Points = points,
                 Status = 0,
-                ExpiresAt = request.ExpiresAt,
-                CreatedBy = GetCurrentUserId(),
+                ExpiresAt = expiresAt,
+                CreatedBy = issuingUser.Id,
                 CreatedAt = now
             }).ToArray();
 
@@ -294,7 +346,7 @@ public sealed class PointRechargeService(ISqlSugarClient db, ICurrentUser curren
             await db.Ado.CommitTranAsync();
             return new IssuedPointRedeemCodesResponse
             {
-                PackageCode = package.PackageCode,
+                PackageCode = package?.PackageCode,
                 Points = points,
                 Codes = codes
             };
@@ -336,11 +388,12 @@ public sealed class PointRechargeService(ISqlSugarClient db, ICurrentUser curren
         PackageCode = order.PackageCode,
         Points = order.Points,
         PriceAmount = order.PriceAmount,
+        PriceMinorUnits = Money.ToMinorUnits(order.PriceAmount),
         Currency = order.Currency,
         Status = order.Status,
         PurchaseUrl = order.PurchaseUrl,
-        ExpiresAt = order.ExpiresAt,
-        CreatedAt = order.CreatedAt
+        ExpiresAt = ApiDateTime.FromLocalStorage(order.ExpiresAt),
+        CreatedAt = ApiDateTime.FromLocalStorage(order.CreatedAt)
     };
 
     private static string NormalizePackageCode(string value)

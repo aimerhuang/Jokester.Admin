@@ -7,6 +7,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using StackExchange.Redis;
 using System.Net;
+using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -93,6 +94,55 @@ public sealed class RedisRefreshTokenIntegrationTests
         }
     }
 
+    [Fact]
+    [Trait("Category", "Integration")]
+    public async Task RateLimiter_LimitsRedeemCodeIssuanceByUser_WhenConfigured()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("JOKESTER_TEST_REDIS");
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            return;
+        }
+
+        var options = ConfigurationOptions.Parse(connectionString);
+        options.AbortOnConnectFail = true;
+        await using var connection = await ConnectionMultiplexer.ConnectAsync(options);
+        var userId = RandomNumberGenerator.GetInt32(100_000, 1_000_000).ToString();
+        var remoteIp = IPAddress.Parse("198.51.100.20");
+        var nextCalls = 0;
+        var middleware = new SecurityRateLimitMiddleware(
+            _ =>
+            {
+                nextCalls++;
+                return Task.CompletedTask;
+            },
+            NullLogger<SecurityRateLimitMiddleware>.Instance);
+
+        try
+        {
+            for (var attempt = 0; attempt < 6; attempt++)
+            {
+                var context = CreateRedeemCodeIssueContext(userId, remoteIp);
+                await middleware.InvokeAsync(context, connection);
+                if (attempt < 5)
+                {
+                    Assert.NotEqual(StatusCodes.Status429TooManyRequests, context.Response.StatusCode);
+                }
+                else
+                {
+                    Assert.Equal(StatusCodes.Status429TooManyRequests, context.Response.StatusCode);
+                    Assert.True(context.Response.Headers.ContainsKey("Retry-After"));
+                }
+            }
+
+            Assert.Equal(5, nextCalls);
+        }
+        finally
+        {
+            await DeleteRedeemCodeIssueRateLimitKeysAsync(connection.GetDatabase(), userId, remoteIp);
+        }
+    }
+
     private static DefaultHttpContext CreateEmailCodeContext(string email, IPAddress remoteIp)
     {
         var json = Encoding.UTF8.GetBytes($"{{\"email\":\"{email}\"}}");
@@ -104,6 +154,19 @@ public sealed class RedisRefreshTokenIntegrationTests
         context.Request.Body = new MemoryStream(json);
         context.Response.Body = new MemoryStream();
         context.Connection.RemoteIpAddress = remoteIp;
+        return context;
+    }
+
+    private static DefaultHttpContext CreateRedeemCodeIssueContext(string userId, IPAddress remoteIp)
+    {
+        var context = new DefaultHttpContext();
+        context.Request.Method = HttpMethods.Post;
+        context.Request.Path = "/api/points/recharge/admin/codes";
+        context.Response.Body = new MemoryStream();
+        context.Connection.RemoteIpAddress = remoteIp;
+        context.User = new ClaimsPrincipal(new ClaimsIdentity(
+            [new Claim(ClaimTypes.NameIdentifier, userId)],
+            authenticationType: "test"));
         return context;
     }
 
@@ -121,6 +184,22 @@ public sealed class RedisRefreshTokenIntegrationTests
         keys.Add(BuildRateKey("email-code-email-1h", now / 3600, email));
         keys.Add(BuildRateKey("email-code-email-1d", now / 86400, email));
         await database.KeyDeleteAsync(keys.ToArray());
+    }
+
+    private static Task DeleteRedeemCodeIssueRateLimitKeysAsync(
+        IDatabase database,
+        string userId,
+        IPAddress remoteIp)
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        RedisKey[] keys =
+        [
+            BuildRateKey("point-code-issue-user-1h", now / 3600, userId),
+            BuildRateKey("point-code-issue-user-1d", now / 86400, userId),
+            BuildRateKey("point-code-issue-ip-1h", now / 3600, remoteIp.ToString()),
+            BuildRateKey("point-code-issue-ip-1d", now / 86400, remoteIp.ToString())
+        ];
+        return database.KeyDeleteAsync(keys);
     }
 
     private static RedisKey BuildRateKey(string name, long bucket, string identity)

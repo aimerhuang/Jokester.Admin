@@ -15,6 +15,11 @@ public static class ServiceCollectionExtensions
     {
         services.AddScoped<IAuthService, AuthService>();
         services.AddScoped<IRegistrationService, RegistrationService>();
+        services.AddScoped<ILegalDocumentService, LegalDocumentService>();
+        services.AddScoped<IUserConsentService, UserConsentService>();
+        services.AddScoped<IAccountDeletionService, AccountDeletionService>();
+        services.AddScoped<IMediaAssetService, MediaAssetService>();
+        services.AddHostedService<AccountDeletionWorker>();
         services.AddHttpClient<IEmailValidationService, EmailValidationService>();
         services.AddScoped<IUserService, UserService>();
         services.AddScoped<IRoleService, RoleService>();
@@ -88,6 +93,8 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IAiPromptSensitiveWordService, AiPromptSensitiveWordService>();
         services.AddScoped<IPointService, PointService>();
         services.AddScoped<IPointRechargeService, PointRechargeService>();
+        services.AddScoped<IAppleIapService, AppleIapService>();
+        services.AddHostedService<AppleNotificationWorker>();
         services.AddScoped<IPromptLibraryService, PromptLibraryService>();
         services.AddScoped<IPromptLibrarySyncAdminService, PromptLibrarySyncAdminService>();
         services.AddScoped<IPromptLibrarySyncRunner, PromptLibrarySyncRunner>();

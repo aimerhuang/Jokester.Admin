@@ -10,17 +10,88 @@
 
 ```json
 {
-  "code": 200,
+  "code": 0,
   "message": "success",
+  "requestId": "0HN...",
   "data": {}
 }
 ```
+
+失败响应不复用数值业务码，统一返回机器可读字符串：
+
+```json
+{
+  "code": "VALIDATION_ERROR",
+  "message": "The request is invalid.",
+  "requestId": "0HN...",
+  "details": null
+}
+```
+
+- 所有移动端时间字段使用 ISO 8601 UTC，序列化结果带 `Z`。
+- 分页 `data` 统一包含 `pageIndex`、`pageSize`、`items`、`total`、`hasMore`。
+- 限流返回 HTTP 429、`Retry-After` 响应头、`RATE_LIMITED` 和 `details.retryAfterSeconds`。
+- Swagger 为移动端操作声明强类型成功响应以及 `400/401/403/409/412/422/429/500/503` 错误模型。
 
 受保护接口需要请求头：
 
 ```http
 Authorization: Bearer <accessToken>
 ```
+
+## 认证与注册
+
+注册邮箱验证码流程：
+
+```http
+GET /api/blog/comments/captcha
+
+POST /api/auth/register/email-code
+Content-Type: application/json
+
+{
+  "email": "<email>",
+  "captchaId": "<captchaId>",
+  "captchaAnswer": "<图片中的 6 位字符>"
+}
+```
+
+- 图片验证码由 `GET /api/blog/comments/captcha` 返回，包含 `captchaId`、`imageBase64`、`mimeType` 和 `expiresInSeconds`；5 分钟过期并在校验时一次性消费。
+- 邮件验证码为 6 位数字，按规范化邮箱写入 Redis，10 分钟过期。发送成功响应为 `data.retryAfterSeconds=60`；触发邮箱或 IP 限流时返回 HTTP 429、`Retry-After` 和 `details.retryAfterSeconds`，客户端以受限响应为准。
+- 注册前按真实客户端调用 `GET /api/legal/documents/current?platform=<ios|android|web>&locale=zh-CN` 获取当前法律版本。隐私政策或服务条款缺失时服务端返回 503，客户端应暂停注册而不能自行填充版本。AI 处理告知可以独立停用；此时 `aiProcessingNotice` 为 `null`，客户端不显示 AI 授权提示，也不能因此阻断注册。
+- 收到邮件后调用 `POST /api/auth/register`，除账号字段外，还要传同一个 `email`、`emailCode`，以及已接受的隐私政策/服务条款布尔值与版本号；版本不是当前生效版本时后端拒绝注册。
+- 注册 `userName` 必须为 6-20 位 ASCII 字母和数字组合，且至少各含一个；空格、下划线及其他特殊字符不允许。
+- 登录连续失败 3 次后，再次调用 `POST /api/auth/login` 需要附带新的 `captchaId` 与 `captchaAnswer`；缺少或错误时返回 `CAPTCHA_REQUIRED`。累计失败 5 次后，账号与 IP 组合锁定 15 分钟并返回 `LOGIN_LOCKED`。
+
+登录和刷新成功都返回 `sessionId`、`accessToken`、`refreshToken`、`accessTokenExpiresAt` 和 `refreshTokenExpiresAt`。Refresh Token 只按 SHA-256 哈希存储并单次轮换；同一个旧 Token 在 10 秒并发宽限内重试会拿到同一轮换结果，超窗重放会撤销该 session family。客户端按以下 401 错误码处理：
+
+- `ACCESS_TOKEN_EXPIRED`：尝试刷新。
+- `REFRESH_TOKEN_EXPIRED`：清理本地会话并重新登录。
+- `SESSION_REVOKED`：清理本地会话并重新登录。
+
+### 法律文档、AI 授权和账户删除
+
+```http
+GET /api/legal/documents/current?platform=ios&locale=zh-CN
+GET /api/users/me/consents
+PUT /api/users/me/consents/ai-processing
+POST /api/auth/account-deletion/requests
+GET /api/auth/account-deletion/requests/current
+DELETE /api/auth/account-deletion/requests/{requestId}
+```
+
+- 法律文档与移动端配置接口公开，其余接口需要 Bearer Token。Web 使用同一路由并传 `platform=web`。
+- AI 授权请求传 `accepted`、当前 `documentVersion`、所选模型实际使用的 `providerCodes` 和真实 `clientPlatform`，不能固定传 `ios`。授权写入后，后续生图按该用户最新 AI 授权记录的平台解析对应平台或 `all` 告知。AI 处理告知未启用时，客户端不显示对应授权提示，所有第三方 AI 生图在 Provider 调用、Redis 准入和积分预留前返回 HTTP 503、`SERVICE_UNAVAILABLE`；告知已启用但缺少当前 Provider 授权时返回 HTTP 412、`AI_CONSENT_REQUIRED`，并在 `details` 返回文档版本和 URL。
+- 删除申请传 `currentPassword`、`confirmation="DELETE"`、UUID `clientRequestId` 和可选 `reason`。创建后立即撤销 Refresh Token 会话；重复同 key/同 payload 返回原申请，同 key/不同 payload 返回 409。
+- 删除任务按计划在后台执行并可重试；私有 AI 文件和用户数据删除，必须保留的 Apple/积分财务记录匿名化，完成邮件发送失败也进入重试。
+
+公开移动端配置：
+
+```http
+GET /api/mobile/config?platform=ios&appVersion=1.3.0&locale=zh-CN
+```
+
+响应包含最低/最新版本、维护模式、运行时可用功能开关和当前法律文档版本。该接口只下发数据，不下发或改变原生可执行代码。
 
 ## 公开站点列表
 
@@ -127,6 +198,7 @@ GET /api/blog/comments/public
 
 ```http
 GET /api/points/balance
+GET /api/points/details?pageIndex=1&pageSize=20
 POST /api/points/sign-in
 Authorization: Bearer <accessToken>
 ```
@@ -150,7 +222,7 @@ Authorization: Bearer <accessToken>
 ```json
 {
   "points": 25,
-  "expireAt": "2026-06-11T23:59:59.9999999",
+  "expireAt": "2026-06-11T15:59:59.9999999Z",
   "availablePoints": 75
 }
 ```
@@ -159,16 +231,23 @@ Authorization: Bearer <accessToken>
 
 ```http
 GET /api/points/recharge/packages
+GET /api/points/recharge/packages?platform=ios
 POST /api/points/recharge/orders
 POST /api/points/recharge/redeem
+POST /api/points/recharge/apple/transactions
 POST /api/points/recharge/admin/codes
 Authorization: Bearer <accessToken>
 ```
 
 - 套餐接口按当前用户返回首充资格和实际可得积分。
+- `platform=ios` 只返回已映射的 StoreKit 商品，`purchaseMethod=apple_iap`，包含 `appleProductId`/`appleProductType`，不返回外部购买 URL。响应 `data` 仍是数组，以兼容现有 Web/Android 客户端。
 - 下单接口只创建待支付订单；`purchaseUrl` 来自套餐表配置，未配置时返回 `null`。
+- iOS 不调用外部订单接口。购买后向 Apple 交易接口提交 `transactionId`、`productId`、`appAccountToken`，并在 `Idempotency-Key` 请求头传 UUID；服务端从 App Store Server API 获取并验证交易，履约成功后客户端才调用 StoreKit `finish()`。
 - 兑换成功后原子增加余额并写入 `source=recharge` 积分流水；兑换码区分大小写且只能使用一次。
-- 管理员签发接口仅限超级管理员，明文兑换码只在签发响应中返回一次。
+- 兑换按用户和 IP 共享限流。成功、无效码、冲突及 `429 RATE_LIMITED` 都写入最小化操作审计结果（HTTP 状态、成功标记和稳定错误码），不会记录明文兑换码。
+- 管理员签发接口仅限超级管理员，可在 `packageCode` 套餐模式和 `points` 自定义积分模式中二选一；明文兑换码只在签发响应中返回一次。
+- 签发时服务端会在事务内重新锁定并核验当前用户仍是启用的超级管理员；Redis 同时按用户和 IP 限流。
+- Apple 退款/撤销由公开的 App Store Server Notifications V2 入口验签接收。余额不足以扣回时记录 `apple_iap_debt`，未结清债务会阻止继续生图。
 
 请求、响应、订单状态和 `purchase_url` 配置详见
 [point-recharge.md](./point-recharge.md)。
@@ -191,10 +270,17 @@ DELETE /api/ai/images/{id}
 POST /api/ai/images/nanoBananaImage/generate
 POST /api/ai/images/nanoBananaImage
 POST /api/ai/images/upload
+GET /api/assets/{assetId}/content
+GET /api/assets/{assetId}/thumbnail
+DELETE /api/assets/{assetId}
 Authorization: Bearer <accessToken>
 ```
 
 以上接口需要登录；生成和创建任务需要 `AiImage.Generate` 权限，列表查询需要 `AiImage.Page` 权限，详情查询需要 `AiImage.Record.View` 权限，删除需要 `AiImage.Record.Delete`。
+
+上传返回的 `assetId` 由服务端绑定当前用户。内容、缩略图、引用和删除都会校验所有权；跨用户操作与不存在统一返回 404。Asset 删除会立即软删除数据库记录并清理原图和缩略图，重复删除对原所有者幂等。`DELETE /api/ai/images/{id}` 只软删除任务记录，不级联删除上传 Asset 或生成文件；账户删除流程会清理该用户全部私有媒体。
+
+移动端统一使用 `POST /api/ai/images` 创建任务，并始终传 `modelCode`。后端从 `ai_image_model_config.provider` 判断 OpenAI Images 或 Gemini Images 协议；模型编码无需包含 `nano` 等命名约定。`/nanoBananaImage` 仅在兼容期保留并已在 Swagger 标记 Deprecated。`GET /api/ai/images/models` 返回 `providerCode`、参考图/画质能力、最大参考图数量、支持的图片数量及参数选项。
 
 生成图片会按 `ai_image_point_price` 的 `model_code + resolution_code + quality_code` 查询积分价格：
 
@@ -231,9 +317,8 @@ GPT Image2 直接生成请求体：
   "resolutionCode": "1k",
   "qualityCode": "med",
   "aspectRatioCode": "1:1",
-  "referenceImageUrls": [
-    "/api/media/ai/42/202608/reference-1.png",
-    "/api/media/ai/42/202608/reference-2.png"
+  "referenceAssetIds": [
+    "AST20260812153000A1B2C3D4E5F6A7B8C"
   ]
 }
 ```
@@ -251,13 +336,15 @@ GPT Image2 创建后台任务请求体：
   "resolutionCode": "1k",
   "qualityCode": "med",
   "aspectRatioCode": "1:1",
-  "referenceImageUrls": [
-    "/api/media/ai/42/202608/reference-1.png"
+  "referenceAssetIds": [
+    "AST20260812153000A1B2C3D4E5F6A7B8C"
   ]
 }
 ```
 
-`referenceImageUrls` 是可选 JSON 数组，最多 6 张；前端应先调用 `POST /api/ai/images/upload` 上传参考图，拿到当前用户的 `/api/media/ai/...` 私有 URL 后再点击生图按钮。入队前后端会验证文件存在及所有权；传参考图时调用上游 `/images/edits` 并以 multipart `image[]` 文件字段提交，不传时调用 `/images/generations`。
+新版客户端使用 `referenceAssetIds`（最多 6 个）和可选 `maskAssetId`。先调用 `POST /api/ai/images/upload`，响应会返回不可枚举的 `assetId`、同源 `url`/`thumbnailUrl`、真实 MIME、宽高、字节数、`metadataStripped=true` 和 UTC 创建时间。服务端检查 magic bytes、解码尺寸/像素/帧数并重新编码以剥离元数据：HEIC/HEIF 主图规范化为 PNG，JPEG、PNG、WebP 保持各自格式；512px 缩略图统一为 WebP。
+
+兼容期仍接受当前用户私有 `/api/media/ai/...` 的 `referenceImageUrls` / `maskImageUrl`，但不接受任意远程 URL。Asset 不存在和跨用户 Asset 对普通调用方都表现为 404，避免泄露资源是否存在。
 
 直接生成响应 `data` 返回 `taskId`、`taskIds`、`modelName`、`prompt`、`resolutionCode`、`qualityCode`、`aspectRatioCode`、`width`、`height`、`size`、`quality`、`mimeType`、`url`、`urls`。`imageCount` 默认 `1`，可传 `1-10` 生成多张；`taskId` 是首个任务 id，`taskIds` 是全部单图任务 id，`url` 是首张图片地址，`urls` 是本次生成的全部图片地址数组。URL 是鉴权下载地址，Web 前端应携带 Bearer Token 请求 Blob 后展示，不能把它当作匿名静态 `<img src>`。
 
@@ -284,7 +371,7 @@ GPT 主备上游都来自 `ai_image_model_config`。后端按 `model_code + reso
 
 `imageUrl` 必须来自该任务的 `resultUrls`；取消收藏时传 `isFavorite=false`。收藏状态按当前登录用户隔离。
 
-后台任务成功后，`GET /api/ai/images` 和 `GET /api/ai/images/{id}` 的任务数据返回 `resultUrls`、`favoriteUrls`、`isFavorite`、`completedImageCount`、`pointCost` 与 `billingStatus`。任务 `status` 为 `0` 待处理、`3` 处理中、`1` 成功、`2` 失败；`billingStatus` 为 `0` 已预留、`1` 已确认、`2` 部分退款、`3` 全额退款。失败任务也会出现在列表中。普通用户只返回/删除自己的任务，活动任务不能删除；超级管理员可查看全部任务。
+后台任务成功后，`GET /api/ai/images` 和 `GET /api/ai/images/{id}` 的任务数据返回 `resultUrls`、`favoriteUrls`、`isFavorite`、`completedImageCount`、`pointCost` 与 `billingStatus`。`status` 是 `queued/processing/succeeded/failed/cancelled`，兼容字段 `statusCode` 仍为 `0/3/1/2`；同时返回 `progress`、`pollAfterSeconds`、`expiresAt` 和 UTC 时间。失败任务也会出现在列表中。普通用户只返回/删除自己的任务，活动任务不能删除；超级管理员可查看全部任务。
 
 Nano Banana2 直接生成或创建后台任务：
 

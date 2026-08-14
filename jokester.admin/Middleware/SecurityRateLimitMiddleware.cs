@@ -68,7 +68,10 @@ public sealed class SecurityRateLimitMiddleware(RequestDelegate next, ILogger<Se
                 ex.GetType().Name);
             context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
             await context.Response.WriteAsJsonAsync(
-                ApiResponse.Failure(ErrorCodes.ServerError, "Rate limit service unavailable."),
+                ApiErrorResponse.Failure(
+                    MachineErrorCodes.ServiceUnavailable,
+                    "Rate limit service unavailable.",
+                    context.TraceIdentifier),
                 context.RequestAborted);
             return;
         }
@@ -87,7 +90,8 @@ public sealed class SecurityRateLimitMiddleware(RequestDelegate next, ILogger<Se
             return
             [
                 new("login-ip-10m", RateLimitPartition.Ip, 10, 600),
-                new("login-account-10m", RateLimitPartition.BodyField, 10, 600, "userName")
+                new("login-account-10m", RateLimitPartition.BodyField, 10, 600, "userName"),
+                new("login-device-10m", RateLimitPartition.BodyField, 10, 600, "deviceSessionId")
             ];
         }
         if (HttpMethods.IsPost(method) && path.Equals("/api/auth/refresh"))
@@ -121,6 +125,16 @@ public sealed class SecurityRateLimitMiddleware(RequestDelegate next, ILogger<Se
                 new("point-redeem-user-1m", RateLimitPartition.User, 5, 60),
                 new("point-redeem-user-1d", RateLimitPartition.User, 20, 86400),
                 new("point-redeem-ip-1m", RateLimitPartition.Ip, 10, 60)
+            ];
+        }
+        if (HttpMethods.IsPost(method) && path.Equals("/api/points/recharge/admin/codes"))
+        {
+            return
+            [
+                new("point-code-issue-user-1h", RateLimitPartition.User, 5, 3600),
+                new("point-code-issue-user-1d", RateLimitPartition.User, 20, 86400),
+                new("point-code-issue-ip-1h", RateLimitPartition.Ip, 10, 3600),
+                new("point-code-issue-ip-1d", RateLimitPartition.Ip, 40, 86400)
             ];
         }
         if (HttpMethods.IsPost(method) && path.Equals("/api/points/recharge/orders"))
@@ -205,7 +219,9 @@ public sealed class SecurityRateLimitMiddleware(RequestDelegate next, ILogger<Se
 
             foreach (var property in document.RootElement.EnumerateObject())
             {
-                if (property.NameEquals("userName") || property.NameEquals("email"))
+                if (property.Name.Equals("userName", StringComparison.OrdinalIgnoreCase)
+                    || property.Name.Equals("email", StringComparison.OrdinalIgnoreCase)
+                    || property.Name.Equals("deviceSessionId", StringComparison.OrdinalIgnoreCase))
                 {
                     result[property.Name] = property.Value.ValueKind == JsonValueKind.String
                         ? property.Value.GetString()
@@ -239,7 +255,11 @@ public sealed class SecurityRateLimitMiddleware(RequestDelegate next, ILogger<Se
         context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
         context.Response.Headers.RetryAfter = retryAfter.ToString();
         await context.Response.WriteAsJsonAsync(
-            ApiResponse.Failure(StatusCodes.Status429TooManyRequests, "Too many requests."),
+            ApiErrorResponse.Failure(
+                MachineErrorCodes.RateLimited,
+                "Too many requests.",
+                context.TraceIdentifier,
+                new { retryAfterSeconds = retryAfter }),
             context.RequestAborted);
     }
 

@@ -3,6 +3,7 @@ using jokester.admin.Application.DTOs.AiImages;
 using jokester.admin.Application.DTOs.NanoBananaImages;
 using jokester.admin.Application.Models.PromptLibrary;
 using jokester.admin.Application.Security;
+using jokester.admin.Application.Services;
 using jokester.admin.Common;
 using jokester.admin.Common.Exceptions;
 using jokester.admin.Controllers;
@@ -149,18 +150,32 @@ public sealed class PromptLibraryContractTests
             .Setup(x => x.CreateAsync(nanoCreate, It.IsAny<CancellationToken>()))
             .ReturnsAsync(102L);
 
+        var modelConfigService = new Mock<IAiImageModelConfigService>(MockBehavior.Strict);
+        modelConfigService
+            .Setup(x => x.ResolveAsync(It.IsAny<string?>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new ResolvedAiImageModelConfig
+            {
+                ModelCode = AiImageModelConfigService.DefaultGptModelCode,
+                Provider = AiImageModelConfigService.OpenAiImageProtocol,
+                ProviderProtocol = AiImageModelConfigService.OpenAiImageProtocol,
+                ConsentProviderCode = "openai"
+            });
+
         var controller = new AiImagesController(
             aiImageService.Object,
             nanoBananaService.Object,
-            Mock.Of<IAiImageModelConfigService>());
+            modelConfigService.Object);
 
         await controller.Generate(gptGenerate, default);
         await controller.Create(gptCreate, default);
         await controller.GenerateNanoBananaImage(nanoGenerate, default);
+#pragma warning disable CS0618 // The compatibility endpoint remains covered while it is intentionally deprecated.
         await controller.CreateNanoBananaImage(nanoCreate, default);
+#pragma warning restore CS0618
 
         aiImageService.VerifyAll();
         nanoBananaService.VerifyAll();
+        modelConfigService.VerifyAll();
         Assert.All(
             new[] { gptGenerate.Prompt, gptCreate.Prompt, nanoGenerate.Prompt, nanoCreate.Prompt },
             value => Assert.Equal(length, value.Length));

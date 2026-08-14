@@ -1,0 +1,395 @@
+using jokester.admin.Application.Abstractions;
+using jokester.admin.Application.DTOs.Points;
+using jokester.admin.Application.Security;
+using jokester.admin.Application.Services;
+using jokester.admin.Common;
+using jokester.admin.Common.Exceptions;
+using jokester.admin.Domain.Entities;
+using Moq;
+using SqlSugar;
+
+namespace jokester.admin.Tests;
+
+public sealed class PointRechargeServiceTests
+{
+    [Fact]
+    public async Task GetPackagesAsync_ForIos_ReturnsOnlyMappedStoreKitProducts()
+    {
+        using var context = new TestContext(isSuperAdmin: false);
+        var mappedPackage = new PointRechargePackageEntity
+        {
+            PackageCode = "ios-basic",
+            Name = "iOS Basic",
+            Points = 100,
+            PriceAmount = 6,
+            Currency = "CNY",
+            PurchaseUrl = "https://example.com/pay",
+            Sort = 10,
+            Status = 1,
+            CreatedAt = DateTime.Now
+        };
+        mappedPackage.Id = context.Db.Insertable(mappedPackage).ExecuteReturnBigIdentity();
+        context.Db.Insertable(new PointRechargePackageEntity
+        {
+            PackageCode = "web-only",
+            Name = "Web only",
+            Points = 200,
+            PriceAmount = 12,
+            Currency = "CNY",
+            Sort = 20,
+            Status = 1,
+            CreatedAt = DateTime.Now
+        }).ExecuteCommand();
+        context.Db.Insertable(new AppleIapProductEntity
+        {
+            PackageId = mappedPackage.Id,
+            PackageCode = mappedPackage.PackageCode,
+            AppleProductId = "cc.jokester.ai.credits.120",
+            ProductType = "consumable",
+            Points = 120,
+            Environment = "Production",
+            Status = 1,
+            CreatedAt = DateTime.Now
+        }).ExecuteCommand();
+
+        var result = await context.Service.GetPackagesAsync("ios", default);
+
+        var package = Assert.Single(result);
+        Assert.Equal("ios-basic", package.Code);
+        Assert.Equal(120, package.Points);
+        Assert.Equal("apple_iap", package.PurchaseMethod);
+        Assert.Equal("cc.jokester.ai.credits.120", package.AppleProductId);
+        Assert.Equal("consumable", package.AppleProductType);
+        Assert.True(package.PurchaseEnabled);
+        Assert.True(package.Enabled);
+    }
+
+    [Fact]
+    public async Task IssueCodesAsync_WithCustomPoints_PersistsHashesAndReturnsPlaintextOnce()
+    {
+        using var context = new TestContext(isSuperAdmin: true);
+
+        var result = await context.Service.IssueCodesAsync(new IssuePointRedeemCodesRequest
+        {
+            Points = 750,
+            Count = 3,
+            ExpiresAt = DateTime.Now.AddDays(30)
+        }, default);
+
+        Assert.Null(result.PackageCode);
+        Assert.Equal(750, result.Points);
+        Assert.Equal(3, result.Codes.Count);
+        Assert.Equal(3, result.Codes.Distinct(StringComparer.Ordinal).Count());
+
+        var persisted = await context.Db.Queryable<PointRedeemCodeEntity>().ToListAsync();
+        Assert.Equal(3, persisted.Count);
+        Assert.All(persisted, entity =>
+        {
+            Assert.Null(entity.PackageId);
+            Assert.Null(entity.OrderId);
+            Assert.Equal(750, entity.Points);
+            Assert.Equal(1, entity.CreatedBy);
+            Assert.DoesNotContain(result.Codes, code => entity.CodeHash.Contains(code, StringComparison.Ordinal));
+            Assert.DoesNotContain(result.Codes, code => entity.CodeMask.Contains(code, StringComparison.Ordinal));
+        });
+        Assert.Equal(
+            result.Codes.Select(PointRedeemCodeSecurity.Hash).OrderBy(value => value),
+            persisted.Select(entity => entity.CodeHash).OrderBy(value => value));
+    }
+
+    [Fact]
+    public async Task CustomPointCode_CanBeRedeemedExactlyOnce()
+    {
+        using var context = new TestContext(isSuperAdmin: true);
+        context.Db.Updateable<SysUserEntity>()
+            .SetColumns(x => x.PointBalance == 25)
+            .Where(x => x.Id == 1)
+            .ExecuteCommand();
+        var issued = await context.Service.IssueCodesAsync(
+            new IssuePointRedeemCodesRequest { Points = 475, Count = 1 }, default);
+
+        var redeemed = await context.Service.RedeemAsync(
+            new RedeemPointCodeRequest { Code = Assert.Single(issued.Codes) }, default);
+
+        Assert.Equal(475, redeemed.AddedPoints);
+        Assert.Equal(DateTimeKind.Utc, redeemed.RedeemedAt.Kind);
+        Assert.Equal(500, redeemed.AvailablePoints);
+        Assert.Equal(500, context.Db.Queryable<SysUserEntity>().Single().PointBalance);
+        var detail = context.Db.Queryable<UserPointDetailEntity>().Single();
+        Assert.Equal(475, detail.ChangePoints);
+        Assert.Equal(500, detail.BalanceAfter);
+        Assert.Equal("recharge", detail.Source);
+
+        var exception = await Assert.ThrowsAsync<AppException>(() => context.Service.RedeemAsync(
+            new RedeemPointCodeRequest { Code = issued.Codes[0] }, default));
+        Assert.Equal(ErrorCodes.BadRequest, exception.Code);
+        Assert.Equal(500, context.Db.Queryable<SysUserEntity>().Single().PointBalance);
+        Assert.Single(context.Db.Queryable<UserPointDetailEntity>().ToList());
+    }
+
+    [Fact]
+    public async Task CreateOrderAsync_ReturnsUtcTimestamps()
+    {
+        using var context = new TestContext(isSuperAdmin: false);
+        context.Db.Insertable(new PointRechargePackageEntity
+        {
+            PackageCode = "web-basic",
+            Name = "Web Basic",
+            Points = 100,
+            PriceAmount = 6,
+            Currency = "CNY",
+            PurchaseUrl = "https://example.test/pay/{orderNo}",
+            Status = 1,
+            CreatedAt = DateTime.Now
+        }).ExecuteCommand();
+
+        var result = await context.Service.CreateOrderAsync(
+            new CreateRechargeOrderRequest { PackageCode = "web-basic" },
+            default);
+
+        Assert.Equal(DateTimeKind.Utc, result.CreatedAt.Kind);
+        Assert.Equal(DateTimeKind.Utc, result.ExpiresAt.Kind);
+    }
+
+    [Fact]
+    public async Task IssueCodesAsync_WithPackage_RemainsCompatible()
+    {
+        using var context = new TestContext(isSuperAdmin: true);
+        var package = new PointRechargePackageEntity
+        {
+            PackageCode = "basic",
+            Name = "Basic",
+            Points = 1_000,
+            PriceAmount = 20,
+            Currency = "CNY",
+            Status = 1,
+            CreatedAt = DateTime.Now
+        };
+        package.Id = context.Db.Insertable(package).ExecuteReturnBigIdentity();
+
+        var result = await context.Service.IssueCodesAsync(new IssuePointRedeemCodesRequest
+        {
+            PackageCode = " BASIC ",
+            Count = 2
+        }, default);
+
+        Assert.Equal("basic", result.PackageCode);
+        Assert.Equal(1_000, result.Points);
+        Assert.Equal(2, result.Codes.Count);
+        Assert.All(context.Db.Queryable<PointRedeemCodeEntity>().ToList(), code => Assert.Equal(package.Id, code.PackageId));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(1_000_001)]
+    public async Task IssueCodesAsync_RejectsInvalidCustomPoints(int points)
+    {
+        using var context = new TestContext(isSuperAdmin: true);
+
+        var exception = await Assert.ThrowsAsync<AppException>(() => context.Service.IssueCodesAsync(
+            new IssuePointRedeemCodesRequest { Points = points, Count = 1 }, default));
+
+        Assert.Equal(ErrorCodes.BadRequest, exception.Code);
+        Assert.Empty(await context.Db.Queryable<PointRedeemCodeEntity>().ToListAsync());
+    }
+
+    [Fact]
+    public async Task IssueCodesAsync_RejectsPackageAndPointsTogether()
+    {
+        using var context = new TestContext(isSuperAdmin: true);
+
+        var exception = await Assert.ThrowsAsync<AppException>(() => context.Service.IssueCodesAsync(
+            new IssuePointRedeemCodesRequest { PackageCode = "basic", Points = 100, Count = 1 }, default));
+
+        Assert.Equal(ErrorCodes.BadRequest, exception.Code);
+    }
+
+    [Fact]
+    public async Task IssueCodesAsync_RejectsNonSuperAdministrator()
+    {
+        using var context = new TestContext(isSuperAdmin: false);
+
+        var exception = await Assert.ThrowsAsync<AppException>(() => context.Service.IssueCodesAsync(
+            new IssuePointRedeemCodesRequest { Points = 100, Count = 1 }, default));
+
+        Assert.Equal(ErrorCodes.Forbidden, exception.Code);
+        Assert.Empty(await context.Db.Queryable<PointRedeemCodeEntity>().ToListAsync());
+    }
+
+    [Fact]
+    public async Task IssueCodesAsync_RejectsTokenWhoseUserWasDemotedInDatabase()
+    {
+        using var context = new TestContext(isSuperAdmin: true, databaseIsSuperAdmin: false);
+
+        var exception = await Assert.ThrowsAsync<AppException>(() => context.Service.IssueCodesAsync(
+            new IssuePointRedeemCodesRequest { Points = 100, Count = 1 }, default));
+
+        Assert.Equal(ErrorCodes.Forbidden, exception.Code);
+        Assert.Empty(await context.Db.Queryable<PointRedeemCodeEntity>().ToListAsync());
+    }
+
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(1, true)]
+    public async Task IssueCodesAsync_RejectsTokenWhoseUserIsInactiveOrDeleted(int status, bool isDeleted)
+    {
+        using var context = new TestContext(
+            isSuperAdmin: true,
+            databaseIsSuperAdmin: true,
+            databaseStatus: status,
+            databaseIsDeleted: isDeleted);
+
+        var exception = await Assert.ThrowsAsync<AppException>(() => context.Service.IssueCodesAsync(
+            new IssuePointRedeemCodesRequest { Points = 100, Count = 1 }, default));
+
+        Assert.Equal(ErrorCodes.Forbidden, exception.Code);
+        Assert.Empty(await context.Db.Queryable<PointRedeemCodeEntity>().ToListAsync());
+    }
+
+    private sealed class TestContext : IDisposable
+    {
+        public TestContext(
+            bool isSuperAdmin,
+            bool? databaseIsSuperAdmin = null,
+            int databaseStatus = 1,
+            bool databaseIsDeleted = false)
+        {
+            SQLitePCL.Batteries_V2.Init();
+            Db = new SqlSugarClient(new ConnectionConfig
+            {
+                ConnectionString = "Data Source=:memory:",
+                DbType = SqlSugar.DbType.Sqlite,
+                IsAutoCloseConnection = false,
+                InitKeyType = InitKeyType.Attribute
+            });
+            Db.Ado.ExecuteCommand("""
+                CREATE TABLE point_recharge_package (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    package_code TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    description TEXT NULL,
+                    points INTEGER NOT NULL,
+                    repeat_points INTEGER NULL,
+                    price_amount NUMERIC NOT NULL,
+                    currency TEXT NOT NULL,
+                    validity_days INTEGER NULL,
+                    bonus_percent INTEGER NOT NULL DEFAULT 0,
+                    badge_code TEXT NULL,
+                    benefits_json TEXT NULL,
+                    purchase_url TEXT NULL,
+                    is_featured INTEGER NOT NULL DEFAULT 0,
+                    sort INTEGER NOT NULL DEFAULT 0,
+                    status INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NULL,
+                    is_deleted INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE point_redeem_code (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    code_hash TEXT NOT NULL,
+                    code_mask TEXT NOT NULL,
+                    package_id INTEGER NULL,
+                    order_id INTEGER NULL,
+                    points INTEGER NOT NULL,
+                    status INTEGER NOT NULL,
+                    redeemed_by_user_id INTEGER NULL,
+                    expires_at TEXT NULL,
+                    redeemed_at TEXT NULL,
+                    created_by INTEGER NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NULL
+                );
+
+                CREATE TABLE apple_iap_product (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    package_id INTEGER NOT NULL,
+                    package_code TEXT NOT NULL,
+                    apple_product_id TEXT NOT NULL,
+                    product_type TEXT NOT NULL,
+                    points INTEGER NOT NULL,
+                    environment TEXT NOT NULL,
+                    status INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NULL,
+                    is_deleted INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE point_recharge_order (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    order_no TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    package_id INTEGER NOT NULL,
+                    package_code TEXT NOT NULL,
+                    points INTEGER NOT NULL,
+                    price_amount NUMERIC NOT NULL,
+                    currency TEXT NOT NULL,
+                    purchase_url TEXT NULL,
+                    status INTEGER NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    paid_at TEXT NULL,
+                    fulfilled_at TEXT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NULL
+                );
+
+                CREATE TABLE sys_user (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_name TEXT NOT NULL,
+                    nick_name TEXT NULL,
+                    password_hash TEXT NOT NULL,
+                    salt TEXT NULL,
+                    email TEXT NULL,
+                    phone TEXT NULL,
+                    avatar_url TEXT NULL,
+                    signature TEXT NULL,
+                    point_balance INTEGER NOT NULL DEFAULT 0,
+                    status INTEGER NOT NULL DEFAULT 1,
+                    is_super_admin INTEGER NOT NULL DEFAULT 0,
+                    last_login_time TEXT NULL,
+                    last_login_ip TEXT NULL,
+                    remark TEXT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NULL,
+                    is_deleted INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE sys_user_point_detail (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    change_points INTEGER NOT NULL,
+                    balance_after INTEGER NOT NULL,
+                    change_type TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    business_key TEXT NULL,
+                    remark TEXT NULL,
+                    created_at TEXT NOT NULL
+                );
+                """);
+
+            Db.Insertable(new SysUserEntity
+            {
+                Id = 1,
+                UserName = "code-issuer",
+                PasswordHash = "unused",
+                PointBalance = 0,
+                Status = databaseStatus,
+                IsSuperAdmin = databaseIsSuperAdmin ?? isSuperAdmin,
+                CreatedAt = DateTime.Now,
+                IsDeleted = databaseIsDeleted
+            }).ExecuteCommand();
+
+            var currentUser = new Mock<ICurrentUser>();
+            currentUser.SetupGet(value => value.UserId).Returns(1);
+            currentUser.SetupGet(value => value.IsSuperAdmin).Returns(isSuperAdmin);
+            Service = new PointRechargeService(Db, currentUser.Object);
+        }
+
+        public SqlSugarClient Db { get; }
+
+        public PointRechargeService Service { get; }
+
+        public void Dispose() => Db.Dispose();
+    }
+}

@@ -1,11 +1,13 @@
 using System.Net;
+using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
 
 namespace jokester.admin.Tests;
 
-public sealed class SecurityPipelineTests : IClassFixture<SecurityWebApplicationFactory>
+[Collection(SecurityWebApplicationCollection.Name)]
+public sealed class SecurityPipelineTests
 {
     private readonly HttpClient _client;
     private readonly SecurityWebApplicationFactory _factory;
@@ -27,6 +29,9 @@ public sealed class SecurityPipelineTests : IClassFixture<SecurityWebApplication
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
         Assert.Equal("nosniff", response.Headers.GetValues("X-Content-Type-Options").Single());
         Assert.Contains("no-store", response.Headers.CacheControl?.ToString());
+        using var body = JsonDocument.Parse(await response.Content.ReadAsStreamAsync());
+        Assert.Equal("UNAUTHORIZED", body.RootElement.GetProperty("code").GetString());
+        Assert.False(string.IsNullOrWhiteSpace(body.RootElement.GetProperty("requestId").GetString()));
     }
 
     [Fact]
@@ -72,6 +77,12 @@ public sealed class SecurityPipelineTests : IClassFixture<SecurityWebApplication
 
         Assert.False(response.Headers.Contains("Access-Control-Allow-Origin"));
     }
+}
+
+[CollectionDefinition(Name)]
+public sealed class SecurityWebApplicationCollection : ICollectionFixture<SecurityWebApplicationFactory>
+{
+    public const string Name = "Security web application";
 }
 
 public sealed class SecurityWebApplicationFactory : WebApplicationFactory<Program>

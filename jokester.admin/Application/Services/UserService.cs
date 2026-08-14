@@ -84,22 +84,22 @@ public sealed class UserService(
         }
 
         RefAsync<int> total = 0;
-        var items = await db.Queryable<UserPointDetailEntity>()
+        var entities = await db.Queryable<UserPointDetailEntity>()
             .Where(x => x.UserId == id)
             .OrderBy(x => x.CreatedAt, OrderByType.Desc)
             .OrderBy(x => x.Id, OrderByType.Desc)
-            .Select(x => new UserPointDetailDto
-            {
-                Id = x.Id,
-                UserId = x.UserId,
-                ChangePoints = x.ChangePoints,
-                BalanceAfter = x.BalanceAfter,
-                ChangeType = x.ChangeType,
-                Source = x.Source,
-                Remark = x.Remark,
-                CreatedAt = x.CreatedAt
-            })
             .ToPageListAsync(query.PageIndex, query.PageSize, total);
+        var items = entities.Select(x => new UserPointDetailDto
+        {
+            Id = x.Id,
+            UserId = x.UserId,
+            ChangePoints = x.ChangePoints,
+            BalanceAfter = x.BalanceAfter,
+            ChangeType = x.ChangeType,
+            Source = x.Source,
+            Remark = x.Remark,
+            CreatedAt = ApiDateTime.FromLocalStorage(x.CreatedAt)
+        }).ToArray();
 
         return new PagedResult<UserPointDetailDto>
         {

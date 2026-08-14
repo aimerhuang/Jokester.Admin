@@ -63,6 +63,31 @@ public sealed class AiImageModelConfigServiceTests
         Assert.Null(routes[1].ResolutionCode);
     }
 
+    [Fact]
+    public async Task GetEnabledModelsAsync_ReturnsOnlyPricedRoutedResolutions()
+    {
+        using var context = new TestContext();
+        context.Seed(
+            CreateConfig(1, AiImageModelConfigService.PrimaryRouteRole, "gpt-image-2-1k", "https://primary.example/v1", resolutionCode: "1k"),
+            CreateConfig(2, AiImageModelConfigService.FallbackRouteRole, "gpt-image-2-4k", "https://fallback.example/v1", resolutionCode: "4k"));
+        context.SeedParameters(
+            CreateParameter(1, "resolution", "1k"),
+            CreateParameter(2, "resolution", "2k"),
+            CreateParameter(3, "resolution", "4k"),
+            CreateParameter(4, "quality", "med"),
+            CreateParameter(5, "aspect_ratio", "1:1"));
+        context.SeedPrices(
+            CreatePrice(1, "1k"),
+            CreatePrice(2, "2k"),
+            CreatePrice(3, "4k"));
+
+        var model = Assert.Single(await context.Service.GetEnabledModelsAsync(default));
+
+        Assert.Equal(["1k", "4k"], model.Resolutions);
+        Assert.Equal(["med"], model.Qualities);
+        Assert.Equal(["1:1"], model.AspectRatios);
+    }
+
     private static AiImageModelConfigEntity CreateConfig(
         long id,
         string routeRole,
@@ -76,7 +101,7 @@ public sealed class AiImageModelConfigServiceTests
             Id = id,
             ModelCode = "gpt-image-2",
             ModelName = "GPT Image 2",
-            Provider = $"{routeRole}-provider",
+            Provider = AiImageModelConfigService.OpenAiImageProtocol,
             ProviderModel = providerModel,
             ResolutionCode = resolutionCode,
             RouteRole = routeRole,
@@ -89,6 +114,31 @@ public sealed class AiImageModelConfigServiceTests
             CreatedAt = DateTime.UtcNow
         };
     }
+
+    private static AiImageParameterEntity CreateParameter(long id, string type, string code) => new()
+    {
+        Id = id,
+        ParamType = type,
+        ParamCode = code,
+        ParamName = code,
+        Sort = (int)id,
+        Status = 1,
+        CreatedAt = DateTime.UtcNow
+    };
+
+    private static AiImagePointPriceEntity CreatePrice(long id, string resolutionCode) => new()
+    {
+        Id = id,
+        ModelCode = "gpt-image-2",
+        ResolutionCode = resolutionCode,
+        QualityCode = "med",
+        Points = 10,
+        PriceAmount = 0.1m,
+        Currency = "CNY",
+        Sort = (int)id,
+        Status = 1,
+        CreatedAt = DateTime.UtcNow
+    };
 
     private sealed class TestContext : IDisposable
     {
@@ -121,6 +171,34 @@ public sealed class AiImageModelConfigServiceTests
                     updated_at TEXT NULL,
                     is_deleted INTEGER NOT NULL DEFAULT 0
                 );
+                CREATE TABLE ai_image_parameter (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    param_type TEXT NOT NULL,
+                    param_code TEXT NOT NULL,
+                    param_name TEXT NOT NULL,
+                    provider_value TEXT NULL,
+                    value_int_1 INTEGER NULL,
+                    value_int_2 INTEGER NULL,
+                    sort INTEGER NOT NULL,
+                    status INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NULL,
+                    is_deleted INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE ai_image_point_price (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    model_code TEXT NOT NULL,
+                    resolution_code TEXT NOT NULL,
+                    quality_code TEXT NOT NULL,
+                    points INTEGER NOT NULL,
+                    price_amount NUMERIC NOT NULL,
+                    currency TEXT NOT NULL,
+                    sort INTEGER NOT NULL,
+                    status INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NULL,
+                    is_deleted INTEGER NOT NULL DEFAULT 0
+                );
                 """);
             Service = new AiImageModelConfigService(Db);
         }
@@ -133,6 +211,12 @@ public sealed class AiImageModelConfigServiceTests
         {
             Db.Insertable(configs).ExecuteCommand();
         }
+
+        public void SeedParameters(params AiImageParameterEntity[] parameters) =>
+            Db.Insertable(parameters).ExecuteCommand();
+
+        public void SeedPrices(params AiImagePointPriceEntity[] prices) =>
+            Db.Insertable(prices).ExecuteCommand();
 
         public void Dispose()
         {

@@ -67,8 +67,10 @@ POST /api/dev/bootstrap/super-admin
 ## Registration Email Contract
 
 - 注册邮箱验证码分两步：
-  - `POST /api/auth/register/email-code`：请求体只传 `email`
-  - `POST /api/auth/register`：请求体传 `userName`、`nickName`、`password`、`email`、`emailCode`
+  - 先调用 `GET /api/blog/comments/captcha` 获取图片验证码
+  - `POST /api/auth/register/email-code`：请求体传 `email`、`captchaId`、`captchaAnswer`
+  - `POST /api/auth/register`：除 `userName`、`nickName`、`password`、`email`、`emailCode` 外，还必须提交已接受的当前隐私政策与服务条款版本
+- 图片验证码为 6 位大写字母/数字，写入 Redis 后 5 分钟过期并在校验时一次性消费；评论提交、注册邮件发送和登录失败后的二次验证共用该接口
 - `emailCode` 由后端生成后通过 SMTP 发到用户邮箱，并按规范化后的 `email` 写入 Redis，10 分钟过期
 - 注册时前端必须传同一个 `email` 和用户输入的 `emailCode`；验证通过后后端删除验证码键
 - `EmailValidation.EnableApiValidation=false` 时只做本地基础验证：邮箱格式、长度和 `BlacklistDomains`
@@ -109,12 +111,26 @@ POST /api/dev/bootstrap/super-admin
 ## Point Recharge Contract
 
 - `GET /api/points/recharge/packages`、`POST /api/points/recharge/orders`、`POST /api/points/recharge/redeem` 均要求登录。
-- `POST /api/points/recharge/admin/codes` 只允许超级管理员签发兑换码；明文码只在签发响应中返回一次，服务端仅保存 SHA-256 哈希和掩码。
+- `POST /api/points/recharge/admin/codes` 只允许超级管理员签发兑换码；支持 `packageCode` 套餐模式或 `points` 自定义积分模式（二选一），自定义积分范围为 1–1,000,000，`count` 范围为 1–100。明文码只在签发响应中返回一次，服务端仅保存 SHA-256 哈希和掩码。
+- 签发兑换码时必须在事务内重新查询并锁定当前用户，验证其仍为启用、未删除的超级管理员；接口通过 Redis 按用户和 IP 双重限流。
 - 购买接口只创建 24 小时有效的待支付订单，不直接增加积分；不能由前端伪造支付完成。
 - 套餐购买地址由 `point_recharge_package.purchase_url` 配置，支持 `{orderNo}`、`{packageCode}`、`{userId}` 占位符；只接受绝对 HTTP(S) URL。
 - 兑换码区分大小写且只能使用一次；核销、余额增加和 `source=recharge` 积分流水必须保持同一事务。
 - 首充体验包首次兑换 200 积分，同一用户后续兑换该套餐为 100 积分。
 - 现有数据库使用 `docs/migrations/20260809-add-point-recharge.sql` 升级；完整接口说明见 `docs/point-recharge.md`。
+
+## Mobile And iOS API Contract
+
+- 移动端响应中的时间统一为带 `Z`/UTC offset 的 ISO 8601；历史积分、充值表仍按现有本地时间写库，只在 API DTO 边界转换为 UTC，新 Apple/法律/授权/账号删除/Asset 表直接存 UTC。
+- Apple IAP Product ID 只能来自 `apple_iap_product` 的服务端映射，客户端不得提交积分或价格；Apple Bundle ID、Issuer ID、Key ID 和私钥必须由部署配置/Secret Manager 注入，仓库中不得保存真实值，多行 PEM 不通过 `.env` 文件注入。
+- iOS 套餐查询不返回外部购买链接；交易履约、积分入账和流水必须同事务，App Store Server Notification 必须验签并按 notification UUID 幂等处理。
+- `GET /api/legal/documents/current` 必须解析当前隐私政策和服务条款，任一缺失都返回 503；AI processing 告知可暂不启用，此时响应 `aiProcessingNotice=null`。注册只校验当前隐私政策与服务条款版本。
+- 所有第三方 AI 生成入口必须校验 AI processing 告知和 consent：未配置已审批告知时 fail-closed 返回 `503 SERVICE_UNAVAILABLE`；已有告知但用户缺少当前 Provider 授权时返回 `412 AI_CONSENT_REQUIRED`。不得因为 TestFlight 或小范围使用绕过。
+- 部署专属法律版本和 URL 不进迁移或仓库配置；拿到审批值后用 `--configure-legal-documents` 幂等维护命令配置。暂不启用 AI 告知时显式设置 `AiProcessing.Enabled=false`；启用时 `providerCodes` 必须覆盖当前启用模型路由映射出的 `openai` / `google`。
+- 移动端新调用统一走 `POST /api/ai/images`，按服务端模型能力路由；旧 GPT/Nano 专用入口只用于 Web/Android 兼容，不作为新客户端契约。
+- 新移动端图片输入使用当前用户拥有的 `assetIds`；上传、读取、引用和删除均校验 `media_asset.owner_user_id`，不得重新允许任意远程 URL。旧 `referenceImageUrls`/`imageUrls` 仅保留后端同源私有媒体兼容路径。
+- `DELETE /api/assets/{assetId}` 只允许 Asset 所有者调用，跨用户与不存在统一返回 404；删除任务只软删除任务记录，不级联删除 Asset 或生成文件，账户删除流程负责清理用户全部私有媒体。
+- iOS 升级涉及 `docs/migrations/20260812-ios-api-upgrade.sql`，表结构变化时必须同时同步 `jokester.admin.sql`。
 
 ## GPT Image2 Image API Contract
 
@@ -122,8 +138,8 @@ POST /api/dev/bootstrap/super-admin
 - `POST /api/ai/images/parameters/resolve` resolves `resolutionCode` + `qualityCode` + `aspectRatioCode` into `width`, `height`, `size`, and provider quality.
 - Resolution tiers use long-side pixels: `1k=1024`, `2k=2048`, `4k=3840`; provider dimensions are rounded to `16px` multiples and capped at `8,294,400` total pixels. For example `4k + med + 1:1` resolves to `2880x2880`, `4k + med + 16:9` resolves to `3840x2160`, and provider quality is `medium`.
 - `POST /api/ai/images/generate` directly generates one GPT Image2 image and returns `url`, `base64`, `dataUrl`, `resolutionCode`, `qualityCode`, `aspectRatioCode`, computed `width`/`height`, `size`, `quality`, and prompt metadata.
-- `POST /api/ai/images/generate` and `POST /api/ai/images` accept `referenceImageUrls` as a JSON array of backend-hosted image URLs, with a maximum of 6 reference images.
-- When `referenceImageUrls` is non-empty, the service calls OpenAI `/images/edits`, resolves each authenticated private-media URL to a file under `private-media/ai`, and sends multipart `image[]` file fields; without references it calls `/images/generations`.
+- `POST /api/ai/images/generate` and `POST /api/ai/images` prefer `referenceAssetIds` plus optional `maskAssetId`, with a maximum of 6 reference images. Legacy `referenceImageUrls` / `maskImageUrl` remain only for current-user same-origin private-media compatibility; arbitrary remote URLs are rejected.
+- When resolved references are non-empty, the service calls OpenAI `/images/edits` and sends multipart `image[]` file fields; without references it calls `/images/generations`. Asset ownership and file existence must be checked before admission and Provider calls.
 - `POST /api/ai/images` creates one queued task per requested image. Every row records `image_count=1` plus the shared prompt/parameter/reference snapshots, and the response returns all task ids in `ids`.
 - GPT primary and fallback routes are both stored in `ai_image_model_config` and distinguished by `route_role=primary/fallback`. Each route owns its provider model, URL, key, and paths; enabled primary failures fall back to the enabled fallback row for the same model and resolution. `OpenAI.PrimaryTimeoutSeconds` remains the primary-attempt timeout.
 - AI reference and generated images are saved outside `wwwroot` under `private-media/ai`. Clients receive `/api/media/ai/...` URLs and must send the JWT when downloading; anonymous or cross-user access returns `401/404`.
@@ -135,11 +151,11 @@ POST /api/dev/bootstrap/super-admin
 
 - `POST /api/ai/images/nanoBananaImage/generate` directly generates one Nano Banana2 image.
 - `POST /api/ai/images/nanoBananaImage` creates a queued Nano Banana2 image task.
-- The request accepts `prompt`, optional `size`, optional `quality`, and optional `imageUrls`.
+- Compatibility requests accept `prompt`, optional `size`, optional `quality`, preferred `imageAssetIds`, and legacy `imageUrls`.
 - The request also accepts `resolutionCode` + `aspectRatioCode`; when `aspectRatioCode=auto`, the backend does not read reference image dimensions or calculate a concrete ratio, and sends upstream `size=auto` instead.
 - Nano Banana2 billing is independent of aspect ratio: price lookup still uses the business resolution tier (`resolutionCode`) as the price table `resolution_code`, not the upstream `size=auto` value.
-- Empty/missing `imageUrls` means text-to-image; non-empty `imageUrls` means image-to-image.
-- `imageUrls` must be authenticated `/api/media/ai/...` URLs owned by the current user (super admin excepted), with a maximum of 6 input images.
+- Empty/missing `imageAssetIds` and `imageUrls` means text-to-image; either non-empty input means image-to-image.
+- `imageAssetIds` must belong to the current user and not be deleted. Legacy `imageUrls` must be authenticated `/api/media/ai/...` URLs accessible to the current user. The combined input limit is 6 images.
 - Nano Banana2 has no separate `NanoBanana2` configuration section and does not use the GPT primary/fallback route. It always resolves the currently enabled channel from `ai_image_model_config`; provider secrets must be maintained in that database configuration and never committed to the repository.
 
 ## AI Prompt Filter Contract
@@ -149,7 +165,7 @@ POST /api/dev/bootstrap/super-admin
 - `AiImageTaskProcessor` 在取得 Provider 租约前按当前词库复检；命中后失败结算并退款，不能计入 Provider 熔断失败。
 - GPT `negativePrompt` 虽当前不发送给 Provider，但参与幂等和持久化，因此同样过滤。
 - MySQL 是权威词库，进程内不可变快照负责匹配，Redis 只发布版本通知；无有效快照或快照过期时生图必须 fail-closed。
-- 命中返回 HTTP 400、业务码 `2001`，不得向普通调用方返回命中词或完整敏感提示词。
+- 命中返回 HTTP 422、机器码 `PROMPT_BLOCKED`，不得向普通调用方返回命中词或完整敏感提示词。
 - 敏感词过滤只采用 MySQL 关键词词库与进程内快照，不部署或调用本地/远程审核模型。
 - 关键词匹配模式包括 `contains`、`word`、`compact`；简繁体、拼音、谐音和上下文隐喻需要维护独立词条与回归样例。
 - 项目安全分类固定为 `sexual_minors`、`non_consensual_nudity`、`graphic_violence`、`self_harm`、`hate_extremism`、`weapons_drugs`、`deepfake_privacy`；普通成人色情仍可保留 `sexual_content`，不得强塞进非自愿类别。
@@ -182,8 +198,8 @@ POST /api/dev/bootstrap/super-admin
 - 博客评论接口已支持公开图片验证码、公开提交、公开已审核列表、后台分页、审核、删除
 - 博客仪表盘接口已支持文章/评论/媒体统计和最新待审核评论
 - 日志接口已支持登录日志/操作日志查询与批量删除
-- GPT Image2 生图接口已支持直接生成、后台任务、服务器私有图片落盘和鉴权下载、参数编码解析、参考图 URL JSON 入参、按价格表扣积分和失败返还
-- Nano Banana2 生图接口已支持直接生成、后台任务、文生图/图生图、按价格表扣积分和失败返还
+- AI 生图已支持按 `modelCode` 统一创建后台任务、Asset ID 参考图、兼容同源私有 URL、鉴权下载、参数解析、按价格表扣积分和失败返还
+- GPT Image2 与 Nano Banana2 旧专用入口仍保留 Web/Android 兼容；新移动端不依赖这些路由
 - 积分接口已支持余额查询和每日签到
 - 博客评论和仪表盘权限码包括：
   - `Blog.Comment.View`

@@ -1,6 +1,7 @@
 using jokester.admin.Application.Abstractions;
 using jokester.admin.Application.DTOs.AiImages;
 using jokester.admin.Application.DTOs.NanoBananaImages;
+using jokester.admin.Application.Services;
 using jokester.admin.Authorization;
 using jokester.admin.Common;
 using jokester.admin.Common.Exceptions;
@@ -21,6 +22,7 @@ public sealed class AiImagesController(
     /// </summary>
     [Permission("AiImage.Page")]
     [HttpGet]
+    [ProducesResponseType(typeof(ApiResponse<PagedResult<AiImageTaskDto>>), StatusCodes.Status200OK)]
     public async Task<IActionResult> GetPage([FromQuery] AiImageQuery query, CancellationToken cancellationToken)
     {
         var result = await aiImageService.GetPageAsync(query, cancellationToken);
@@ -32,6 +34,7 @@ public sealed class AiImagesController(
     /// </summary>
     [Permission("AiImage.Generate")]
     [HttpGet("models")]
+    [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<AiImageModelOptionDto>>), StatusCodes.Status200OK)]
     public async Task<IActionResult> GetModels(CancellationToken cancellationToken)
     {
         var result = await modelConfigService.GetEnabledModelsAsync(cancellationToken);
@@ -43,6 +46,7 @@ public sealed class AiImagesController(
     /// </summary>
     [Permission("AiImage.Generate")]
     [HttpGet("parameters")]
+    [ProducesResponseType(typeof(ApiResponse<AiImageParameterOptionsDto>), StatusCodes.Status200OK)]
     public async Task<IActionResult> GetParameters(CancellationToken cancellationToken)
     {
         var result = await aiImageService.GetParameterOptionsAsync(cancellationToken);
@@ -54,6 +58,7 @@ public sealed class AiImagesController(
     /// </summary>
     [Permission("AiImage.Generate")]
     [HttpGet("pricing-options")]
+    [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<AiImagePricingOptionDto>>), StatusCodes.Status200OK)]
     public async Task<IActionResult> GetPricingOptions(CancellationToken cancellationToken)
     {
         var result = await aiImageService.GetPricingOptionsAsync(cancellationToken);
@@ -65,6 +70,7 @@ public sealed class AiImagesController(
     /// </summary>
     [Permission("AiImage.Generate")]
     [HttpPost("parameters/resolve")]
+    [ProducesResponseType(typeof(ApiResponse<ResolveAiImageParametersResponse>), StatusCodes.Status200OK)]
     public async Task<IActionResult> ResolveParameters([FromBody] ResolveAiImageParametersRequest request, CancellationToken cancellationToken)
     {
         var result = await aiImageService.ResolveParametersAsync(request, cancellationToken);
@@ -76,6 +82,7 @@ public sealed class AiImagesController(
     /// </summary>
     [Permission("AiImage.Record.View")]
     [HttpGet("{id:long}")]
+    [ProducesResponseType(typeof(ApiResponse<AiImageTaskDto>), StatusCodes.Status200OK)]
     public async Task<IActionResult> GetById(long id, CancellationToken cancellationToken)
     {
         var result = await aiImageService.GetByIdAsync(id, cancellationToken);
@@ -90,6 +97,7 @@ public sealed class AiImagesController(
     /// </remarks>
     [Permission("AiImage.Generate")]
     [HttpPost("generate")]
+    [ProducesResponseType(typeof(ApiResponse<GenerateAiImageResponse>), StatusCodes.Status200OK)]
     public async Task<IActionResult> Generate([FromBody] GenerateAiImageRequest request, CancellationToken cancellationToken)
     {
         var result = await aiImageService.GenerateAsync(request, CancellationToken.None);
@@ -118,6 +126,7 @@ public sealed class AiImagesController(
     /// </remarks>
     [Permission("AiImage.Generate")]
     [HttpPost("nanoBananaImage")]
+    [Obsolete("Use POST /api/ai/images with modelCode instead.")]
     public async Task<IActionResult> CreateNanoBananaImage([FromBody] CreateNanoBananaImageTaskRequest request, CancellationToken cancellationToken)
     {
         var id = await nanoBananaImageService.CreateAsync(request, cancellationToken);
@@ -132,6 +141,7 @@ public sealed class AiImagesController(
     /// </remarks>
     [HttpPost("upload")]
     [Consumes("multipart/form-data")]
+    [ProducesResponseType(typeof(ApiResponse<UploadAiImageResponse>), StatusCodes.Status200OK)]
     public async Task<IActionResult> Upload([FromForm] UploadAiImageRequest request, CancellationToken cancellationToken)
     {
         if (request.File is null)
@@ -148,16 +158,48 @@ public sealed class AiImagesController(
     /// </summary>
     [Permission("AiImage.Generate")]
     [HttpPost]
+    [ProducesResponseType(typeof(ApiResponse<CreateAiImageTasksResponse>), StatusCodes.Status200OK)]
     public async Task<IActionResult> Create([FromBody] CreateAiImageTaskRequest request, CancellationToken cancellationToken)
     {
-        var ids = await aiImageService.CreateTasksAsync(request, cancellationToken);
-        return Success(new { id = ids[0], ids });
+        IReadOnlyList<long> ids;
+        var requestedModel = string.IsNullOrWhiteSpace(request.ModelCode) ? request.ModelName : request.ModelCode;
+        var modelConfig = await modelConfigService.ResolveAsync(requestedModel, request.ResolutionCode, cancellationToken);
+        if (AiImageModelConfigService.UsesGeminiImageProtocol(modelConfig))
+        {
+            var id = await nanoBananaImageService.CreateAsync(new CreateNanoBananaImageTaskRequest
+            {
+                IdempotencyKey = request.IdempotencyKey,
+                SourcePromptId = request.SourcePromptId,
+                Prompt = request.Prompt,
+                ModelCode = request.ModelCode,
+                ModelName = request.ModelName,
+                ResolutionCode = request.ResolutionCode,
+                AspectRatioCode = request.AspectRatioCode,
+                Size = request.Resolution,
+                ImageCount = request.ImageCount,
+                ImageUrls = request.ReferenceImageUrls,
+                ImageAssetIds = request.ReferenceAssetIds
+            }, cancellationToken);
+            ids = [id];
+        }
+        else
+        {
+            ids = await aiImageService.CreateTasksAsync(request, cancellationToken);
+        }
+        return Success(new CreateAiImageTasksResponse
+        {
+            Id = ids[0],
+            TaskId = ids[0],
+            Ids = ids,
+            TaskIds = ids
+        });
     }
 
     /// <summary>
     /// 收藏或取消收藏 GPT Image2 结果图片
     /// </summary>
     [HttpPost("{id:long}/favorite")]
+    [ProducesResponseType(typeof(ApiResponse), StatusCodes.Status200OK)]
     public async Task<IActionResult> SetFavorite(long id, [FromBody] FavoriteAiImageRequest request, CancellationToken cancellationToken)
     {
         await aiImageService.SetFavoriteAsync(id, request, cancellationToken);

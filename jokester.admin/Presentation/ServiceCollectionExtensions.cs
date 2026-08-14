@@ -4,6 +4,8 @@ using Microsoft.OpenApi.Any;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.OpenApi.Models;
+using jokester.admin.Common;
+using jokester.admin.Presentation;
 
 namespace jokester.admin;
 
@@ -22,11 +24,30 @@ public static class ServiceCollectionExtensions
 
         services.Configure<ApiBehaviorOptions>(options =>
         {
-            options.SuppressModelStateInvalidFilter = true;
+            options.InvalidModelStateResponseFactory = context =>
+            {
+                var errors = context.ModelState
+                    .Where(entry => entry.Value?.Errors.Count > 0)
+                    .ToDictionary(
+                        entry => string.IsNullOrWhiteSpace(entry.Key) ? "request" : entry.Key,
+                        entry => entry.Value!.Errors
+                            .Select(error => string.IsNullOrWhiteSpace(error.ErrorMessage)
+                                ? "The request value is invalid."
+                                : error.ErrorMessage)
+                            .Distinct(StringComparer.Ordinal)
+                            .ToArray(),
+                        StringComparer.Ordinal);
+                return new BadRequestObjectResult(ApiErrorResponse.Failure(
+                    MachineErrorCodes.ValidationError,
+                    "The request is invalid.",
+                    context.HttpContext.TraceIdentifier,
+                    new { errors }));
+            };
         });
 
         services.AddSwaggerGen(options =>
         {
+            options.OperationFilter<ApiResponseOperationFilter>();
             options.SwaggerDoc("v1", new OpenApiInfo
             {
                 Title = "Jokester Admin API",

@@ -1,4 +1,3 @@
-using System.Text.Json;
 using jokester.admin.Common;
 using jokester.admin.Common.Exceptions;
 
@@ -36,8 +35,10 @@ public sealed class GlobalExceptionMiddleware(RequestDelegate next, ILogger<Glob
                 context.Response.StatusCode = StatusCodes.Status408RequestTimeout;
                 context.Response.ContentType = "application/json; charset=utf-8";
 
-                var payload = JsonSerializer.Serialize(ApiResponse.Failure(ErrorCodes.ServerError, "Request timeout"));
-                await context.Response.WriteAsync(payload);
+                await context.Response.WriteAsJsonAsync(ApiErrorResponse.Failure(
+                    MachineErrorCodes.ServerError,
+                    "Request timeout",
+                    context.TraceIdentifier));
             }
         }
         catch (AppException ex)
@@ -47,8 +48,11 @@ public sealed class GlobalExceptionMiddleware(RequestDelegate next, ILogger<Glob
                 context.Response.StatusCode = MapHttpStatusCode(ex.Code);
                 context.Response.ContentType = "application/json; charset=utf-8";
 
-                var payload = JsonSerializer.Serialize(ApiResponse.Failure(ex.Code, ex.Message));
-                await context.Response.WriteAsync(payload);
+                await context.Response.WriteAsJsonAsync(ApiErrorResponse.Failure(
+                    ex.MachineCode,
+                    ex.Message,
+                    context.TraceIdentifier,
+                    ex.Details));
             }
         }
         catch (Exception ex)
@@ -63,8 +67,10 @@ public sealed class GlobalExceptionMiddleware(RequestDelegate next, ILogger<Glob
                 context.Response.StatusCode = StatusCodes.Status500InternalServerError;
                 context.Response.ContentType = "application/json; charset=utf-8";
 
-                var payload = JsonSerializer.Serialize(ApiResponse.Failure(ErrorCodes.ServerError, "Server error"));
-                await context.Response.WriteAsync(payload);
+                await context.Response.WriteAsJsonAsync(ApiErrorResponse.Failure(
+                    MachineErrorCodes.ServerError,
+                    "Server error",
+                    context.TraceIdentifier));
             }
         }
     }
@@ -76,6 +82,8 @@ public sealed class GlobalExceptionMiddleware(RequestDelegate next, ILogger<Glob
         ErrorCodes.Forbidden => StatusCodes.Status403Forbidden,
         ErrorCodes.NotFound => StatusCodes.Status404NotFound,
         ErrorCodes.Conflict => StatusCodes.Status409Conflict,
+        ErrorCodes.PreconditionFailed => StatusCodes.Status412PreconditionFailed,
+        ErrorCodes.UnprocessableEntity or ErrorCodes.AiPromptRejected => StatusCodes.Status422UnprocessableEntity,
         ErrorCodes.TooManyRequests => StatusCodes.Status429TooManyRequests,
         ErrorCodes.ServiceUnavailable => StatusCodes.Status503ServiceUnavailable,
         ErrorCodes.ServerError => StatusCodes.Status500InternalServerError,

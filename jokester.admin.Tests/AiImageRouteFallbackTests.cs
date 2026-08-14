@@ -96,6 +96,8 @@ public sealed class AiImageRouteFallbackTests
                 Options.Create(new PromptLibraryOptions()),
                 mediaPathResolver,
                 promptFilter.Object,
+                Mock.Of<IUserConsentService>(),
+                Mock.Of<IMediaAssetService>(),
                 NullLogger<AiImageService>.Instance);
 
             var result = await service.GenerateFromResolvedAsync(

@@ -18,6 +18,8 @@ public sealed class AiImageTaskProcessor(
     IAiImageAdmissionService admissionService,
     IAiImageProviderGate providerGate,
     IAiPromptFilter promptFilter,
+    IAiImageModelConfigService modelConfigService,
+    IUserConsentService userConsentService,
     ILogger<AiImageTaskProcessor> logger) : IAiImageTaskProcessor
 {
     private const int MinutesPerImage = 5;
@@ -74,7 +76,9 @@ public sealed class AiImageTaskProcessor(
                 .ExecuteCommandAsync(taskToken);
 
             var modelCode = AiImageModelConfigService.NormalizeModelCode(task.ModelName);
-            if (AiImageModelConfigService.IsNanoBananaModel(modelCode))
+            var modelConfig = await modelConfigService.ResolveAsync(modelCode, task.ResolutionCode, taskToken);
+            await userConsentService.EnsureAiProcessingConsentAsync(task.UserId, modelConfig.ConsentProviderCode, taskToken);
+            if (AiImageModelConfigService.UsesGeminiImageProtocol(modelConfig))
             {
                 var imageUrls = DeserializeReferenceImageUrls(task.ReferenceImageUrls);
                 await GenerateRemainingImagesConcurrentlyAsync(
