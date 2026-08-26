@@ -18,7 +18,8 @@ public sealed class AiImagesControllerRoutingTests
             IdempotencyKey = Guid.NewGuid().ToString(),
             Prompt = "a configured image request",
             ModelCode = modelCode,
-            ResolutionCode = "2k",
+            Resolution = "2k",
+            ResolutionCode = "1k",
             AspectRatioCode = "16:9",
             ImageCount = 1,
             ReferenceAssetIds = ["AST000000000001"]
@@ -41,6 +42,7 @@ public sealed class AiImagesControllerRoutingTests
                 It.Is<CreateNanoBananaImageTaskRequest>(mapped =>
                     mapped.ModelCode == modelCode
                     && mapped.Prompt == request.Prompt
+                    && mapped.ResolutionCode == "2k"
                     && mapped.ImageAssetIds.SequenceEqual(request.ReferenceAssetIds)),
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(321L);
@@ -48,7 +50,9 @@ public sealed class AiImagesControllerRoutingTests
         var controller = new AiImagesController(
             gptService.Object,
             geminiService.Object,
-            modelConfigService.Object);
+            modelConfigService.Object,
+            Mock.Of<IAiImageCatalogService>(),
+            Mock.Of<IAiSizeModeRolloutPolicy>());
 
         await controller.Create(request, default);
 

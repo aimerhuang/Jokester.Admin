@@ -15,7 +15,7 @@ public sealed class AiImageAdmissionService : IAiImageAdmissionService
         local existing = redis.call('GET', KEYS[1])
         if existing then
             if string.sub(existing, 1, 64) ~= ARGV[1] then return {'conflict', '0'} end
-            return {'duplicate', string.sub(existing, 66)}
+            return {'duplicate', string.sub(existing, 99)}
         end
         if redis.call('EXISTS', KEYS[6]) == 1 then return {'circuit', '0'} end
         local active = tonumber(redis.call('GET', KEYS[2]) or '0')
@@ -26,11 +26,11 @@ public sealed class AiImageAdmissionService : IAiImageAdmissionService
         if dailyImages + tonumber(ARGV[2]) > tonumber(ARGV[5]) then return {'image_quota', '0'} end
         if dailyPoints + tonumber(ARGV[3]) > tonumber(ARGV[6]) then return {'point_quota', '0'} end
         if globalActive + tonumber(ARGV[2]) > tonumber(ARGV[10]) then return {'queue', '0'} end
-        local claimed = redis.call('SET', KEYS[1], ARGV[1] .. '|0', 'NX', 'EX', ARGV[7])
+        local claimed = redis.call('SET', KEYS[1], ARGV[1] .. '|' .. ARGV[11] .. '|0', 'NX', 'EX', ARGV[7])
         if not claimed then
             existing = redis.call('GET', KEYS[1])
             if existing and string.sub(existing, 1, 64) == ARGV[1] then
-                return {'duplicate', string.sub(existing, 66)}
+                return {'duplicate', string.sub(existing, 99)}
             end
             return {'conflict', '0'}
         end
@@ -46,25 +46,28 @@ public sealed class AiImageAdmissionService : IAiImageAdmissionService
         """;
 
     private const string BindScript = """
-        local expected = ARGV[1] .. '|0'
-        if redis.call('GET', KEYS[1]) ~= expected then return 0 end
+        local expected = ARGV[1] .. '|' .. ARGV[2] .. '|0'
+        local bound = ARGV[1] .. '|' .. ARGV[2] .. '|' .. ARGV[3]
+        local current = redis.call('GET', KEYS[1])
+        if current == bound then return 2 end
+        if current ~= expected then return 0 end
         local ttl = redis.call('TTL', KEYS[1])
-        redis.call('SET', KEYS[1], ARGV[1] .. '|' .. ARGV[2])
+        redis.call('SET', KEYS[1], bound)
         if ttl > 0 then redis.call('EXPIRE', KEYS[1], ttl) end
         return 1
         """;
 
     private const string CancelScript = """
-        if redis.call('GET', KEYS[1]) ~= ARGV[1] .. '|0' then return 0 end
+        if redis.call('GET', KEYS[1]) ~= ARGV[1] .. '|' .. ARGV[2] .. '|0' then return 0 end
         redis.call('DEL', KEYS[1])
         local active = tonumber(redis.call('GET', KEYS[2]) or '0')
-        redis.call('SET', KEYS[2], math.max(0, active - tonumber(ARGV[2])), 'KEEPTTL')
+        redis.call('SET', KEYS[2], math.max(0, active - tonumber(ARGV[3])), 'KEEPTTL')
         local globalActive = tonumber(redis.call('GET', KEYS[3]) or '0')
-        redis.call('SET', KEYS[3], math.max(0, globalActive - tonumber(ARGV[2])), 'KEEPTTL')
+        redis.call('SET', KEYS[3], math.max(0, globalActive - tonumber(ARGV[3])), 'KEEPTTL')
         local images = tonumber(redis.call('GET', KEYS[4]) or '0')
-        redis.call('SET', KEYS[4], math.max(0, images - tonumber(ARGV[2])), 'KEEPTTL')
+        redis.call('SET', KEYS[4], math.max(0, images - tonumber(ARGV[3])), 'KEEPTTL')
         local points = tonumber(redis.call('GET', KEYS[5]) or '0')
-        redis.call('SET', KEYS[5], math.max(0, points - tonumber(ARGV[3])), 'KEEPTTL')
+        redis.call('SET', KEYS[5], math.max(0, points - tonumber(ARGV[4])), 'KEEPTTL')
         return 1
         """;
 
@@ -124,6 +127,7 @@ public sealed class AiImageAdmissionService : IAiImageAdmissionService
             quotaDate,
             imageCount,
             pointCost,
+            Guid.NewGuid().ToString("N"),
             false,
             0);
 
@@ -149,7 +153,8 @@ public sealed class AiImageAdmissionService : IAiImageAdmissionService
                     checked(options.IdempotencyTtlHours * 3600),
                     checked(options.ReservationTtlMinutes * 60),
                     ResolveDailyTtlSeconds(),
-                    options.MaxQueuedTasks
+                    options.MaxQueuedTasks,
+                    reservation.OwnerToken
                 ]);
             cancellationToken.ThrowIfCancellationRequested();
 
@@ -180,6 +185,41 @@ public sealed class AiImageAdmissionService : IAiImageAdmissionService
 
     public async Task BindTaskAsync(AiImageAdmissionReservation reservation, long taskId, CancellationToken cancellationToken)
     {
+        if (taskId <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(taskId));
+        }
+        await BindReservationAsync(reservation, taskId.ToString(), taskId, cancellationToken);
+    }
+
+    public async Task BindBatchAsync(
+        AiImageAdmissionReservation reservation,
+        long requestId,
+        IReadOnlyList<AiImageAdmissionTask> tasks,
+        CancellationToken cancellationToken)
+    {
+        if (requestId <= 0
+            || tasks.Count == 0
+            || tasks.Any(x => x.TaskId <= 0 || x.Ordinal < 0 || x.ImageCount <= 0 || x.PointCost < 0)
+            || tasks.Select(x => x.Ordinal).Distinct().Count() != tasks.Count
+            || tasks.Sum(x => x.ImageCount) != reservation.ImageCount
+            || tasks.Sum(x => x.PointCost) != reservation.PointCost)
+        {
+            throw new ArgumentException("AI image admission batch binding is invalid.", nameof(tasks));
+        }
+
+        var descriptor = $"batch:{requestId}:" + string.Join(',', tasks
+            .OrderBy(x => x.Ordinal)
+            .Select(x => $"{x.Ordinal}:{x.TaskId}:{x.ImageCount}:{x.PointCost}"));
+        await BindReservationAsync(reservation, descriptor, tasks[0].TaskId, cancellationToken);
+    }
+
+    private async Task BindReservationAsync(
+        AiImageAdmissionReservation reservation,
+        string binding,
+        long logTaskId,
+        CancellationToken cancellationToken)
+    {
         if (reservation.IsDuplicate)
         {
             return;
@@ -190,16 +230,16 @@ public sealed class AiImageAdmissionService : IAiImageAdmissionService
             var bound = (long)await database.ScriptEvaluateAsync(
                 BindScript,
                 [IdempotencyKey(reservation.UserId, reservation.IdempotencyKeyHash)],
-                [reservation.RequestFingerprint, taskId]);
+                [reservation.RequestFingerprint, reservation.OwnerToken, binding]);
             cancellationToken.ThrowIfCancellationRequested();
-            if (bound != 1)
+            if (bound is not 1 and not 2)
             {
                 throw new AppException(ErrorCodes.ServiceUnavailable, "AI task idempotency reservation expired before it was committed");
             }
         }
         catch (RedisException ex)
         {
-            logger.LogError("AI idempotency binding failed. TaskId={TaskId}, FailureType={FailureType}", taskId, ex.GetType().Name);
+            logger.LogError("AI idempotency binding failed. TaskId={TaskId}, FailureType={FailureType}", logTaskId, ex.GetType().Name);
             throw new AppException(ErrorCodes.ServiceUnavailable, "AI cost control service is unavailable");
         }
     }
@@ -222,7 +262,7 @@ public sealed class AiImageAdmissionService : IAiImageAdmissionService
                     DailyImagesKey(reservation.UserId, reservation.QuotaDate),
                     DailyPointsKey(reservation.UserId, reservation.QuotaDate)
                 ],
-                [reservation.RequestFingerprint, reservation.ImageCount, reservation.PointCost]);
+                [reservation.RequestFingerprint, reservation.OwnerToken, reservation.ImageCount, reservation.PointCost]);
         }
         catch (RedisException ex)
         {

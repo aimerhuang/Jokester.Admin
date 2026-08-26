@@ -13,6 +13,13 @@ public static class AiImageIdempotency
 
     public static AiImageRequestIdentity Create(string? idempotencyKey, object canonicalRequest)
     {
+        var keyHash = HashKey(idempotencyKey);
+        var canonicalJson = JsonSerializer.Serialize(canonicalRequest);
+        return new AiImageRequestIdentity(keyHash, Hash(canonicalJson));
+    }
+
+    public static string HashKey(string? idempotencyKey)
+    {
         if (string.IsNullOrWhiteSpace(idempotencyKey))
         {
             throw new AppException(ErrorCodes.BadRequest, "Idempotency key is required");
@@ -27,9 +34,7 @@ public static class AiImageIdempotency
                 $"Idempotency key must contain {MinKeyLength}-{MaxKeyLength} non-control characters");
         }
 
-        var keyHash = Hash(normalizedKey);
-        var canonicalJson = JsonSerializer.Serialize(canonicalRequest);
-        return new AiImageRequestIdentity(keyHash, Hash(canonicalJson));
+        return Hash(normalizedKey);
     }
 
     public static string DeriveTaskKeyHash(string rootKeyHash, int taskIndex)

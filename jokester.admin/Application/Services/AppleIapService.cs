@@ -23,6 +23,8 @@ public sealed class AppleIapService(
     ILogger<AppleIapService> logger) : IAppleIapService
 {
     private readonly AppleAppStoreOptions _options = options.Value;
+    private readonly PointBucketLedger _pointBuckets = new(db);
+    private readonly MembershipEntitlementLedger _membershipEntitlements = new(db);
 
     public async Task<AppleTransactionFulfillmentDto> FulfillAsync(
         FulfillAppleTransactionRequest request,
@@ -73,6 +75,14 @@ public sealed class AppleIapService(
         var product = await db.Queryable<AppleIapProductEntity>()
             .FirstAsync(x => x.AppleProductId == productId && x.Status == 1 && !x.IsDeleted, cancellationToken)
             ?? throw new AppException(ErrorCodes.BadRequest, MachineErrorCodes.ValidationError, "Apple product is not enabled.");
+        var pointPackage = await db.Queryable<PointRechargePackageEntity>()
+            .FirstAsync(x => x.Id == product.PackageId && x.Status == 1 && !x.IsDeleted, cancellationToken)
+            ?? throw new AppException(ErrorCodes.ServerError, "Apple product package configuration is missing.");
+        if (!string.Equals(product.PackageCode, pointPackage.PackageCode, StringComparison.Ordinal))
+        {
+            throw new AppException(ErrorCodes.ServerError, "Apple product package configuration is inconsistent.");
+        }
+        PointRechargePackageCatalog.EnsureApplePoints(pointPackage, product.Points);
         var lookup = await appStoreClient.GetTransactionAsync(transactionId, product.Environment, cancellationToken);
         using var verified = jwsVerifier.Verify(lookup.SignedTransactionInfo);
         var snapshot = ParseTransaction(verified.Payload.RootElement, verified.Sha256);
@@ -126,13 +136,42 @@ public sealed class AppleIapService(
                 return await MapFulfillmentAsync(duplicate, cancellationToken);
             }
 
+            var pointNow = DateTime.Now;
+            await _pointBuckets.ExpireAsync(user, pointNow, cancellationToken);
             var balanceAfter = checked(user.PointBalance + product.Points);
             await db.Insertable(entity).ExecuteCommandAsync(cancellationToken);
             var updated = await db.Updateable<SysUserEntity>()
-                .SetColumns(x => new SysUserEntity { PointBalance = balanceAfter, UpdatedAt = DateTime.Now })
+                .SetColumns(x => new SysUserEntity { PointBalance = balanceAfter, UpdatedAt = pointNow })
                 .Where(x => x.Id == userId && x.PointBalance == user.PointBalance && !x.IsDeleted)
                 .ExecuteCommandAsync(cancellationToken);
             if (updated != 1) throw new AppException(ErrorCodes.Conflict, MachineErrorCodes.Conflict, "Point balance changed; retry the transaction.");
+
+            DateTime? pointExpiresAt = null;
+            if (pointPackage.ValidityDays is > 0)
+            {
+                pointExpiresAt = pointNow.AddDays(pointPackage.ValidityDays.Value);
+            }
+            await _pointBuckets.GrantAsync(
+                userId,
+                product.Points,
+                "apple_iap",
+                $"apple:{transactionId}:fulfill",
+                pointExpiresAt,
+                pointExpiresAt.HasValue
+                    ? PointBucketLedger.PackageSpendPriority
+                    : PointBucketLedger.PermanentPackageSpendPriority,
+                pointNow,
+                cancellationToken);
+            if (pointPackage.PackageCode == PointRechargePackageCatalog.MonthlyCode)
+            {
+                await _membershipEntitlements.GrantMonthlyVipAsync(
+                    userId,
+                    "apple_iap",
+                    $"apple:{transactionId}:fulfill",
+                    pointNow,
+                    pointExpiresAt!.Value,
+                    cancellationToken);
+            }
             await db.Insertable(new UserPointDetailEntity
             {
                 UserId = userId,
@@ -142,7 +181,7 @@ public sealed class AppleIapService(
                 Source = "apple_iap",
                 BusinessKey = $"apple:{transactionId}:fulfill",
                 Remark = $"Apple IAP transaction {transactionId}",
-                CreatedAt = DateTime.Now
+                CreatedAt = pointNow
             }).ExecuteCommandAsync(cancellationToken);
             await db.Ado.CommitTranAsync();
             return new AppleTransactionFulfillmentDto
@@ -153,6 +192,9 @@ public sealed class AppleIapService(
                 ProductId = entity.ProductId,
                 AddedPoints = entity.Points,
                 AvailablePoints = balanceAfter,
+                ExpiresAt = pointExpiresAt.HasValue
+                    ? ApiDateTime.FromLocalStorage(pointExpiresAt.Value)
+                    : null,
                 FulfilledAt = now
             };
         }
@@ -330,7 +372,8 @@ public sealed class AppleIapService(
     public async Task ProcessPendingNotificationsAsync(CancellationToken cancellationToken)
     {
         var pending = await db.Queryable<AppleServerNotificationEntity>()
-            .Where(x => (x.Status == "received" || x.Status == "failed") && x.RetryCount < 20)
+            .Where(x => x.Status == "received" || x.Status == "failed")
+            .OrderBy(x => x.RetryCount)
             .OrderBy(x => x.ReceivedAt)
             .Take(20)
             .ToListAsync(cancellationToken);
@@ -439,11 +482,38 @@ public sealed class AppleIapService(
         {
             throw new InvalidOperationException("The refund transaction does not match the fulfilled Apple transaction.");
         }
-        var deducted = Math.Min(user.PointBalance, transaction.Points);
+        var pointNow = DateTime.Now;
+        await _pointBuckets.ExpireAsync(user, pointNow, cancellationToken);
+        await _pointBuckets.ExpireLegacyPreviousSignInPointsAsync(user, pointNow.Date, cancellationToken);
+        var grantBusinessKey = $"apple:{transaction.TransactionId}:fulfill";
+        var refundBusinessKey = $"apple:{transaction.TransactionId}:refund";
+        var revocablePoints = await _pointBuckets.GetRevocableGrantPointsAsync(
+            user.Id,
+            grantBusinessKey,
+            transaction.Points,
+            cancellationToken);
+        var deferredPoints = await _pointBuckets.DeferPendingGrantClawbacksAsync(
+            user.Id,
+            grantBusinessKey,
+            refundBusinessKey,
+            revocablePoints,
+            pointNow,
+            cancellationToken);
+        var immediateClawbackPoints = revocablePoints - deferredPoints;
+        var requestedDeduction = Math.Min(user.PointBalance, immediateClawbackPoints);
+        var deducted = requestedDeduction > 0
+            ? await _pointBuckets.AllocateClawbackAsync(
+                user,
+                grantBusinessKey,
+                refundBusinessKey,
+                requestedDeduction,
+                pointNow,
+                cancellationToken)
+            : 0;
         var balanceAfter = user.PointBalance - deducted;
-        var debt = transaction.Points - deducted;
+        var debt = immediateClawbackPoints - deducted;
         var userUpdated = await db.Updateable<SysUserEntity>()
-            .SetColumns(x => new SysUserEntity { PointBalance = balanceAfter, UpdatedAt = DateTime.Now })
+            .SetColumns(x => new SysUserEntity { PointBalance = balanceAfter, UpdatedAt = pointNow })
             .Where(x => x.Id == user.Id && x.PointBalance == user.PointBalance)
             .ExecuteCommandAsync(cancellationToken);
         if (userUpdated != 1)
@@ -455,9 +525,9 @@ public sealed class AppleIapService(
             BalanceAfter = balanceAfter,
             ChangeType = "refund",
             Source = "apple_refund",
-            BusinessKey = $"apple:{transaction.TransactionId}:refund",
-            Remark = debt > 0 ? $"Apple refund; {debt} points recorded as debt" : "Apple refund",
-            CreatedAt = DateTime.Now
+            BusinessKey = refundBusinessKey,
+            Remark = BuildAppleRefundRemark(debt, deferredPoints),
+            CreatedAt = pointNow
         }).ExecuteCommandAsync(cancellationToken);
         if (debt > 0)
         {
@@ -482,6 +552,11 @@ public sealed class AppleIapService(
             .ExecuteCommandAsync(cancellationToken);
         if (transactionUpdated != 1)
             throw new InvalidOperationException("The Apple transaction state changed during refund processing.");
+        await _membershipEntitlements.RevokeAsync(
+            user.Id,
+            grantBusinessKey,
+            pointNow,
+            cancellationToken);
     }
 
     private async Task MarkNotificationFailedAsync(
@@ -563,6 +638,10 @@ public sealed class AppleIapService(
             .Where(x => x.Id == entity.UserId)
             .Select(x => x.PointBalance)
             .FirstAsync(cancellationToken);
+        var bucket = await db.Queryable<PointBucketEntity>()
+            .FirstAsync(x => x.UserId == entity.UserId
+                && x.BusinessKey == $"apple:{entity.TransactionId}:fulfill",
+                cancellationToken);
         return new AppleTransactionFulfillmentDto
         {
             TransactionId = entity.TransactionId,
@@ -571,11 +650,28 @@ public sealed class AppleIapService(
             ProductId = entity.ProductId,
             AddedPoints = entity.Points,
             AvailablePoints = balance,
+            ExpiresAt = bucket?.ExpiresAt is null
+                ? null
+                : ApiDateTime.FromLocalStorage(bucket.ExpiresAt.Value),
             FulfilledAt = ApiDateTime.FromUtcStorage(entity.FulfilledAt ?? entity.CreatedAt)
         };
     }
 
     private static bool IsRefundNotification(string type) => type is "REFUND" or "REVOKE";
+
+    private static string BuildAppleRefundRemark(int debtPoints, int deferredPoints)
+    {
+        var parts = new List<string> { "Apple refund" };
+        if (debtPoints > 0)
+        {
+            parts.Add($"{debtPoints} points recorded as debt");
+        }
+        if (deferredPoints > 0)
+        {
+            parts.Add($"{deferredPoints} points deferred until image task settlement");
+        }
+        return string.Join("; ", parts);
+    }
 
     private void ValidateNotificationTransactionContext(
         AppleServerNotificationEntity notification,

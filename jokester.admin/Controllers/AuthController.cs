@@ -17,7 +17,7 @@ public sealed class AuthController(
     /// 发送注册邮箱验证码。
     /// </summary>
     /// <remarks>
-    /// 先调用 GET /api/blog/comments/captcha 获取图片验证码，再传 email、captchaId 和 captchaAnswer。
+    /// 请求体仅传 email；发送频率由服务端按邮箱和 IP 限制。
     /// </remarks>
     [AllowAnonymous]
     [EnableRateLimiting("AuthAbuseProtection")]
@@ -33,7 +33,7 @@ public sealed class AuthController(
     }
 
     /// <summary>
-    /// 邮箱验证码注册。
+    /// 使用邮箱、邮箱验证码和密码注册；账号与昵称由服务端根据邮箱自动生成。
     /// </summary>
     [AllowAnonymous]
     [EnableRateLimiting("AuthAbuseProtection")]

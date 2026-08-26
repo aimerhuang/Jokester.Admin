@@ -29,6 +29,12 @@ DROP TABLE IF EXISTS `user_consent`;
 DROP TABLE IF EXISTS `legal_document`;
 DROP TABLE IF EXISTS `media_asset`;
 DROP TABLE IF EXISTS `ai_image_favorite`;
+DROP TABLE IF EXISTS `ai_image_provider_attempt`;
+DROP TABLE IF EXISTS `ai_image_task_outbox`;
+DROP TABLE IF EXISTS `ai_image_task_result`;
+DROP TABLE IF EXISTS `ai_image_task_input`;
+DROP TABLE IF EXISTS `ai_image_request_task`;
+DROP TABLE IF EXISTS `ai_image_request_idempotency`;
 DROP TABLE IF EXISTS `ai_image_task`;
 DROP TABLE IF EXISTS `ai_prompt_sensitive_word_revision`;
 DROP TABLE IF EXISTS `ai_prompt_sensitive_word`;
@@ -36,6 +42,10 @@ DROP TABLE IF EXISTS `prompt_library_metric_daily`;
 DROP TABLE IF EXISTS `prompt_library_item_version`;
 DROP TABLE IF EXISTS `prompt_library_item`;
 DROP TABLE IF EXISTS `prompt_library_sync_run`;
+DROP TABLE IF EXISTS `ai_image_model_release_price`;
+DROP TABLE IF EXISTS `ai_image_model_release_route`;
+DROP TABLE IF EXISTS `ai_image_model_current_release`;
+DROP TABLE IF EXISTS `ai_image_model_release`;
 DROP TABLE IF EXISTS `ai_image_model_config`;
 DROP TABLE IF EXISTS `ai_image_point_price`;
 DROP TABLE IF EXISTS `ai_image_parameter`;
@@ -48,6 +58,9 @@ DROP TABLE IF EXISTS `blog_site_config`;
 DROP TABLE IF EXISTS `point_redeem_code`;
 DROP TABLE IF EXISTS `point_recharge_order`;
 DROP TABLE IF EXISTS `point_recharge_package`;
+DROP TABLE IF EXISTS `sys_user_point_bucket_usage`;
+DROP TABLE IF EXISTS `sys_user_point_bucket`;
+DROP TABLE IF EXISTS `sys_user_membership_entitlement`;
 DROP TABLE IF EXISTS `sys_user_point_detail`;
 DROP TABLE IF EXISTS `sys_user_site`;
 DROP TABLE IF EXISTS `sys_role_menu`;
@@ -221,6 +234,70 @@ CREATE TABLE `sys_user_point_detail` (
   CONSTRAINT `fk_sys_user_point_detail_user` FOREIGN KEY (`user_id`) REFERENCES `sys_user` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户积分明细表';
 
+CREATE TABLE `sys_user_membership_entitlement` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `user_id` BIGINT NOT NULL,
+  `tier_code` VARCHAR(50) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `source` VARCHAR(30) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `business_key` VARCHAR(100) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `starts_at` DATETIME NOT NULL,
+  `expires_at` DATETIME NOT NULL,
+  `status` VARCHAR(20) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL DEFAULT 'active',
+  `revoked_at` DATETIME DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_sys_user_membership_entitlement_business` (`business_key`),
+  KEY `idx_sys_user_membership_entitlement_active` (`user_id`, `tier_code`, `status`, `revoked_at`, `expires_at`),
+  CONSTRAINT `fk_sys_user_membership_entitlement_user` FOREIGN KEY (`user_id`) REFERENCES `sys_user` (`id`),
+  CONSTRAINT `chk_sys_user_membership_entitlement_period` CHECK (`expires_at` > `starts_at`),
+  CONSTRAINT `chk_sys_user_membership_entitlement_status` CHECK ((`status` = 'active' AND `revoked_at` IS NULL) OR (`status` = 'revoked' AND `revoked_at` IS NOT NULL))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户会员权益来源账本';
+
+CREATE TABLE `sys_user_point_bucket` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `user_id` BIGINT NOT NULL,
+  `source` VARCHAR(50) NOT NULL,
+  `business_key` VARCHAR(100) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `granted_points` INT NOT NULL,
+  `remaining_points` INT NOT NULL,
+  `expired_points` INT NOT NULL DEFAULT 0,
+  `expires_at` DATETIME DEFAULT NULL,
+  `spend_priority` INT NOT NULL DEFAULT 100,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_sys_user_point_bucket_id_user` (`id`, `user_id`),
+  UNIQUE KEY `uk_sys_user_point_bucket_business` (`user_id`, `business_key`),
+  KEY `idx_sys_user_point_bucket_spend` (`user_id`, `spend_priority`, `expires_at`, `id`),
+  KEY `idx_sys_user_point_bucket_expire` (`user_id`, `expires_at`, `remaining_points`),
+  CONSTRAINT `fk_sys_user_point_bucket_user` FOREIGN KEY (`user_id`) REFERENCES `sys_user` (`id`),
+  CONSTRAINT `chk_sys_user_point_bucket_granted` CHECK (`granted_points` > 0),
+  CONSTRAINT `chk_sys_user_point_bucket_remaining` CHECK (`remaining_points` >= 0 AND `expired_points` >= 0 AND `remaining_points` + `expired_points` <= `granted_points`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='积分批次表，空到期时间表示永久积分';
+
+CREATE TABLE `sys_user_point_bucket_usage` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `bucket_id` BIGINT NOT NULL,
+  `user_id` BIGINT NOT NULL,
+  `business_key` VARCHAR(100) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `used_points` INT NOT NULL,
+  `refunded_points` INT NOT NULL DEFAULT 0,
+  `deferred_clawback_points` INT NOT NULL DEFAULT 0,
+  `deferred_clawback_business_key` VARCHAR(100) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_sys_user_point_bucket_usage_business` (`bucket_id`, `business_key`),
+  KEY `idx_sys_user_point_bucket_usage_bucket_user` (`bucket_id`, `user_id`),
+  KEY `idx_sys_user_point_bucket_usage_business` (`user_id`, `business_key`, `id`),
+  KEY `idx_sys_user_point_bucket_usage_deferred` (`user_id`, `deferred_clawback_business_key`),
+  CONSTRAINT `fk_sys_user_point_bucket_usage_bucket` FOREIGN KEY (`bucket_id`, `user_id`) REFERENCES `sys_user_point_bucket` (`id`, `user_id`),
+  CONSTRAINT `fk_sys_user_point_bucket_usage_user` FOREIGN KEY (`user_id`) REFERENCES `sys_user` (`id`),
+  CONSTRAINT `chk_sys_user_point_bucket_usage_used` CHECK (`used_points` > 0),
+  CONSTRAINT `chk_sys_user_point_bucket_usage_refunded` CHECK (`refunded_points` >= 0 AND `deferred_clawback_points` >= 0 AND `refunded_points` + `deferred_clawback_points` <= `used_points`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='积分批次扣款分摊表';
+
 -- =====================================================
 -- 9. 博客分类表
 -- =====================================================
@@ -258,6 +335,7 @@ CREATE TABLE `point_recharge_order` (
   `package_id` BIGINT NOT NULL,
   `package_code` VARCHAR(50) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
   `points` INT NOT NULL,
+  `point_validity_days` INT DEFAULT NULL COMMENT 'Point validity snapshot; 0 means permanent',
   `price_amount` DECIMAL(10,2) NOT NULL,
   `currency` VARCHAR(10) NOT NULL DEFAULT 'CNY',
   `purchase_url` VARCHAR(500) DEFAULT NULL,
@@ -283,6 +361,7 @@ CREATE TABLE `point_redeem_code` (
   `package_id` BIGINT DEFAULT NULL,
   `order_id` BIGINT DEFAULT NULL,
   `points` INT NOT NULL,
+  `point_validity_days` INT DEFAULT NULL COMMENT 'Point validity snapshot; 0 means permanent',
   `status` TINYINT NOT NULL DEFAULT 0,
   `redeemed_by_user_id` BIGINT DEFAULT NULL,
   `expires_at` DATETIME DEFAULT NULL,
@@ -383,7 +462,7 @@ CREATE TABLE `ai_image_parameter` (
 CREATE TABLE `ai_image_point_price` (
   `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键ID',
   `model_code` VARCHAR(100) NOT NULL COMMENT '模型编码，例如 gpt-image-2',
-  `resolution_code` VARCHAR(50) NOT NULL COMMENT '分辨率档位编码，例如 1k/4k',
+  `resolution_code` VARCHAR(50) NOT NULL COMMENT '分辨率档位编码，例如 1k/2k/4k',
   `quality_code` VARCHAR(50) NOT NULL COMMENT '质量档位编码，例如 low/med/high',
   `points` INT NOT NULL COMMENT '消耗积分',
   `price_amount` DECIMAL(10,2) NOT NULL COMMENT '折算金额',
@@ -423,6 +502,81 @@ CREATE TABLE `ai_image_model_config` (
   UNIQUE KEY `uk_ai_image_model_config_code_resolution_role` (`model_code`, `resolution_code`, `route_role`),
   KEY `idx_ai_image_model_config_resolve` (`model_code`, `resolution_code`, `status`, `is_deleted`, `route_role`, `sort`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI生图模型配置表';
+
+CREATE TABLE `ai_image_model_release` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `model_code` VARCHAR(100) NOT NULL,
+  `model_name` VARCHAR(100) NOT NULL,
+  `catalog_version` VARCHAR(100) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `size_contract_version` VARCHAR(40) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `default_size_mode` VARCHAR(16) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL DEFAULT 'explicit',
+  `status` VARCHAR(16) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL DEFAULT 'draft',
+  `revoked_at` DATETIME DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `published_at` DATETIME DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_image_model_release_catalog` (`model_code`, `catalog_version`),
+  KEY `idx_ai_image_model_release_status` (`model_code`, `status`, `revoked_at`),
+  CONSTRAINT `chk_ai_image_model_release_contract` CHECK (`size_contract_version` IN ('size-mode-v1','legacy-explicit-v1','legacy-aspect-auto')),
+  CONSTRAINT `chk_ai_image_model_release_default_mode` CHECK (`default_size_mode` IN ('explicit','auto')),
+  CONSTRAINT `chk_ai_image_model_release_status` CHECK (`status` IN ('draft','published','archived','revoked'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI生图不可变模型发布';
+
+CREATE TABLE `ai_image_model_current_release` (
+  `model_code` VARCHAR(100) NOT NULL,
+  `model_release_id` BIGINT NOT NULL,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`model_code`),
+  UNIQUE KEY `uk_ai_image_current_release_id` (`model_release_id`),
+  CONSTRAINT `fk_ai_image_current_release_release` FOREIGN KEY (`model_release_id`) REFERENCES `ai_image_model_release` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI生图当前发布指针';
+
+CREATE TABLE `ai_image_model_release_route` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `model_release_id` BIGINT NOT NULL,
+  `route_config_id` BIGINT NOT NULL,
+  `size_mode` VARCHAR(16) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `resolution_code` VARCHAR(50) NOT NULL DEFAULT '',
+  `route_role` VARCHAR(16) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `provider_protocol` VARCHAR(50) NOT NULL,
+  `consent_provider_code` VARCHAR(50) NOT NULL,
+  `provider_model` VARCHAR(100) NOT NULL,
+  `base_url` VARCHAR(500) NOT NULL,
+  `text_to_image_path` VARCHAR(200) NOT NULL,
+  `image_to_image_path` VARCHAR(200) NOT NULL,
+  `secret_version_hash` CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `verified_generations` TINYINT(1) NOT NULL DEFAULT 0,
+  `verified_edits` TINYINT(1) NOT NULL DEFAULT 0,
+  `verified_mask_edits` TINYINT(1) NOT NULL DEFAULT 0,
+  `sort` INT NOT NULL DEFAULT 0,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_image_release_route_slot` (`model_release_id`,`size_mode`,`resolution_code`,`route_role`),
+  KEY `idx_ai_image_release_route_resolve` (`model_release_id`,`size_mode`,`resolution_code`,`route_role`,`sort`),
+  CONSTRAINT `fk_ai_image_release_route_release` FOREIGN KEY (`model_release_id`) REFERENCES `ai_image_model_release` (`id`),
+  CONSTRAINT `fk_ai_image_release_route_config` FOREIGN KEY (`route_config_id`) REFERENCES `ai_image_model_config` (`id`),
+  CONSTRAINT `chk_ai_image_release_route_mode` CHECK (`size_mode` IN ('explicit','auto')),
+  CONSTRAINT `chk_ai_image_release_route_role` CHECK (`route_role` IN ('primary','fallback'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI生图发布路由快照';
+
+CREATE TABLE `ai_image_model_release_price` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `model_release_id` BIGINT NOT NULL,
+  `model_code` VARCHAR(100) NOT NULL,
+  `pricing_mode` VARCHAR(24) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `resolution_code` VARCHAR(50) NOT NULL DEFAULT '',
+  `quality_code` VARCHAR(50) NOT NULL DEFAULT '',
+  `points` INT NOT NULL,
+  `price_amount` DECIMAL(10,2) NOT NULL,
+  `currency` CHAR(3) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL DEFAULT 'CNY',
+  `sort` INT NOT NULL DEFAULT 0,
+  `status` TINYINT NOT NULL DEFAULT 1,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_image_release_price_key` (`model_release_id`,`model_code`,`pricing_mode`,`resolution_code`,`quality_code`),
+  KEY `idx_ai_image_release_price_lookup` (`model_release_id`,`pricing_mode`,`resolution_code`,`quality_code`,`status`),
+  CONSTRAINT `fk_ai_image_release_price_release` FOREIGN KEY (`model_release_id`) REFERENCES `ai_image_model_release` (`id`),
+  CONSTRAINT `chk_ai_image_release_price_mode` CHECK (`pricing_mode` IN ('explicit','auto','legacy_resolution')),
+  CONSTRAINT `chk_ai_image_release_price_points` CHECK (`points` > 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI生图发布价格快照';
 
 -- =====================================================
 -- AI prompt sensitive word rules and cache revision
@@ -567,15 +721,30 @@ CREATE TABLE `ai_image_task` (
   `prompt_policy_version` BIGINT NOT NULL DEFAULT 0 COMMENT '最近一次提示词审核使用的词库版本',
   `prompt_checked_at` DATETIME DEFAULT NULL COMMENT '最近一次提示词审核通过时间',
   `model_name` VARCHAR(100) DEFAULT NULL COMMENT '模型名称',
+  `model_code` VARCHAR(100) DEFAULT NULL COMMENT '稳定业务模型编码',
+  `size_contract_version` VARCHAR(40) CHARACTER SET ascii COLLATE ascii_general_ci DEFAULT NULL COMMENT '尺寸契约版本',
+  `size_mode` VARCHAR(16) CHARACTER SET ascii COLLATE ascii_general_ci DEFAULT NULL COMMENT '尺寸模式 explicit/auto',
+  `requested_size` VARCHAR(50) DEFAULT NULL COMMENT '请求尺寸快照',
+  `requested_width` INT DEFAULT NULL COMMENT '请求宽度',
+  `requested_height` INT DEFAULT NULL COMMENT '请求高度',
+  `output_width` INT DEFAULT NULL COMMENT '真实输出宽度',
+  `output_height` INT DEFAULT NULL COMMENT '真实输出高度',
+  `output_size` VARCHAR(50) DEFAULT NULL COMMENT '真实输出尺寸',
+  `output_mime_type` VARCHAR(100) DEFAULT NULL COMMENT '真实输出MIME',
+  `model_release_id` BIGINT DEFAULT NULL COMMENT '不可变模型发布ID',
+  `price_id` BIGINT DEFAULT NULL COMMENT '发布价格ID',
+  `price_release_id` BIGINT DEFAULT NULL COMMENT '价格发布ID',
+  `unit_point_cost` INT DEFAULT NULL COMMENT '单图积分价格快照',
   `image_count` INT NOT NULL DEFAULT 1 COMMENT '图片数量',
   `completed_image_count` INT NOT NULL DEFAULT 0 COMMENT '已完成图片数量',
   `idempotency_key` CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL COMMENT '用户幂等键SHA-256',
   `request_fingerprint` CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL COMMENT '规范化请求SHA-256',
   `point_cost` INT NOT NULL DEFAULT 0 COMMENT '任务预留积分快照',
   `billing_status` TINYINT NOT NULL DEFAULT 0 COMMENT '结算状态：0预留 1确认 2部分退款 3全额退款',
-  `resolution_code` VARCHAR(50) NOT NULL DEFAULT '1k' COMMENT '分辨率档位编码',
+  `refunded_points` INT DEFAULT NULL COMMENT '最终退款积分',
+  `resolution_code` VARCHAR(50) DEFAULT NULL COMMENT '请求分辨率；新auto为空',
   `quality_code` VARCHAR(50) NOT NULL DEFAULT 'med' COMMENT '质量档位编码',
-  `aspect_ratio_code` VARCHAR(50) NOT NULL DEFAULT '1:1' COMMENT '画幅比例编码',
+  `aspect_ratio_code` VARCHAR(50) DEFAULT NULL COMMENT '请求比例；新auto为空',
   `width` INT NOT NULL DEFAULT 1024 COMMENT '图片宽度（像素）',
   `height` INT NOT NULL DEFAULT 1024 COMMENT '图片高度（像素）',
   `size` VARCHAR(50) NOT NULL DEFAULT '1024x1024' COMMENT '图片尺寸',
@@ -585,6 +754,13 @@ CREATE TABLE `ai_image_task` (
   `result_urls` LONGTEXT DEFAULT NULL COMMENT '结果图片地址集合(JSON或逗号分隔)',
   `status` TINYINT NOT NULL DEFAULT 0 COMMENT '状态：0待处理 1成功 2失败 3处理中',
   `error_message` VARCHAR(1000) DEFAULT NULL COMMENT '错误信息',
+  `failure_code` VARCHAR(64) CHARACTER SET ascii COLLATE ascii_general_ci DEFAULT NULL COMMENT '稳定失败机器码',
+  `failure_stage` VARCHAR(16) CHARACTER SET ascii COLLATE ascii_general_ci DEFAULT NULL COMMENT '失败阶段',
+  `retryable` TINYINT(1) DEFAULT NULL COMMENT '是否可用新key重试',
+  `claim_epoch` BIGINT NOT NULL DEFAULT 0 COMMENT '执行claim代次',
+  `claim_token_hash` CHAR(64) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL COMMENT '执行claim token哈希',
+  `lease_expires_at` DATETIME DEFAULT NULL COMMENT '执行claim到期时间',
+  `heartbeat_at` DATETIME DEFAULT NULL COMMENT '执行claim心跳时间',
   `started_at` DATETIME DEFAULT NULL COMMENT '开始处理时间',
   `completed_at` DATETIME DEFAULT NULL COMMENT '完成或失败时间',
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
@@ -594,12 +770,127 @@ CREATE TABLE `ai_image_task` (
   UNIQUE KEY `uk_ai_image_task_user_idempotency` (`user_id`, `idempotency_key`),
   KEY `idx_ai_image_task_site_status` (`site_id`, `status`),
   KEY `idx_ai_image_task_user_status` (`user_id`, `status`),
+  KEY `idx_ai_image_task_release_status` (`model_release_id`,`status`,`billing_status`),
+  KEY `idx_ai_image_task_claim` (`status`,`billing_status`,`lease_expires_at`),
   KEY `idx_ai_image_task_source_prompt` (`source_prompt_id`),
   KEY `idx_ai_image_task_created_at` (`created_at`),
   CONSTRAINT `fk_ai_image_task_site` FOREIGN KEY (`site_id`) REFERENCES `sys_site` (`id`),
   CONSTRAINT `fk_ai_image_task_user` FOREIGN KEY (`user_id`) REFERENCES `sys_user` (`id`),
-  CONSTRAINT `fk_ai_image_task_source_prompt` FOREIGN KEY (`source_prompt_id`) REFERENCES `prompt_library_item` (`id`)
+  CONSTRAINT `fk_ai_image_task_source_prompt` FOREIGN KEY (`source_prompt_id`) REFERENCES `prompt_library_item` (`id`),
+  CONSTRAINT `fk_ai_image_task_model_release` FOREIGN KEY (`model_release_id`) REFERENCES `ai_image_model_release` (`id`),
+  CONSTRAINT `fk_ai_image_task_release_price` FOREIGN KEY (`price_id`) REFERENCES `ai_image_model_release_price` (`id`),
+  CONSTRAINT `fk_ai_image_task_price_release` FOREIGN KEY (`price_release_id`) REFERENCES `ai_image_model_release` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='GPT生图任务表';
+
+CREATE TABLE `ai_image_request_idempotency` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `user_id` BIGINT NOT NULL,
+  `idempotency_key_hash` CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `canonical_payload_hash` CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `canonicalization_version` VARCHAR(40) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `normalization_profile` VARCHAR(40) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `size_contract_version` VARCHAR(40) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `model_release_id` BIGINT DEFAULT NULL,
+  `admission_reservation_id` VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
+  `admission_quota_date` CHAR(8) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
+  `reserved_point_cost` INT NOT NULL DEFAULT 0,
+  `requested_image_count` INT NOT NULL,
+  `task_count` INT NOT NULL,
+  `legacy_batch_shape` VARCHAR(40) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `status` VARCHAR(24) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL DEFAULT 'active',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_image_request_user_key` (`user_id`,`idempotency_key_hash`),
+  KEY `idx_ai_image_request_release` (`model_release_id`,`created_at`),
+  CONSTRAINT `fk_ai_image_request_user` FOREIGN KEY (`user_id`) REFERENCES `sys_user` (`id`),
+  CONSTRAINT `fk_ai_image_request_release` FOREIGN KEY (`model_release_id`) REFERENCES `ai_image_model_release` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI生图durable幂等请求';
+
+CREATE TABLE `ai_image_request_task` (
+  `request_id` BIGINT NOT NULL,
+  `task_ordinal` INT NOT NULL,
+  `task_id` BIGINT NOT NULL,
+  PRIMARY KEY (`request_id`,`task_ordinal`),
+  UNIQUE KEY `uk_ai_image_request_task_id` (`task_id`),
+  CONSTRAINT `fk_ai_image_request_task_request` FOREIGN KEY (`request_id`) REFERENCES `ai_image_request_idempotency` (`id`),
+  CONSTRAINT `fk_ai_image_request_task_task` FOREIGN KEY (`task_id`) REFERENCES `ai_image_task` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI生图有序请求任务';
+
+CREATE TABLE `ai_image_task_input` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `task_id` BIGINT NOT NULL,
+  `role` VARCHAR(16) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `input_ordinal` INT NOT NULL,
+  `input_kind` VARCHAR(16) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `asset_id` VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
+  `owner_user_id` BIGINT NOT NULL,
+  `storage_key` VARCHAR(500) DEFAULT NULL,
+  `content_sha256` CHAR(64) CHARACTER SET ascii COLLATE ascii_general_ci DEFAULT NULL,
+  `legacy_url` VARCHAR(500) DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_image_task_input_order` (`task_id`,`role`,`input_ordinal`),
+  KEY `idx_ai_image_task_input_asset` (`asset_id`,`owner_user_id`),
+  CONSTRAINT `fk_ai_image_task_input_task` FOREIGN KEY (`task_id`) REFERENCES `ai_image_task` (`id`),
+  CONSTRAINT `chk_ai_image_task_input_role` CHECK (`role` IN ('reference','mask')),
+  CONSTRAINT `chk_ai_image_task_input_kind` CHECK (`input_kind` IN ('asset','legacy_url'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI生图输入快照';
+
+CREATE TABLE `ai_image_task_result` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `task_id` BIGINT NOT NULL,
+  `result_ordinal` INT NOT NULL,
+  `url` VARCHAR(500) NOT NULL,
+  `width` INT NOT NULL,
+  `height` INT NOT NULL,
+  `size` VARCHAR(50) NOT NULL,
+  `mime_type` VARCHAR(100) NOT NULL,
+  `is_quarantined` TINYINT(1) NOT NULL DEFAULT 0,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_image_task_result_order` (`task_id`,`result_ordinal`),
+  CONSTRAINT `fk_ai_image_task_result_task` FOREIGN KEY (`task_id`) REFERENCES `ai_image_task` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI生图逐图结果事实';
+
+CREATE TABLE `ai_image_task_outbox` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `request_id` BIGINT NOT NULL,
+  `task_id` BIGINT NOT NULL,
+  `status` VARCHAR(16) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL DEFAULT 'pending',
+  `attempt_count` INT NOT NULL DEFAULT 0,
+  `next_attempt_at` DATETIME NOT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_image_task_outbox_task` (`request_id`,`task_id`),
+  KEY `idx_ai_image_task_outbox_dispatch` (`status`,`next_attempt_at`,`id`),
+  CONSTRAINT `fk_ai_image_task_outbox_request` FOREIGN KEY (`request_id`) REFERENCES `ai_image_request_idempotency` (`id`),
+  CONSTRAINT `fk_ai_image_task_outbox_task` FOREIGN KEY (`task_id`) REFERENCES `ai_image_task` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI生图可靠派发outbox';
+
+CREATE TABLE `ai_image_provider_attempt` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `attempt_id` CHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `task_id` BIGINT NOT NULL,
+  `claim_epoch` BIGINT NOT NULL,
+  `model_release_id` BIGINT DEFAULT NULL,
+  `release_route_id` BIGINT DEFAULT NULL,
+  `route_role` VARCHAR(16) CHARACTER SET ascii COLLATE ascii_general_ci DEFAULT NULL,
+  `consent_provider_code` VARCHAR(50) DEFAULT NULL,
+  `upstream_idempotency_key` CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `state` VARCHAR(24) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `started_at` DATETIME NOT NULL,
+  `deadline` DATETIME NOT NULL,
+  `reconcile_by` DATETIME NOT NULL,
+  `completed_at` DATETIME DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_image_provider_attempt_id` (`attempt_id`),
+  UNIQUE KEY `uk_ai_image_provider_attempt_epoch` (`task_id`,`claim_epoch`),
+  KEY `idx_ai_image_provider_attempt_reconcile` (`state`,`deadline`,`reconcile_by`),
+  CONSTRAINT `fk_ai_image_provider_attempt_task` FOREIGN KEY (`task_id`) REFERENCES `ai_image_task` (`id`),
+  CONSTRAINT `fk_ai_image_provider_attempt_release` FOREIGN KEY (`model_release_id`) REFERENCES `ai_image_model_release` (`id`),
+  CONSTRAINT `fk_ai_image_provider_attempt_route` FOREIGN KEY (`release_route_id`) REFERENCES `ai_image_model_release_route` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI生图Provider调用事实';
 
 -- =====================================================
 -- 13. GPT生图收藏表
@@ -1214,7 +1505,7 @@ CREATE TABLE `apple_iap_debt` (
 -- =====================================================
 INSERT INTO `ai_image_parameter` VALUES (1, 'resolution', '1k', '1K(快速预览)', NULL, 1024, NULL, 1, 1, '2026-06-04 15:13:53', NULL, 0);
 INSERT INTO `ai_image_parameter` VALUES (2, 'resolution', '2k', '2K(高清)', NULL, 2048, NULL, 2, 1, '2026-06-04 15:13:53', NULL, 0);
-INSERT INTO `ai_image_parameter` VALUES (3, 'resolution', '4k', '4K(超清画质)', NULL, 4096, NULL, 3, 1, '2026-06-04 15:13:53', NULL, 0);
+INSERT INTO `ai_image_parameter` VALUES (3, 'resolution', '4k', '4K(超清画质)', NULL, 3840, NULL, 3, 1, '2026-06-04 15:13:53', NULL, 0);
 INSERT INTO `ai_image_parameter` VALUES (4, 'quality', 'low', 'Low(快速/基础)', 'low', NULL, NULL, 1, 1, '2026-06-04 15:13:53', NULL, 0);
 INSERT INTO `ai_image_parameter` VALUES (5, 'quality', 'med', 'Medium(标准)', 'medium', NULL, NULL, 2, 1, '2026-06-04 15:13:53', NULL, 0);
 INSERT INTO `ai_image_parameter` VALUES (6, 'quality', 'high', 'High(高精细)', 'high', NULL, NULL, 3, 1, '2026-06-04 15:13:53', NULL, 0);
@@ -1584,9 +1875,12 @@ INSERT INTO `ai_image_point_price` (`id`, `model_code`, `resolution_code`, `qual
 (1, 'gpt-image-2', '1k', 'low', 10, 0.10, 'CNY', 1, 1, '2026-06-11 00:00:00', NULL, 0),
 (2, 'gpt-image-2', '1k', 'med', 15, 0.15, 'CNY', 2, 1, '2026-06-11 00:00:00', NULL, 0),
 (3, 'gpt-image-2', '1k', 'high', 20, 0.20, 'CNY', 3, 1, '2026-06-11 00:00:00', NULL, 0),
-(4, 'gpt-image-2', '4k', 'low', 25, 0.25, 'CNY', 4, 1, '2026-06-11 00:00:00', NULL, 0),
-(5, 'gpt-image-2', '4k', 'med', 35, 0.35, 'CNY', 5, 1, '2026-06-11 00:00:00', NULL, 0),
-(6, 'gpt-image-2', '4k', 'high', 50, 0.50, 'CNY', 6, 1, '2026-06-11 00:00:00', NULL, 0),
+(13, 'gpt-image-2', '2k', 'low', 15, 0.15, 'CNY', 4, 1, '2026-08-21 00:00:00', NULL, 0),
+(14, 'gpt-image-2', '2k', 'med', 30, 0.30, 'CNY', 5, 1, '2026-08-21 00:00:00', NULL, 0),
+(15, 'gpt-image-2', '2k', 'high', 60, 0.60, 'CNY', 6, 1, '2026-08-21 00:00:00', NULL, 0),
+(4, 'gpt-image-2', '4k', 'low', 25, 0.25, 'CNY', 7, 1, '2026-06-11 00:00:00', NULL, 0),
+(5, 'gpt-image-2', '4k', 'med', 35, 0.35, 'CNY', 8, 1, '2026-06-11 00:00:00', NULL, 0),
+(6, 'gpt-image-2', '4k', 'high', 50, 0.50, 'CNY', 9, 1, '2026-06-11 00:00:00', NULL, 0),
 (7, 'nano-banana-2', '1k', '', 60, 0.60, 'CNY', 7, 1, '2026-06-11 00:00:00', NULL, 0),
 (8, 'nano-banana-2', '2k', '', 60, 0.60, 'CNY', 8, 1, '2026-06-11 00:00:00', NULL, 0),
 (9, 'nano-banana-2', '4k', '', 60, 0.60, 'CNY', 9, 1, '2026-06-11 00:00:00', NULL, 0),
@@ -1600,7 +1894,8 @@ INSERT INTO `ai_image_model_config` (`id`, `model_code`, `model_name`, `provider
 (3, 'nano-banana-pro', 'Nano Banana Pro', 'gemini-image', 'gemini-3-pro-image-preview', '', 'primary', 'https://api.dawclaudecode.com', '', '/v1/models/{model}:generateContent', '/v1/models/{model}:generateContent', 3, 1, '2026-06-10 00:00:00', NULL, 0),
 (4, 'nano-banana-2', 'Nano Banana 2', 'gemini-image', 'gemini-3.1-flash-image-preview', '', 'primary', 'https://api.dawclaudecode.com', '', '/v1/models/{model}:generateContent', '/v1/models/{model}:generateContent', 4, 1, '2026-06-10 00:00:00', NULL, 0),
 (5, 'gpt-image-2', 'GPT Image 2 1K', 'openai-image', 'gpt-image-2', '1k', 'primary', '', '', '/images/generations', '/images/edits', 1, 0, '2026-08-11 00:00:00', NULL, 0),
-(6, 'gpt-image-2', 'GPT Image 2 4K', 'openai-image', 'gpt-image-2', '4k', 'primary', '', '', '/images/generations', '/images/edits', 2, 0, '2026-08-11 00:00:00', NULL, 0);
+(7, 'gpt-image-2', 'GPT Image 2 2K', 'openai-image', 'gpt-image-2', '2k', 'primary', '', '', '/images/generations', '/images/edits', 2, 0, '2026-08-21 00:00:00', NULL, 0),
+(6, 'gpt-image-2', 'GPT Image 2 4K', 'openai-image', 'gpt-image-2', '4k', 'primary', '', '', '/images/generations', '/images/edits', 3, 0, '2026-08-11 00:00:00', NULL, 0);
 
 
 

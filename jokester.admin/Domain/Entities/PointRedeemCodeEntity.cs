@@ -23,6 +23,9 @@ public sealed class PointRedeemCodeEntity
     [SugarColumn(ColumnName = "points")]
     public int Points { get; set; }
 
+    [SugarColumn(ColumnName = "point_validity_days")]
+    public int? PointValidityDays { get; set; }
+
     [SugarColumn(ColumnName = "status")]
     public int Status { get; set; }
 

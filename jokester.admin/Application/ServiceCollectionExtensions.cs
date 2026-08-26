@@ -84,12 +84,21 @@ public static class ServiceCollectionExtensions
         services.AddHttpClient<IAiImageService, AiImageService>(client =>
         {
             client.Timeout = TimeSpan.FromMinutes(5);
+        })
+        .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false,
+            ConnectTimeout = TimeSpan.FromSeconds(20),
+            ConnectCallback = OutboundNetworkGuard.ConnectPublicAsync,
+            AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
         });
         services.AddHttpClient<INanoBananaImageService, NanoBananaImageService>(client =>
         {
             client.Timeout = TimeSpan.FromMinutes(5);
         });
         services.AddScoped<IAiImageModelConfigService, AiImageModelConfigService>();
+        services.AddScoped<IAiImageCatalogService, AiImageCatalogService>();
+        services.AddScoped<IAiSizeModeRolloutPolicy, AiSizeModeRolloutPolicy>();
         services.AddScoped<IAiPromptSensitiveWordService, AiPromptSensitiveWordService>();
         services.AddScoped<IPointService, PointService>();
         services.AddScoped<IPointRechargeService, PointRechargeService>();

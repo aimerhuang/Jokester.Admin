@@ -265,6 +265,23 @@ public sealed class AccountDeletionService(
             .FirstAsync(cancellationToken);
 
         await refreshTokenStore.RevokeUserSessionsAsync(request.UserId, cancellationToken);
+        await db.Updateable<SysUserEntity>()
+            .SetColumns(x => new SysUserEntity { Status = 0, UpdatedAt = DateTime.Now })
+            .Where(x => x.Id == request.UserId && !x.IsDeleted)
+            .ExecuteCommandAsync(cancellationToken);
+        var hasActiveAiReservation = await db.Queryable<AiImageTaskEntity>()
+            .AnyAsync(x => x.UserId == request.UserId
+                && !x.IsDeleted
+                && x.BillingStatus == 0
+                && (x.Status == 0 || x.Status == 3),
+                cancellationToken);
+        if (hasActiveAiReservation)
+        {
+            throw new AppException(
+                ErrorCodes.ServiceUnavailable,
+                MachineErrorCodes.ServiceUnavailable,
+                "Account deletion is waiting for active AI image reservations to settle.");
+        }
         DeleteDirectoryIfPresent(mediaPathResolver.ResolveFilePath(request.UserId.ToString()));
         DeleteLocalAvatarIfPresent(avatarUrl);
 
@@ -294,6 +311,9 @@ public sealed class AccountDeletionService(
                 .Where(x => x.OwnerUserId == request.UserId && !x.IsDeleted)
                 .ExecuteCommandAsync(cancellationToken);
             await db.Deleteable<UserConsentEntity>()
+                .Where(x => x.UserId == request.UserId)
+                .ExecuteCommandAsync(cancellationToken);
+            await db.Deleteable<SysUserMembershipEntitlementEntity>()
                 .Where(x => x.UserId == request.UserId)
                 .ExecuteCommandAsync(cancellationToken);
             await db.Updateable<UserPointDetailEntity>()

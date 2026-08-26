@@ -29,10 +29,25 @@ public interface IPointService
         string qualityCode,
         CancellationToken cancellationToken);
 
+    Task<VersionedImageTaskBatchReservationResult> ReserveVersionedImageTasksAsync(
+        AiImageRequestEntity request,
+        IReadOnlyList<AiImageTaskEntity> tasks,
+        IReadOnlyList<AiImageTaskInputEntity> inputs,
+        long priceId,
+        CancellationToken cancellationToken);
+
     Task<ImageTaskSettlementResult> SettleImageTaskAsync(
         long taskId,
         int finalStatus,
         string? resultUrls,
+        string? errorMessage,
+        int completedImageCount,
+        CancellationToken cancellationToken);
+
+    Task<ImageTaskSettlementResult> SettleVersionedImageTaskAsync(
+        long taskId,
+        int finalStatus,
+        VersionedImageTaskSettlement settlement,
         string? errorMessage,
         int completedImageCount,
         CancellationToken cancellationToken);

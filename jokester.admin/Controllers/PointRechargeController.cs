@@ -67,6 +67,7 @@ public sealed class PointRechargeController(
     /// 超级管理员按套餐或自定义积分批量签发兑换码；传 orderNo 时同时确认并履约该套餐订单。
     /// </summary>
     [HttpPost("admin/codes")]
+    [ProducesResponseType(typeof(ApiResponse<IssuedPointRedeemCodesResponse>), StatusCodes.Status200OK)]
     public async Task<IActionResult> IssueCodes(
         [FromBody] IssuePointRedeemCodesRequest request,
         CancellationToken cancellationToken)

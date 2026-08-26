@@ -15,7 +15,9 @@ namespace jokester.admin.Controllers;
 public sealed class AiImagesController(
     IAiImageService aiImageService,
     INanoBananaImageService nanoBananaImageService,
-    IAiImageModelConfigService modelConfigService) : BaseApiController
+    IAiImageModelConfigService modelConfigService,
+    IAiImageCatalogService catalogService,
+    IAiSizeModeRolloutPolicy rolloutPolicy) : BaseApiController
 {
     /// <summary>
     /// 分页查询 GPT Image2 图片任务
@@ -37,7 +39,8 @@ public sealed class AiImagesController(
     [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<AiImageModelOptionDto>>), StatusCodes.Status200OK)]
     public async Task<IActionResult> GetModels(CancellationToken cancellationToken)
     {
-        var result = await modelConfigService.GetEnabledModelsAsync(cancellationToken);
+        SetCatalogResponseHeaders();
+        var result = await catalogService.GetModelsAsync(rolloutPolicy.GetClientContext(), cancellationToken);
         return Success(result);
     }
 
@@ -59,8 +62,18 @@ public sealed class AiImagesController(
     [Permission("AiImage.Generate")]
     [HttpGet("pricing-options")]
     [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<AiImagePricingOptionDto>>), StatusCodes.Status200OK)]
-    public async Task<IActionResult> GetPricingOptions(CancellationToken cancellationToken)
+    public async Task<IActionResult> GetPricingOptions(
+        [FromQuery] string? modelCode,
+        [FromQuery] string? catalogVersion,
+        CancellationToken cancellationToken)
     {
+        var client = rolloutPolicy.GetClientContext();
+        if (rolloutPolicy.CanUseVersionedContract(client))
+        {
+            SetCatalogResponseHeaders();
+            var versioned = await catalogService.GetPricingAsync(modelCode, catalogVersion, client, cancellationToken);
+            return Success(versioned);
+        }
         var result = await aiImageService.GetPricingOptionsAsync(cancellationToken);
         return Success(result);
     }
@@ -73,7 +86,9 @@ public sealed class AiImagesController(
     [ProducesResponseType(typeof(ApiResponse<ResolveAiImageParametersResponse>), StatusCodes.Status200OK)]
     public async Task<IActionResult> ResolveParameters([FromBody] ResolveAiImageParametersRequest request, CancellationToken cancellationToken)
     {
-        var result = await aiImageService.ResolveParametersAsync(request, cancellationToken);
+        var result = request.SizeMode is not null || request.CatalogVersion is not null
+            ? (await catalogService.ResolveAsync(request, rolloutPolicy.GetClientContext(), cancellationToken)).Parameters
+            : await aiImageService.ResolveParametersAsync(request, cancellationToken);
         return Success(result);
     }
 
@@ -162,8 +177,15 @@ public sealed class AiImagesController(
     public async Task<IActionResult> Create([FromBody] CreateAiImageTaskRequest request, CancellationToken cancellationToken)
     {
         IReadOnlyList<long> ids;
+        if (request.SizeMode is not null || request.CatalogVersion is not null)
+        {
+            return Success(await aiImageService.CreateTasksResponseAsync(request, cancellationToken));
+        }
         var requestedModel = string.IsNullOrWhiteSpace(request.ModelCode) ? request.ModelName : request.ModelCode;
-        var modelConfig = await modelConfigService.ResolveAsync(requestedModel, request.ResolutionCode, cancellationToken);
+        var requestedResolution = string.IsNullOrWhiteSpace(request.Resolution)
+            ? request.ResolutionCode
+            : request.Resolution;
+        var modelConfig = await modelConfigService.ResolveAsync(requestedModel, requestedResolution, cancellationToken);
         if (AiImageModelConfigService.UsesGeminiImageProtocol(modelConfig))
         {
             var id = await nanoBananaImageService.CreateAsync(new CreateNanoBananaImageTaskRequest
@@ -173,9 +195,9 @@ public sealed class AiImagesController(
                 Prompt = request.Prompt,
                 ModelCode = request.ModelCode,
                 ModelName = request.ModelName,
-                ResolutionCode = request.ResolutionCode,
-                AspectRatioCode = request.AspectRatioCode,
-                Size = request.Resolution,
+                ResolutionCode = requestedResolution ?? string.Empty,
+                AspectRatioCode = request.AspectRatioCode ?? "1:1",
+                Size = request.Resolution ?? string.Empty,
                 ImageCount = request.ImageCount,
                 ImageUrls = request.ReferenceImageUrls,
                 ImageAssetIds = request.ReferenceAssetIds
@@ -193,6 +215,12 @@ public sealed class AiImagesController(
             Ids = ids,
             TaskIds = ids
         });
+    }
+
+    private void SetCatalogResponseHeaders()
+    {
+        Response.Headers.CacheControl = "private, no-store";
+        Response.Headers.Vary = "Authorization, X-Client-Capabilities, X-Client-Platform, X-Client-Version, X-Client-Build";
     }
 
     /// <summary>

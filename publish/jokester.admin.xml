@@ -14,12 +14,27 @@
         </member>
         <member name="P:jokester.admin.Application.DTOs.Auth.LoginRequest.UserName">
             <summary>
-            登录用户名。
+            登录用户名或邮箱。
             </summary>
         </member>
         <member name="P:jokester.admin.Application.DTOs.Auth.LoginRequest.Password">
             <summary>
             登录密码。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.LoginRequest.CaptchaId">
+            <summary>
+            验证码 ID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.LoginRequest.CaptchaAnswer">
+            <summary>
+            验证码答案。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.LoginRequest.DeviceSessionId">
+            <summary>
+            Client-generated stable identifier for the current device login session.
             </summary>
         </member>
         <member name="T:jokester.admin.Application.DTOs.Auth.RefreshTokenRequest">
@@ -42,24 +57,19 @@
             注册邮箱。
             </summary>
         </member>
+        <member name="T:jokester.admin.Application.DTOs.Auth.SendRegisterEmailCodeResponse">
+            <summary>
+            注册邮箱验证码发送结果。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.SendRegisterEmailCodeResponse.RetryAfterSeconds">
+            <summary>
+            再次发送前建议等待的秒数。
+            </summary>
+        </member>
         <member name="T:jokester.admin.Application.DTOs.Auth.RegisterRequest">
             <summary>
             邮箱验证码注册请求。
-            </summary>
-        </member>
-        <member name="P:jokester.admin.Application.DTOs.Auth.RegisterRequest.UserName">
-            <summary>
-            登录用户名。
-            </summary>
-        </member>
-        <member name="P:jokester.admin.Application.DTOs.Auth.RegisterRequest.NickName">
-            <summary>
-            用户昵称。
-            </summary>
-        </member>
-        <member name="P:jokester.admin.Application.DTOs.Auth.RegisterRequest.Password">
-            <summary>
-            登录密码。
             </summary>
         </member>
         <member name="P:jokester.admin.Application.DTOs.Auth.RegisterRequest.Email">
@@ -70,6 +80,11 @@
         <member name="P:jokester.admin.Application.DTOs.Auth.RegisterRequest.EmailCode">
             <summary>
             邮箱验证码。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.RegisterRequest.Password">
+            <summary>
+            登录密码。
             </summary>
         </member>
         <member name="T:jokester.admin.Application.DTOs.Auth.RegisterResponse">
@@ -87,6 +102,11 @@
             登录结果。
             </summary>
         </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.LoginResponse.SessionId">
+            <summary>
+            当前会话 ID。
+            </summary>
+        </member>
         <member name="P:jokester.admin.Application.DTOs.Auth.LoginResponse.AccessToken">
             <summary>
             AccessToken。
@@ -100,6 +120,11 @@
         <member name="P:jokester.admin.Application.DTOs.Auth.LoginResponse.AccessTokenExpiresAt">
             <summary>
             AccessToken 过期时间。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.LoginResponse.RefreshTokenExpiresAt">
+            <summary>
+            RefreshToken 过期时间。
             </summary>
         </member>
         <member name="P:jokester.admin.Application.DTOs.Auth.LoginResponse.User">
@@ -160,6 +185,36 @@
         <member name="P:jokester.admin.Application.DTOs.Auth.UserProfileDto.IsSuperAdmin">
             <summary>
             是否超级管理员。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.UserProfileDto.AppleAppAccountToken">
+            <summary>
+            StoreKit 购买时使用的稳定用户绑定 UUID。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.UserProfileDto.Membership">
+            <summary>
+            当前有效会员权益；没有有效会员时为 null。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Application.DTOs.Auth.UserMembershipDto">
+            <summary>
+            当前用户会员权益。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.UserMembershipDto.TierCode">
+            <summary>
+            会员等级编码。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.UserMembershipDto.Status">
+            <summary>
+            动态会员状态。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Application.DTOs.Auth.UserMembershipDto.ExpiresAt">
+            <summary>
+            会员权益 UTC 到期时间。
             </summary>
         </member>
         <member name="T:jokester.admin.Application.DTOs.Auth.SiteAccessDto">
@@ -1880,6 +1935,11 @@
             响应消息。
             </summary>
         </member>
+        <member name="P:jokester.admin.Common.ApiResponse.RequestId">
+            <summary>
+            服务端请求追踪 ID。
+            </summary>
+        </member>
         <member name="T:jokester.admin.Common.ApiResponse`1">
             <summary>
             带数据的通用接口响应。
@@ -1888,6 +1948,11 @@
         <member name="P:jokester.admin.Common.ApiResponse`1.Data">
             <summary>
             响应数据。
+            </summary>
+        </member>
+        <member name="T:jokester.admin.Common.ApiErrorResponse">
+            <summary>
+            通用失败响应。机器可读错误码与成功响应的数值 code 分开建模。
             </summary>
         </member>
         <member name="T:jokester.admin.Common.PagedResult`1">
@@ -1913,6 +1978,11 @@
         <member name="P:jokester.admin.Common.PagedResult`1.Items">
             <summary>
             当前页数据列表。
+            </summary>
+        </member>
+        <member name="P:jokester.admin.Common.PagedResult`1.HasMore">
+            <summary>
+            是否还有下一页。
             </summary>
         </member>
         <member name="M:jokester.admin.Controllers.AiImagesController.GetPage(jokester.admin.Application.DTOs.AiImages.AiImageQuery,System.Threading.CancellationToken)">
@@ -1997,12 +2067,12 @@
             发送注册邮箱验证码。
             </summary>
             <remarks>
-            请求体只需要传 email；验证码用于邮箱注册。
+            请求体仅传 email；发送频率由服务端按邮箱和 IP 限制。
             </remarks>
         </member>
         <member name="M:jokester.admin.Controllers.AuthController.Register(jokester.admin.Application.DTOs.Auth.RegisterRequest,System.Threading.CancellationToken)">
             <summary>
-            邮箱验证码注册。
+            使用邮箱、邮箱验证码和密码注册；账号与昵称由服务端根据邮箱自动生成。
             </summary>
         </member>
         <member name="M:jokester.admin.Controllers.AuthController.Login(jokester.admin.Application.DTOs.Auth.LoginRequest,System.Threading.CancellationToken)">
@@ -2025,6 +2095,11 @@
             <remarks>
             RefreshToken 仅通过 X-Refresh-Token 请求头传入，避免出现在 URL 和访问日志中。
             </remarks>
+        </member>
+        <member name="M:jokester.admin.Controllers.AuthController.LogoutAll(System.Threading.CancellationToken)">
+            <summary>
+            撤销当前用户的全部登录会话。
+            </summary>
         </member>
         <member name="M:jokester.admin.Controllers.AuthController.Profile(System.Threading.CancellationToken)">
             <summary>
@@ -2243,9 +2318,14 @@
             状态：1=启用，0=禁用。
             </remarks>
         </member>
-        <member name="M:jokester.admin.Controllers.PointRechargeController.GetPackages(System.Threading.CancellationToken)">
+        <member name="M:jokester.admin.Controllers.PointRechargeController.GetPackages(System.String,System.Threading.CancellationToken)">
             <summary>
             查询当前可购买的积分套餐。
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.PointRechargeController.FulfillAppleTransaction(jokester.admin.Application.DTOs.Points.FulfillAppleTransactionRequest,System.Threading.CancellationToken)">
+            <summary>
+            校验并履约 StoreKit 消耗型交易。
             </summary>
         </member>
         <member name="M:jokester.admin.Controllers.PointRechargeController.CreateOrder(jokester.admin.Application.DTOs.Points.CreateRechargeOrderRequest,System.Threading.CancellationToken)">
@@ -2260,12 +2340,17 @@
         </member>
         <member name="M:jokester.admin.Controllers.PointRechargeController.IssueCodes(jokester.admin.Application.DTOs.Points.IssuePointRedeemCodesRequest,System.Threading.CancellationToken)">
             <summary>
-            超级管理员批量签发兑换码；传 orderNo 时同时确认并履约该订单。
+            超级管理员按套餐或自定义积分批量签发兑换码；传 orderNo 时同时确认并履约该套餐订单。
             </summary>
         </member>
         <member name="M:jokester.admin.Controllers.PointsController.GetBalance(System.Threading.CancellationToken)">
             <summary>
             查询当前用户积分余额和今日签到状态
+            </summary>
+        </member>
+        <member name="M:jokester.admin.Controllers.PointsController.GetDetails(jokester.admin.Application.DTOs.Common.PageQuery,System.Threading.CancellationToken)">
+            <summary>
+            分页查询当前用户积分明细
             </summary>
         </member>
         <member name="M:jokester.admin.Controllers.PointsController.SignIn(System.Threading.CancellationToken)">

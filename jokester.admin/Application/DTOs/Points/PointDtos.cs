@@ -4,6 +4,11 @@ public sealed record ImageTaskReservationResult(long TaskId, bool Created);
 
 public sealed record ImageTaskBatchReservationResult(IReadOnlyList<long> TaskIds, bool Created);
 
+public sealed record VersionedImageTaskBatchReservationResult(
+    long RequestId,
+    IReadOnlyList<long> TaskIds,
+    bool Created);
+
 public sealed record ImageTaskSettlementResult(
     long TaskId,
     long UserId,
@@ -12,9 +17,31 @@ public sealed record ImageTaskSettlementResult(
     int RefundedPoints,
     bool Transitioned);
 
+public sealed record VersionedImageTaskSettlement(
+    string? ResultUrls,
+    int? OutputWidth,
+    int? OutputHeight,
+    string? OutputSize,
+    string? OutputMimeType,
+    string? FailureCode,
+    string? FailureStage,
+    bool? Retryable,
+    long ClaimEpoch,
+    string ClaimTokenHash,
+    string? ProviderAttemptId,
+    string ProviderAttemptState);
+
 public sealed class PointBalanceDto
 {
     public int AvailablePoints { get; init; }
+
+    public int PermanentPoints { get; init; }
+
+    public int ExpiringPoints { get; init; }
+
+    public int NextExpiringPoints { get; init; }
+
+    public DateTime? NextExpireAt { get; init; }
 
     public bool HasSignedInToday { get; init; }
 

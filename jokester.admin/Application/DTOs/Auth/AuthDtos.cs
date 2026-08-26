@@ -6,7 +6,7 @@ namespace jokester.admin.Application.DTOs.Auth;
 public sealed class LoginRequest
 {
     /// <summary>
-    /// 登录用户名。
+    /// 登录用户名或邮箱。
     /// </summary>
     public string UserName { get; init; } = string.Empty;
 
@@ -51,16 +51,6 @@ public sealed class SendRegisterEmailCodeRequest
     /// 注册邮箱。
     /// </summary>
     public string Email { get; init; } = string.Empty;
-
-    /// <summary>
-    /// 验证码 ID。
-    /// </summary>
-    public string CaptchaId { get; init; } = string.Empty;
-
-    /// <summary>
-    /// 验证码答案。
-    /// </summary>
-    public string CaptchaAnswer { get; init; } = string.Empty;
 }
 
 /// <summary>
@@ -80,21 +70,6 @@ public sealed class SendRegisterEmailCodeResponse
 public sealed class RegisterRequest
 {
     /// <summary>
-    /// 登录用户名，须为 6-20 位 ASCII 字母和数字组合，且两者都必须包含。
-    /// </summary>
-    public string UserName { get; init; } = string.Empty;
-
-    /// <summary>
-    /// 用户昵称。
-    /// </summary>
-    public string NickName { get; init; } = string.Empty;
-
-    /// <summary>
-    /// 登录密码。
-    /// </summary>
-    public string Password { get; init; } = string.Empty;
-
-    /// <summary>
     /// 注册邮箱。
     /// </summary>
     public string Email { get; init; } = string.Empty;
@@ -104,23 +79,10 @@ public sealed class RegisterRequest
     /// </summary>
     public string EmailCode { get; init; } = string.Empty;
 
-    public bool AcceptedPrivacyPolicy { get; init; }
-
-    public string? PrivacyPolicyVersion { get; init; }
-
-    public bool AcceptedTermsOfService { get; init; }
-
-    public string? TermsOfServiceVersion { get; init; }
-
-    public string ClientPlatform { get; init; } = "ios";
-
-    public string Locale { get; init; } = "zh-CN";
-
-
-    public string GetEmailCode()
-    {
-        return EmailCode;
-    }
+    /// <summary>
+    /// 登录密码。
+    /// </summary>
+    public string Password { get; init; } = string.Empty;
 }
 
 /// <summary>
@@ -229,6 +191,32 @@ public sealed class UserProfileDto
     /// StoreKit 购买时使用的稳定用户绑定 UUID。
     /// </summary>
     public string? AppleAppAccountToken { get; init; }
+
+    /// <summary>
+    /// 当前有效会员权益；没有有效会员时为 null。
+    /// </summary>
+    public UserMembershipDto? Membership { get; init; }
+}
+
+/// <summary>
+/// 当前用户会员权益。
+/// </summary>
+public sealed class UserMembershipDto
+{
+    /// <summary>
+    /// 会员等级编码。
+    /// </summary>
+    public string TierCode { get; init; } = string.Empty;
+
+    /// <summary>
+    /// 动态会员状态。
+    /// </summary>
+    public string Status { get; init; } = string.Empty;
+
+    /// <summary>
+    /// 会员权益 UTC 到期时间。
+    /// </summary>
+    public DateTime ExpiresAt { get; init; }
 }
 
 /// <summary>

@@ -42,14 +42,16 @@ Refresh Token 以 SHA-256 哈希作为 Redis 定位键，明文只返回给客�
 - `apple_server_notification`：App Store Server Notifications V2 接收和重试账本。
 - `apple_iap_debt`：退款时余额不足的待清偿积分负债。
 
-注册先读取当前隐私政策和服务条款，再在创建用户的同一流程记录两个版本；AI processing 告知独立查询，不依赖同平台的隐私政策或服务条款是否存在。AI 授权写入时使用请求的真实客户端平台，后续生图校验按用户最近一条 AI 授权记录的平台解析精确 scope 或 `all` 告知，不再固定读取 `ios`。生图创建和 Worker 调 Provider 前都用实际路由的 `ConsentProviderCode` 检查最新 AI 告知和授权：告知未配置时服务不可用，告知已配置但授权缺失时要求用户同意，避免平台或 Provider 配置切换后发送未获授权的数据。
+注册只接收 `email`、`emailCode`、`password`，不读取或记录隐私政策和服务条款版本。服务端用规范化邮箱 `@` 前的账号部分生成 `userName` 和 `nickName`，在用户名冲突时自动消歧；登录查询同时支持用户名和邮箱。
+
+法律文档与注册保持解耦。AI processing 告知仍按独立流程查询，不依赖同平台的隐私政策或服务条款是否存在。AI 授权写入时使用请求的真实客户端平台，后续生图校验按用户最近一条 AI 授权记录的平台解析精确 scope 或 `all` 告知，不再固定读取 `ios`。生图创建和 Worker 调 Provider 前都用实际路由的 `ConsentProviderCode` 检查最新 AI 告知和授权：告知未配置时服务不可用，告知已配置但授权缺失时要求用户同意，避免平台或 Provider 配置切换后发送未获授权的数据。
 
 StoreKit 履约流程：
 
 1. 客户端提交交易 ID、Product ID、确定性 `appAccountToken` 和幂等键，不提交积分或可信价格。
 2. 服务端用 App Store Connect ES256 凭据读取交易并验证 Apple JWS 证书链、Bundle、环境、商品、数量、撤销状态和账户令牌。
 3. 在一个 MySQL 事务内插入唯一交易行、锁定并更新余额、写入 `source=apple_iap` 流水；重复交易返回首次结果。
-4. Apple 退款通知再次验证内层交易，在事务内扣回可用积分并更新交易。差额写入唯一 open debt；存在负债时 `IPointService` 拒绝新生图预留。
+4. Apple 退款通知再次验证内层交易，在事务内扣回可用积分并更新交易。已被活动生图任务预留的月卡额度先记为延后追扣：失败不恢复已撤销额度，成功时再追扣；即时或延后追扣的余额差额写入唯一 open debt。存在负债或未结算延后追扣时，`IPointService` 拒绝新生图预留。
 5. 通知安全接收与业务处理分离；UUID 唯一保证重放幂等，失败状态由 Worker 重试。
 
 账户删除创建后立即撤销会话。Worker 可原子认领 `scheduled/failed` 或陈旧 `processing` 记录，删除用户私有数据并匿名化必须保留的财务/审计主体。数据已删除但邮件失败时进入 `notification_pending`，只重试通知，不重复执行数据删除。
@@ -140,28 +142,42 @@ StoreKit 履约流程：
 
 - `ai_image_task`：后台生图任务，保存 `prompt`、参数编码、`size`、`quality`、`image_count`、参考图快照、`result_urls`、`status`
 - `media_asset`：用户私有上传 Asset，保存不可枚举 ID、所有者、存储/缩略图 key、真实 MIME、尺寸、哈希和删除状态
-- `ai_image_point_price`：按 `model_code + resolution_code + quality_code` 定义出图积分价格
+- `ai_image_point_price`：按 `model_code + resolution_code + quality_code` 定义 legacy 出图积分价格；`size-mode-v1` 使用 release 价格明细
 - `sys_user.point_balance`：用户当前可用积分余额
 - `sys_user_point_detail`：积分流水，记录注册赠送、签到赠送、出图扣减、过期清理和失败返还
+- `sys_user_point_bucket`：套餐和签到积分到账批次，记录剩余积分、原到期时间和扣减优先级；`expires_at=NULL` 表示永久套餐积分
+- `sys_user_point_bucket_usage`：任务扣款到批次的分摊，并记录 Apple 退款与活动任务交错时的延后追扣，用于原批次退款和后续成功/失败结算
 
 积分规则：
 
 1. 用户注册成功后获得 50 积分，写入 `source=register` 的赠送流水。
 2. 登录用户可调用 `POST /api/points/sign-in` 每日签到一次，领取 25 积分。
-3. 签到积分当天有效；第二天在查询余额、再次签到或出图扣分时，会把上一日未使用部分写为 `source=sign_in_expire` 的过期扣减流水。
-4. 创建生图任务前，服务按价格表组合计算 `points * imageCount`，余额不足或价格缺失时拒绝创建任务。
-5. 任务创建时预留积分并写入 `source=image_generate` 流水；后台生成失败或超时时，仅对未完成图片写入一次 `source=image_refund` 流水。
+3. 签到积分当天有效；第二天在查询余额、登录/刷新/读取资料、再次签到或出图扣分时，会把上一日未使用部分写为 `source=sign_in_expire` 的过期扣减流水。
+4. `monthly` 套餐到账 5000 积分，从核销或 Apple 履约时起 30 天有效；扣分时先用限时套餐积分，再用签到积分，最后使用永久积分。
+5. 月卡同时写入独立会员权益来源账本。登录、刷新和资料接口动态查询未撤销且未到期权益并返回最晚到期时间；该状态不依赖剩余积分，Apple 退款只撤销对应交易来源。
+6. 创建生图任务前，服务先结算过期批次，再按价格表组合计算 `points * imageCount`；余额不足或价格缺失时拒绝创建任务。
+7. 任务创建时预留积分并写入 `source=image_generate` 流水；后台生成失败或超时时，仅对未完成图片写入一次 `source=image_refund` 流水，并按扣款分摊退回原批次且不延长有效期。若原月卡已被 Apple 撤销，流水仍唯一保留，但撤销部分不再恢复为可用积分；任务成功部分才执行延后追扣。
 
 统一任务路由与 GPT Image2 流程：
 
 1. 移动端统一调用 `POST /api/ai/images` 并传 `modelCode`。后端按数据库配置的 `provider` 协议路由到 OpenAI Images 或 Gemini Images，不根据模型名称包含的单词猜测服务。
 2. 后端校验 `prompt`、参数编码和最多 6 个 `referenceAssetIds`。Asset 必须属于当前用户；服务端只把自己解析出的私有文件交给 Provider。兼容期 URL 也只允许当前用户的同源私有媒体路径，从根源上阻止任意远程 URL/SSRF。
 3. 上传先检查 magic bytes 和可解码格式，再限制文件字节、边长、总像素、解码时间与资源占用。HEIC/HEIF 通过受限的原生解码器读取主图并规范化为 PNG；JPEG、PNG、WebP 清除 EXIF/ICC/IPTC/XMP 后保持各自格式；生成 512px WebP 缩略图后才持久化 `media_asset`。
-4. 按 `modelCode + resolutionCode + route_role` 从 `ai_image_model_config` 解析启用路由，并通过 `ai_image_point_price` 查询扣分价格。
+4. legacy 请求按 `modelCode + resolutionCode + route_role` 从 `ai_image_model_config` 解析启用路由，并通过 `ai_image_point_price` 查询扣分价格；`size-mode-v1` 的 release 路由和价格边界见下节。
 5. 使用 Redis Lua 原子占用幂等键、用户每日额度、用户活动任务位和全局积压位；成本熔断打开时拒绝创建。
 6. 按 `imageCount` 创建同等数量的单图任务，在同一 MySQL 事务中锁定用户余额、扣除整批积分并写入逐任务唯一预留流水，然后入队。
 7. Worker 认领任务、复检授权和提示词，再取得 Redis Provider 租约。OpenAI 协议支持同槽位主备；Gemini 协议使用当前启用路由。
 8. 成功确认预留；失败按未完成图片数退款，重复回调不二次退款。任务 DTO 返回字符串状态、进度、建议轮询间隔和 UTC 时间，同时保留数字状态兼容字段。
+
+`size-mode-v1` 在上述 legacy 流程之上增加不可变执行边界：
+
+1. `ai_image_model_release` 原子绑定模型契约，`ai_image_model_current_release` 只保存当前指针；route/price 明细按 release 冻结。auto 与 explicit 使用独立路由槽位和价格键，auto 不回退到 1K/2K/4K 价格。
+2. `ai_image_request_idempotency` 以用户和 key SHA-256 唯一保存规范化指纹；`ai_image_request_task` 按 ordinal 保存批次。已有事实重放不读取实时 catalog、Redis、Asset 或价格，并按任务软删除投影 `requestState`。
+3. 新批次在一个事务内锁定 current release/price、写请求头、单图任务、输入快照、任务明细和 `ai_image_task_outbox`，再按原积分桶写逐任务预留流水。Redis owner token 只允许未提交的当前 owner 撤销，提交后绑定完整 request/task/ordinal/图片/积分批次。
+4. Outbox 只有完成 Redis 批次绑定后才派发；内存队列部分写入不会整批退款，恢复线程继续处理 pending 行。超过 `AiCostControl.OutboxBindDeadlineMinutes` 的未派发任务通过统一失败结算退款。
+5. Worker 以 `claim_epoch + claim_token_hash + lease` CAS 认领并持续心跳；每次外发前保存 `ai_image_provider_attempt`。失租或外部结果未知时进入 `provider_unknown`，不自动二次外发，最晚在 `reconcile_by` 强制退款。
+6. 任务输入表保存 Asset/legacy URL 的角色、顺序、owner、storage key 和内容哈希。成功结算把实际解码宽高、MIME、URL 与 `ai_image_task_result`、账务、attempt 状态在同一事务提交；失败返回稳定 `failureCode/failureStage/retryable`。
+7. release Endpoint 与 Provider 结果 URL 分别执行 HTTPS allowlist、DNS/IP 和禁止自动重定向校验；响应与下载使用有界流读取。Provider 全局租约按 owner token 续租，续租失败停止 fallback/新外发并进入未知结果隔离。
 
 Nano Banana2 流程：
 
@@ -214,7 +230,7 @@ Provider 租约前按最新快照复检。MySQL 保存权威规则，进程内�
 - `POST /api/prompts/{id}/events`
 - `POST /api/dev/bootstrap/super-admin`（仅 Development 且要求 `X-Bootstrap-Secret`）
 
-`GET /api/blog/comments/captcha` 返回 6 位大写字母/数字的 SVG 图片验证码 Base64 数据，答案在 Redis 中保存 5 分钟并在校验时一次性消费。评论提交、注册邮件发送和登录失败后的二次验证共用该验证码接口。注册邮件发送成功返回 `retryAfterSeconds=60`；邮箱/IP 共享限流返回 `429 RATE_LIMITED` 和 `Retry-After`。
+`GET /api/blog/comments/captcha` 返回 6 位大写字母/数字的 SVG 图片验证码 Base64 数据，答案在 Redis 中保存 5 分钟并在校验时一次性消费。评论提交和登录失败后的二次验证共用该验证码接口；注册邮件发送不使用图片验证码。注册邮件发送成功返回 `retryAfterSeconds=60`；邮箱/IP 共享限流返回 `429 RATE_LIMITED` 和 `Retry-After`。
 
 ### 后台接口
 
@@ -231,6 +247,7 @@ Provider 租约前按最新快照复检。MySQL 保存权威规则，进程内�
 - `GET/POST/DELETE /api/ai/images`
 - `GET /api/ai/images/models`
 - `GET /api/ai/images/parameters`
+- `GET /api/ai/images/pricing-options`
 - `POST /api/ai/images/parameters/resolve`
 - `POST /api/ai/images/generate`
 - `POST /api/ai/images/nanoBananaImage/generate`
@@ -243,6 +260,9 @@ Provider 租约前按最新快照复检。MySQL 保存权威规则，进程内�
 - `GET /api/points/details`
 - `POST /api/points/sign-in`
 - `GET /api/points/recharge/packages`
+- `POST /api/points/recharge/orders`
+- `POST /api/points/recharge/redeem`
+- `POST /api/points/recharge/admin/codes`
 - `POST /api/points/recharge/apple/transactions`
 - `GET/PUT /api/users/me/consents`
 - `POST/GET/DELETE /api/auth/account-deletion/requests`

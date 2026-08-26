@@ -15,6 +15,14 @@ public sealed class ResolvedAiImageModelConfig
 {
     public long Id { get; init; }
 
+    public long? ModelReleaseId { get; init; }
+
+    public long? ReleaseRouteId { get; init; }
+
+    public string? CatalogVersion { get; init; }
+
+    public string? SizeMode { get; init; }
+
     public string ModelCode { get; init; } = string.Empty;
 
     public string ModelName { get; init; } = string.Empty;

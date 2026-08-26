@@ -1,7 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using jokester.admin.Application.Abstractions;
-using jokester.admin.Application.DTOs.Auth;
 using jokester.admin.Application.DTOs.Legal;
 using jokester.admin.Application.DTOs.Mobile;
 using jokester.admin.Application.Services;
@@ -93,7 +92,7 @@ public sealed class LegalAndMobileContractTests
     }
 
     [Fact]
-    public async Task LegalConfiguration_AllowsRegistrationDocumentsWithoutAiProcessing()
+    public async Task LegalConfiguration_AllowsPrivacyAndTermsWithoutAiProcessing()
     {
         using var context = new LegalContext();
         context.SeedEnabledProviders();
@@ -113,21 +112,6 @@ public sealed class LegalAndMobileContractTests
         Assert.Empty(result.ProviderCodes);
         Assert.Null(documents.AiProcessingNotice);
         Assert.Equal(2, context.Db.Queryable<LegalDocumentEntity>().Where(x => x.Status == 1).Count());
-
-        await context.Service.ValidateAndRecordRegistrationConsentsAsync(
-            7,
-            new RegisterRequest
-            {
-                AcceptedPrivacyPolicy = true,
-                PrivacyPolicyVersion = documents.PrivacyPolicy.Version,
-                AcceptedTermsOfService = true,
-                TermsOfServiceVersion = documents.TermsOfService.Version,
-                ClientPlatform = "web",
-                Locale = "zh-CN"
-            },
-            default);
-
-        Assert.Equal(2, context.Db.Queryable<UserConsentEntity>().Where(x => x.UserId == 7).Count());
     }
 
     [Fact]
@@ -238,31 +222,6 @@ public sealed class LegalAndMobileContractTests
         Assert.Contains("ios/zh-CN", exception.Message, StringComparison.Ordinal);
         Assert.Empty(context.Db.Queryable<LegalDocumentEntity>().Where(x => x.Platform == "all").ToList());
         Assert.Equal(3, context.Db.Queryable<LegalDocumentEntity>().Where(x => x.Platform == "ios" && x.Status == 1).Count());
-    }
-
-    [Fact]
-    public async Task RegistrationConsent_RejectsStaleLegalVersions()
-    {
-        using var context = new LegalContext();
-        context.SeedCurrentDocuments();
-
-        var exception = await Assert.ThrowsAsync<AppException>(() =>
-            context.Service.ValidateAndRecordRegistrationConsentsAsync(
-                7,
-                new RegisterRequest
-                {
-                    AcceptedPrivacyPolicy = true,
-                    PrivacyPolicyVersion = "stale",
-                    AcceptedTermsOfService = true,
-                    TermsOfServiceVersion = "terms-v2",
-                    ClientPlatform = "ios",
-                    Locale = "zh-CN"
-                },
-                default));
-
-        Assert.Equal(ErrorCodes.BadRequest, exception.Code);
-        Assert.Equal(MachineErrorCodes.ValidationError, exception.MachineCode);
-        Assert.Empty(context.Db.Queryable<UserConsentEntity>().ToList());
     }
 
     [Fact]

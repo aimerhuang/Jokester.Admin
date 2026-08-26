@@ -32,7 +32,7 @@ public sealed class AdminBootstrapService(ISqlSugarClient db, IPasswordHasher pa
                     UpdatedAt = DateTime.Now,
                     IsDeleted = false
                 };
-                userId = await db.Insertable(user).ExecuteReturnSnowflakeIdAsync();
+                userId = await db.Insertable(user).ExecuteReturnBigIdentityAsync();
                 user.Id = userId;
             }
             else
@@ -61,7 +61,7 @@ public sealed class AdminBootstrapService(ISqlSugarClient db, IPasswordHasher pa
                     UpdatedAt = DateTime.Now,
                     IsDeleted = false
                 };
-                role.Id = await db.Insertable(role).ExecuteReturnSnowflakeIdAsync();
+                role.Id = await db.Insertable(role).ExecuteReturnBigIdentityAsync();
             }
             else
             {

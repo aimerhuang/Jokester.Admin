@@ -96,6 +96,17 @@ public sealed class AccountDeletionRetryTests
             Remark = "person@example.test registered",
             CreatedAt = DateTime.Now
         }).ExecuteCommand();
+        db.Insertable(new SysUserMembershipEntitlementEntity
+        {
+            UserId = 1,
+            TierCode = "monthly_vip",
+            Source = "recharge",
+            BusinessKey = "recharge:redeem:1",
+            StartsAt = DateTime.Now,
+            ExpiresAt = DateTime.Now.AddDays(30),
+            Status = "active",
+            CreatedAt = DateTime.Now
+        }).ExecuteCommand();
         db.Insertable(new AccountDeletionRequestEntity
         {
             RequestId = "ADR2026081200000000000000000002",
@@ -130,6 +141,7 @@ public sealed class AccountDeletionRetryTests
             var user = db.Queryable<SysUserEntity>().Single();
             Assert.Null(user.Email);
             Assert.True(user.IsDeleted);
+            Assert.Empty(db.Queryable<SysUserMembershipEntitlementEntity>().ToList());
             Assert.False(Directory.Exists(userDirectory));
             Assert.Equal("completed", db.Queryable<AccountDeletionRequestEntity>().Single().Status);
         }
@@ -288,6 +300,8 @@ public sealed class AccountDeletionRetryTests
                 reference_image_urls TEXT NULL,
                 mask_image_url TEXT NULL,
                 result_urls TEXT NULL,
+                billing_status INTEGER NOT NULL DEFAULT 0,
+                status INTEGER NOT NULL DEFAULT 0,
                 error_message TEXT NULL,
                 is_deleted INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NULL
@@ -299,6 +313,19 @@ public sealed class AccountDeletionRetryTests
                 deleted_at TEXT NULL
             );
             CREATE TABLE user_consent (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL);
+            CREATE TABLE sys_user_membership_entitlement (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                tier_code TEXT NOT NULL,
+                source TEXT NOT NULL,
+                business_key TEXT NOT NULL,
+                starts_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                revoked_at TEXT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NULL
+            );
             CREATE TABLE sys_user_role (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL);
             CREATE TABLE sys_user_site (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL);
             CREATE TABLE sys_login_log (

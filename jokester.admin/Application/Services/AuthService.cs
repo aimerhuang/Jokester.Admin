@@ -28,12 +28,15 @@ public sealed class AuthService(
     private static readonly TimeSpan LoginWindow = TimeSpan.FromMinutes(15);
     private static readonly TimeSpan LoginLockDuration = TimeSpan.FromMinutes(15);
     private readonly IDatabase _redis = connectionMultiplexer.GetDatabase();
+    private readonly PointBucketLedger _pointBuckets = new(db);
+    private readonly MembershipEntitlementLedger _membershipEntitlements = new(db);
     private readonly string _loginFailPrefix = $"{jwtOptions.Value.Issuer}:login_fail:";
     private readonly string _loginLockPrefix = $"{jwtOptions.Value.Issuer}:login_lock:";
 
     public async Task<LoginResponse> LoginAsync(LoginRequest request, CancellationToken cancellationToken)
     {
-        var userName = NormalizeUserName(request.UserName);
+        var account = request.UserName?.Trim() ?? string.Empty;
+        var userName = NormalizeUserName(account);
         var ip = GetClientIp();
         var failKey = BuildLoginFailKey(userName, ip);
         var lockKey = BuildLoginLockKey(userName, ip);
@@ -49,13 +52,16 @@ public sealed class AuthService(
             throw new AppException(ErrorCodes.CaptchaRequired, "请先完成验证码验证");
         }
 
+        var normalizedEmail = account.ToLowerInvariant();
         var user = await db.Queryable<SysUserEntity>()
-            .FirstAsync(x => x.UserName == request.UserName && !x.IsDeleted, cancellationToken);
+            .FirstAsync(x => x.Email == normalizedEmail && !x.IsDeleted, cancellationToken);
+        user ??= await db.Queryable<SysUserEntity>()
+            .FirstAsync(x => x.UserName == account && !x.IsDeleted, cancellationToken);
 
         if (user is null || !passwordHasher.Verify(request.Password, user.PasswordHash, user.Salt))
         {
             attempts++;
-            await RecordLoginFailureAsync(failKey, lockKey, attempts, request.UserName, "用户名或密码错误", cancellationToken);
+            await RecordLoginFailureAsync(failKey, lockKey, attempts, account, "用户名或密码错误", cancellationToken);
             throw new AppException(ErrorCodes.InvalidCredentials, "用户名或密码错误");
         }
 
@@ -152,40 +158,17 @@ public sealed class AuthService(
             throw new AppException(ErrorCodes.Unauthorized, "未登录");
         }
 
+        await SettlePointBalanceAsync(currentUser.UserId.Value, cancellationToken);
+
         var user = await db.Queryable<SysUserEntity>()
-            .Where(x => x.Id == currentUser.UserId.Value && !x.IsDeleted)
-            .Select(x => new UserProfileDto
-            {
-                Id = x.Id,
-                UserName = x.UserName,
-                NickName = x.NickName ?? string.Empty,
-                Email = x.Email,
-                AvatarUrl = x.AvatarUrl,
-                Signature = x.Signature,
-                PointBalance = x.PointBalance,
-                IsSuperAdmin = x.IsSuperAdmin
-            })
-            .FirstAsync(cancellationToken);
+            .FirstAsync(x => x.Id == currentUser.UserId.Value && !x.IsDeleted, cancellationToken);
 
         if (user is null)
         {
             throw new AppException(ErrorCodes.Unauthorized, "未登录");
         }
 
-        if (!appleOptions.Value.Enabled) return user;
-
-        return new UserProfileDto
-        {
-            Id = user.Id,
-            UserName = user.UserName,
-            NickName = user.NickName,
-            Email = user.Email,
-            AvatarUrl = user.AvatarUrl,
-            Signature = user.Signature,
-            PointBalance = user.PointBalance,
-            IsSuperAdmin = user.IsSuperAdmin,
-            AppleAppAccountToken = appleAccountIdService.GetForUser(user.Id)
-        };
+        return await BuildUserProfileAsync(user, cancellationToken);
     }
 
     public async Task RecordLoginFailureAsync(string? userName, string errorMessage, CancellationToken cancellationToken)
@@ -198,6 +181,7 @@ public sealed class AuthService(
         CancellationToken cancellationToken,
         string? existingSessionId = null)
     {
+        user.PointBalance = await SettlePointBalanceAsync(user.Id, cancellationToken);
         var sessionId = existingSessionId ?? Guid.NewGuid().ToString("N");
         var accessToken = tokenService.CreateAccessToken(user.Id, user.UserName, user.IsSuperAdmin, sessionId);
         var refreshToken = tokenService.CreateRefreshToken();
@@ -215,6 +199,7 @@ public sealed class AuthService(
             })
             .ToListAsync(cancellationToken);
         var permissions = await permissionService.GetPermissionsAsync(user.Id, user.IsSuperAdmin, cancellationToken);
+        var profile = await BuildUserProfileAsync(user, cancellationToken);
         var saved = await refreshTokenStore.SaveAsync(refreshToken, user.Id, sessionId, refreshExpiresAt, cancellationToken);
         if (!saved)
         {
@@ -233,20 +218,7 @@ public sealed class AuthService(
             AccessTokenExpiresAt = accessTokenExpiresAt,
             RefreshTokenExpiresAt = refreshExpiresAt,
             SessionId = sessionId,
-            User = new UserProfileDto
-            {
-                Id = user.Id,
-                UserName = user.UserName,
-                NickName = user.NickName ?? string.Empty,
-                Email = user.Email,
-                AvatarUrl = user.AvatarUrl,
-                Signature = user.Signature,
-                PointBalance = user.PointBalance,
-                IsSuperAdmin = user.IsSuperAdmin,
-                AppleAppAccountToken = appleOptions.Value.Enabled
-                    ? appleAccountIdService.GetForUser(user.Id)
-                    : null
-            },
+            User = profile,
             Sites = sites,
             Permissions = permissions
         };
@@ -258,6 +230,7 @@ public sealed class AuthService(
         string sessionId,
         RefreshTokenRotationTokens tokens)
     {
+        user.PointBalance = await SettlePointBalanceAsync(user.Id, cancellationToken);
         var sites = await db.Queryable<SysUserSiteEntity, SysSiteEntity>((us, s) => new JoinQueryInfos(JoinType.Inner, us.SiteId == s.Id))
             .Where((us, s) => us.UserId == user.Id && !s.IsDeleted && s.Status == 1)
             .OrderBy((us, s) => s.Sort)
@@ -269,6 +242,7 @@ public sealed class AuthService(
             })
             .ToListAsync(cancellationToken);
         var permissions = await permissionService.GetPermissionsAsync(user.Id, user.IsSuperAdmin, cancellationToken);
+        var profile = await BuildUserProfileAsync(user, cancellationToken);
         return new LoginResponse
         {
             SessionId = sessionId,
@@ -276,23 +250,60 @@ public sealed class AuthService(
             RefreshToken = tokens.RefreshToken,
             AccessTokenExpiresAt = tokens.AccessTokenExpiresAt,
             RefreshTokenExpiresAt = tokens.RefreshTokenExpiresAt,
-            User = new UserProfileDto
-            {
-                Id = user.Id,
-                UserName = user.UserName,
-                NickName = user.NickName ?? string.Empty,
-                Email = user.Email,
-                AvatarUrl = user.AvatarUrl,
-                Signature = user.Signature,
-                PointBalance = user.PointBalance,
-                IsSuperAdmin = user.IsSuperAdmin,
-                AppleAppAccountToken = appleOptions.Value.Enabled
-                    ? appleAccountIdService.GetForUser(user.Id)
-                    : null
-            },
+            User = profile,
             Sites = sites,
             Permissions = permissions
         };
+    }
+
+    private async Task<UserProfileDto> BuildUserProfileAsync(
+        SysUserEntity user,
+        CancellationToken cancellationToken)
+    {
+        return new UserProfileDto
+        {
+            Id = user.Id,
+            UserName = user.UserName,
+            NickName = user.NickName ?? string.Empty,
+            Email = user.Email,
+            AvatarUrl = user.AvatarUrl,
+            Signature = user.Signature,
+            PointBalance = user.PointBalance,
+            IsSuperAdmin = user.IsSuperAdmin,
+            AppleAppAccountToken = appleOptions.Value.Enabled
+                ? appleAccountIdService.GetForUser(user.Id)
+                : null,
+            Membership = await _membershipEntitlements.GetActiveAsync(
+                user.Id,
+                DateTime.Now,
+                cancellationToken)
+        };
+    }
+
+    private async Task<int> SettlePointBalanceAsync(long userId, CancellationToken cancellationToken)
+    {
+        await db.Ado.BeginTranAsync();
+        try
+        {
+            var user = await db.Queryable<SysUserEntity>()
+                .TranLock(DbLockType.Wait)
+                .FirstAsync(x => x.Id == userId && !x.IsDeleted && x.Status == 1, cancellationToken);
+            if (user is null)
+            {
+                throw SessionRevoked();
+            }
+
+            var now = DateTime.Now;
+            await _pointBuckets.ExpireAsync(user, now, cancellationToken);
+            await _pointBuckets.ExpireLegacyPreviousSignInPointsAsync(user, now.Date, cancellationToken);
+            await db.Ado.CommitTranAsync();
+            return user.PointBalance;
+        }
+        catch
+        {
+            await db.Ado.RollbackTranAsync();
+            throw;
+        }
     }
 
     private static AppException RefreshTokenExpired() => new(

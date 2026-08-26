@@ -419,6 +419,26 @@ public sealed class UserService(
             throw new NotFoundException($"用户不存在: {id}");
         }
 
+        await db.Updateable<SysUserEntity>()
+            .SetColumns(x => new SysUserEntity { Status = 0, UpdatedAt = DateTime.Now })
+            .Where(x => x.Id == id && !x.IsDeleted)
+            .ExecuteCommandAsync(cancellationToken);
+        var hasActiveAiReservation = await db.Queryable<AiImageTaskEntity>()
+            .AnyAsync(x => x.UserId == id
+                && !x.IsDeleted
+                && x.BillingStatus == 0
+                && (x.Status == 0 || x.Status == 3),
+                cancellationToken);
+        if (hasActiveAiReservation)
+        {
+            await permissionCacheInvalidator.RemoveUserAsync(id, cancellationToken);
+            await refreshTokenStore.RevokeUserSessionsAsync(id, cancellationToken);
+            throw new AppException(
+                ErrorCodes.ServiceUnavailable,
+                MachineErrorCodes.ServiceUnavailable,
+                "User deletion is waiting for active AI image reservations to settle.");
+        }
+
         await db.Ado.BeginTranAsync();
         try
         {

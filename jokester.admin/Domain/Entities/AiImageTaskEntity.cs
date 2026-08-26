@@ -32,6 +32,48 @@ public sealed class AiImageTaskEntity
     [SugarColumn(ColumnName = "model_name")]
     public string? ModelName { get; set; }
 
+    [SugarColumn(ColumnName = "model_code")]
+    public string? ModelCode { get; set; }
+
+    [SugarColumn(ColumnName = "size_contract_version")]
+    public string? SizeContractVersion { get; set; }
+
+    [SugarColumn(ColumnName = "size_mode")]
+    public string? SizeMode { get; set; }
+
+    [SugarColumn(ColumnName = "requested_size")]
+    public string? RequestedSize { get; set; }
+
+    [SugarColumn(ColumnName = "requested_width")]
+    public int? RequestedWidth { get; set; }
+
+    [SugarColumn(ColumnName = "requested_height")]
+    public int? RequestedHeight { get; set; }
+
+    [SugarColumn(ColumnName = "output_width")]
+    public int? OutputWidth { get; set; }
+
+    [SugarColumn(ColumnName = "output_height")]
+    public int? OutputHeight { get; set; }
+
+    [SugarColumn(ColumnName = "output_size")]
+    public string? OutputSize { get; set; }
+
+    [SugarColumn(ColumnName = "output_mime_type")]
+    public string? OutputMimeType { get; set; }
+
+    [SugarColumn(ColumnName = "model_release_id")]
+    public long? ModelReleaseId { get; set; }
+
+    [SugarColumn(ColumnName = "price_id")]
+    public long? PriceId { get; set; }
+
+    [SugarColumn(ColumnName = "price_release_id")]
+    public long? PriceReleaseId { get; set; }
+
+    [SugarColumn(ColumnName = "unit_point_cost")]
+    public int? UnitPointCost { get; set; }
+
     [SugarColumn(ColumnName = "image_count")]
     public int ImageCount { get; set; } = 1;
 
@@ -50,14 +92,17 @@ public sealed class AiImageTaskEntity
     [SugarColumn(ColumnName = "billing_status")]
     public int BillingStatus { get; set; }
 
+    [SugarColumn(ColumnName = "refunded_points")]
+    public int? RefundedPoints { get; set; }
+
     [SugarColumn(ColumnName = "resolution_code")]
-    public string ResolutionCode { get; set; } = "1k";
+    public string? ResolutionCode { get; set; }
 
     [SugarColumn(ColumnName = "quality_code")]
     public string QualityCode { get; set; } = "med";
 
     [SugarColumn(ColumnName = "aspect_ratio_code")]
-    public string AspectRatioCode { get; set; } = "1:1";
+    public string? AspectRatioCode { get; set; }
 
     [SugarColumn(ColumnName = "width")]
     public int Width { get; set; } = 1024;
@@ -85,6 +130,27 @@ public sealed class AiImageTaskEntity
 
     [SugarColumn(ColumnName = "error_message")]
     public string? ErrorMessage { get; set; }
+
+    [SugarColumn(ColumnName = "failure_code")]
+    public string? FailureCode { get; set; }
+
+    [SugarColumn(ColumnName = "failure_stage")]
+    public string? FailureStage { get; set; }
+
+    [SugarColumn(ColumnName = "retryable")]
+    public bool? Retryable { get; set; }
+
+    [SugarColumn(ColumnName = "claim_epoch")]
+    public long ClaimEpoch { get; set; }
+
+    [SugarColumn(ColumnName = "claim_token_hash")]
+    public string? ClaimTokenHash { get; set; }
+
+    [SugarColumn(ColumnName = "lease_expires_at")]
+    public DateTime? LeaseExpiresAt { get; set; }
+
+    [SugarColumn(ColumnName = "heartbeat_at")]
+    public DateTime? HeartbeatAt { get; set; }
 
     [SugarColumn(ColumnName = "started_at")]
     public DateTime? StartedAt { get; set; }

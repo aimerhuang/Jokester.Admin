@@ -1,6 +1,5 @@
 using System.Text.Json;
 using jokester.admin.Application.Abstractions;
-using jokester.admin.Application.DTOs.Auth;
 using jokester.admin.Application.DTOs.Legal;
 using jokester.admin.Common;
 using jokester.admin.Common.Exceptions;
@@ -61,31 +60,6 @@ public sealed class LegalDocumentService(ISqlSugarClient db) : ILegalDocumentSer
         return document is null ? null : MapAiProcessingNotice(document);
     }
 
-    public async Task ValidateAndRecordRegistrationConsentsAsync(
-        long userId,
-        RegisterRequest request,
-        CancellationToken cancellationToken)
-    {
-        var documents = await GetCurrentAsync(request.ClientPlatform, request.Locale, cancellationToken);
-        if (!request.AcceptedPrivacyPolicy
-            || !string.Equals(request.PrivacyPolicyVersion?.Trim(), documents.PrivacyPolicy.Version, StringComparison.Ordinal))
-        {
-            throw new AppException(ErrorCodes.BadRequest, MachineErrorCodes.ValidationError, "Current privacy policy consent is required.");
-        }
-        if (!request.AcceptedTermsOfService
-            || !string.Equals(request.TermsOfServiceVersion?.Trim(), documents.TermsOfService.Version, StringComparison.Ordinal))
-        {
-            throw new AppException(ErrorCodes.BadRequest, MachineErrorCodes.ValidationError, "Current terms of service consent is required.");
-        }
-
-        var now = DateTime.UtcNow;
-        await db.Insertable(new[]
-        {
-            NewConsent(userId, PrivacyPolicyType, documents.PrivacyPolicy.Version, request.ClientPlatform, now),
-            NewConsent(userId, TermsOfServiceType, documents.TermsOfService.Version, request.ClientPlatform, now)
-        }).ExecuteCommandAsync(cancellationToken);
-    }
-
     public static IReadOnlyList<string> ParseProviderCodes(string? json)
     {
         if (string.IsNullOrWhiteSpace(json)) return [];
@@ -105,17 +79,6 @@ public sealed class LegalDocumentService(ISqlSugarClient db) : ILegalDocumentSer
 
     public static string NormalizeProviderCode(string? providerCode) =>
         string.IsNullOrWhiteSpace(providerCode) ? string.Empty : providerCode.Trim().ToLowerInvariant();
-
-    private static UserConsentEntity NewConsent(long userId, string type, string version, string platform, DateTime now) => new()
-    {
-        UserId = userId,
-        ConsentType = type,
-        DocumentVersion = version,
-        Accepted = true,
-        ClientPlatform = NormalizePlatform(platform),
-        AcceptedAt = now,
-        CreatedAt = now
-    };
 
     private static LegalDocumentEntity RequireDocument(
         IEnumerable<LegalDocumentEntity> documents,

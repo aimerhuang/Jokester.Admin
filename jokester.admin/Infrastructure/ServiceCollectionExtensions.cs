@@ -65,7 +65,8 @@ public static class ServiceCollectionExtensions
                     && options.ProviderLeaseSeconds >= 300
                     && options.ProviderFailureThreshold > 0
                     && options.ProviderFailureWindowSeconds > 0
-                    && options.ProviderCircuitOpenSeconds > 0,
+                    && options.ProviderCircuitOpenSeconds > 0
+                    && options.OutboxBindDeadlineMinutes is >= 5 and <= 1440,
                 "AiCostControl values are outside the supported safety bounds.")
             .ValidateOnStart();
         services.AddOptions<AiPromptFilterOptions>()
@@ -75,6 +76,21 @@ public static class ServiceCollectionExtensions
                     && options.MaxSnapshotAgeMinutes is >= 1 and <= 1440
                     && options.MinimumActiveWordCount is >= 1 and <= 1_000_000,
                 "AiPromptFilter values are outside the supported safety bounds.")
+            .ValidateOnStart();
+        services.AddOptions<AiImageSizeModeOptions>()
+            .Bind(configuration.GetSection(AiImageSizeModeOptions.SectionName))
+            .Validate(
+                options => options.AutoCohortPercent is >= 0 and <= 100
+                    && options.AutoMaxOutputBytes is >= 1_048_576 and <= 104_857_600
+                    && options.AutoMaxWidth is >= 16 and <= 16384
+                    && options.AutoMaxHeight is >= 16 and <= 16384
+                    && options.AutoMaxPixels is >= 655_360 and <= 134_217_728
+                    && options.AttemptReconcileMinutes is >= 5 and <= 1440
+                    && (!options.Enabled || options.ProviderAllowedHosts.Length > 0)
+                    && (!options.AutoEnabled || options.ResultAllowedHosts.Length > 0)
+                    && options.ProviderAllowedHosts.All(host => !string.IsNullOrWhiteSpace(host))
+                    && options.ResultAllowedHosts.All(host => !string.IsNullOrWhiteSpace(host)),
+                "AiImageSizeMode values are outside the supported safety bounds.")
             .ValidateOnStart();
         services.AddOptions<MobileConfigurationOptions>()
             .Bind(configuration.GetSection(MobileConfigurationOptions.SectionName))

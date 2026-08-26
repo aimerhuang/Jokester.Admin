@@ -12,6 +12,8 @@ namespace jokester.admin.Application.Services;
 public sealed class PointRechargeService(ISqlSugarClient db, ICurrentUser currentUser) : IPointRechargeService
 {
     private const string RechargeSource = "recharge";
+    private readonly PointBucketLedger _pointBuckets = new(db);
+    private readonly MembershipEntitlementLedger _membershipEntitlements = new(db);
 
     public async Task<IReadOnlyList<RechargePackageDto>> GetPackagesAsync(string? platform, CancellationToken cancellationToken)
     {
@@ -21,11 +23,23 @@ public sealed class PointRechargeService(ISqlSugarClient db, ICurrentUser curren
         {
             throw new AppException(ErrorCodes.BadRequest, MachineErrorCodes.ValidationError, "Unsupported recharge platform.");
         }
+        var selectableCodes = PointRechargePackageCatalog.SelectableCodes;
         var packages = await db.Queryable<PointRechargePackageEntity>()
-            .Where(x => !x.IsDeleted && x.Status == 1)
+            .Where(x => !x.IsDeleted && x.Status == 1 && selectableCodes.Contains(x.PackageCode))
             .OrderBy(x => x.Sort)
             .OrderBy(x => x.Id)
             .ToListAsync(cancellationToken);
+        if (normalizedPlatform == "ios")
+        {
+            foreach (var package in packages)
+            {
+                PointRechargePackageCatalog.EnsureSelectable(package);
+            }
+        }
+        else
+        {
+            PointRechargePackageCatalog.EnsureComplete(packages);
+        }
 
         var redeemedCodes = await db.Queryable<PointRedeemCodeEntity>()
             .Where(x => x.RedeemedByUserId == userId && x.Status == 1 && x.PackageId != null)
@@ -52,6 +66,14 @@ public sealed class PointRechargeService(ISqlSugarClient db, ICurrentUser curren
                 : package.Points;
             var purchaseUrl = ExpandPurchaseUrl(package.PurchaseUrl, string.Empty, package.PackageCode, userId);
             appleProductLookup.TryGetValue(package.Id, out var appleProduct);
+            if (appleProduct is not null)
+            {
+                if (!string.Equals(appleProduct.PackageCode, package.PackageCode, StringComparison.Ordinal))
+                {
+                    throw new AppException(ErrorCodes.ServerError, "Apple product package configuration is inconsistent.");
+                }
+                PointRechargePackageCatalog.EnsureApplePoints(package, appleProduct.Points);
+            }
 
             return new RechargePackageDto
             {
@@ -96,6 +118,7 @@ public sealed class PointRechargeService(ISqlSugarClient db, ICurrentUser curren
             PackageId = package.Id,
             PackageCode = package.PackageCode,
             Points = points,
+            PointValidityDays = package.ValidityDays ?? 0,
             PriceAmount = package.PriceAmount,
             Currency = package.Currency,
             PurchaseUrl = purchaseUrl,
@@ -120,24 +143,28 @@ public sealed class PointRechargeService(ISqlSugarClient db, ICurrentUser curren
         }
 
         var codeHash = PointRedeemCodeSecurity.Hash(normalizedCode);
-        var now = DateTime.Now;
-
         await db.Ado.BeginTranAsync();
         try
         {
             var redeemCode = await db.Queryable<PointRedeemCodeEntity>()
                 .TranLock(DbLockType.Wait)
                 .FirstAsync(x => x.CodeHash == codeHash, cancellationToken);
-            if (redeemCode is null || redeemCode.Status != 0 || redeemCode.ExpiresAt <= now)
+            if (redeemCode is null || redeemCode.Status != 0)
             {
                 throw InvalidRedeemCode();
             }
 
             var awardedPoints = redeemCode.Points;
+            PointRechargePackageEntity? package = null;
             if (redeemCode.PackageId.HasValue)
             {
-                var package = await db.Queryable<PointRechargePackageEntity>()
+                package = await db.Queryable<PointRechargePackageEntity>()
                     .FirstAsync(x => x.Id == redeemCode.PackageId.Value && !x.IsDeleted, cancellationToken);
+                if (package is null)
+                {
+                    throw InvalidRedeemCode();
+                }
+                PointRechargePackageCatalog.EnsureSelectable(package);
                 if (package?.RepeatPoints is > 0)
                 {
                     var hasRedeemedPackage = await db.Queryable<PointRedeemCodeEntity>()
@@ -153,6 +180,14 @@ public sealed class PointRechargeService(ISqlSugarClient db, ICurrentUser curren
                 }
             }
 
+            var pointValidityDays = redeemCode.PointValidityDays.HasValue
+                ? NormalizeValidityDays(redeemCode.PointValidityDays)
+                : NormalizeValidityDays(package?.ValidityDays);
+            if (package is not null)
+            {
+                PointRechargePackageCatalog.EnsureAwardSnapshot(package, awardedPoints, pointValidityDays);
+            }
+
             if (awardedPoints <= 0)
             {
                 throw InvalidRedeemCode();
@@ -166,6 +201,13 @@ public sealed class PointRechargeService(ISqlSugarClient db, ICurrentUser curren
                 throw new AppException(ErrorCodes.Unauthorized, "User is not authenticated");
             }
 
+            var now = DateTime.Now;
+            if (redeemCode.ExpiresAt <= now)
+            {
+                throw InvalidRedeemCode();
+            }
+
+            await _pointBuckets.ExpireAsync(user, now, cancellationToken);
             var balanceAfter = checked(user.PointBalance + awardedPoints);
             var codeAffected = await db.Updateable<PointRedeemCodeEntity>()
                 .SetColumns(x => new PointRedeemCodeEntity
@@ -195,6 +237,37 @@ public sealed class PointRechargeService(ISqlSugarClient db, ICurrentUser curren
                 throw new AppException(ErrorCodes.ServerError, "Failed to update point balance");
             }
 
+            DateTime? pointExpiresAt = null;
+            if (pointValidityDays.HasValue)
+            {
+                pointExpiresAt = now.AddDays(pointValidityDays.Value);
+            }
+            if (redeemCode.PackageId.HasValue)
+            {
+                var businessKey = $"recharge:redeem:{redeemCode.Id}";
+                await _pointBuckets.GrantAsync(
+                    userId,
+                    awardedPoints,
+                    RechargeSource,
+                    businessKey,
+                    pointExpiresAt,
+                    pointExpiresAt.HasValue
+                        ? PointBucketLedger.PackageSpendPriority
+                        : PointBucketLedger.PermanentPackageSpendPriority,
+                    now,
+                    cancellationToken);
+                if (package?.PackageCode == PointRechargePackageCatalog.MonthlyCode)
+                {
+                    await _membershipEntitlements.GrantMonthlyVipAsync(
+                        userId,
+                        RechargeSource,
+                        businessKey,
+                        now,
+                        pointExpiresAt!.Value,
+                        cancellationToken);
+                }
+            }
+
             await db.Insertable(new UserPointDetailEntity
             {
                 UserId = userId,
@@ -203,7 +276,9 @@ public sealed class PointRechargeService(ISqlSugarClient db, ICurrentUser curren
                 ChangeType = "recharge",
                 Source = RechargeSource,
                 BusinessKey = $"recharge:redeem:{redeemCode.Id}",
-                Remark = $"积分兑换到账，卡密 {redeemCode.CodeMask}",
+                Remark = pointExpiresAt.HasValue
+                    ? $"积分兑换到账，卡密 {redeemCode.CodeMask}，有效期至 {pointExpiresAt:yyyy-MM-dd HH:mm:ss}"
+                    : $"积分兑换到账，卡密 {redeemCode.CodeMask}",
                 CreatedAt = now
             }).ExecuteCommandAsync(cancellationToken);
 
@@ -225,6 +300,9 @@ public sealed class PointRechargeService(ISqlSugarClient db, ICurrentUser curren
             {
                 AddedPoints = awardedPoints,
                 AvailablePoints = balanceAfter,
+                ExpiresAt = pointExpiresAt.HasValue
+                    ? ApiDateTime.FromLocalStorage(pointExpiresAt.Value)
+                    : null,
                 RedeemedAt = ApiDateTime.FromLocalStorage(now)
             };
         }
@@ -309,6 +387,12 @@ public sealed class PointRechargeService(ISqlSugarClient db, ICurrentUser curren
             }
 
             var points = order?.Points ?? package?.Points ?? request.Points!.Value;
+            var pointValidityDays = order?.PointValidityDays
+                ?? (package is null ? 0 : package.ValidityDays ?? 0);
+            if (package is not null)
+            {
+                PointRechargePackageCatalog.EnsureAwardSnapshot(package, points, pointValidityDays);
+            }
             var codes = Enumerable.Range(0, request.Count)
                 .Select(_ => PointRedeemCodeSecurity.Generate())
                 .ToArray();
@@ -319,6 +403,7 @@ public sealed class PointRechargeService(ISqlSugarClient db, ICurrentUser curren
                 PackageId = package?.Id,
                 OrderId = order?.Id,
                 Points = points,
+                PointValidityDays = pointValidityDays,
                 Status = 0,
                 ExpiresAt = expiresAt,
                 CreatedBy = issuingUser.Id,
@@ -348,6 +433,7 @@ public sealed class PointRechargeService(ISqlSugarClient db, ICurrentUser curren
             {
                 PackageCode = package?.PackageCode,
                 Points = points,
+                ValidityDays = NormalizeValidityDays(pointValidityDays),
                 Codes = codes
             };
         }
@@ -362,9 +448,20 @@ public sealed class PointRechargeService(ISqlSugarClient db, ICurrentUser curren
         string packageCode,
         CancellationToken cancellationToken)
     {
+        if (!PointRechargePackageCatalog.IsSelectable(packageCode))
+        {
+            throw new NotFoundException("Recharge package does not exist");
+        }
+
         var package = await db.Queryable<PointRechargePackageEntity>()
             .FirstAsync(x => x.PackageCode == packageCode && x.Status == 1 && !x.IsDeleted, cancellationToken);
-        return package ?? throw new NotFoundException("Recharge package does not exist");
+        if (package is null)
+        {
+            throw new NotFoundException("Recharge package does not exist");
+        }
+
+        PointRechargePackageCatalog.EnsureSelectable(package);
+        return package;
     }
 
     private async Task<int> GetEffectivePointsAsync(
@@ -387,6 +484,7 @@ public sealed class PointRechargeService(ISqlSugarClient db, ICurrentUser curren
         OrderNo = order.OrderNo,
         PackageCode = order.PackageCode,
         Points = order.Points,
+        ValidityDays = NormalizeValidityDays(order.PointValidityDays),
         PriceAmount = order.PriceAmount,
         PriceMinorUnits = Money.ToMinorUnits(order.PriceAmount),
         Currency = order.Currency,
@@ -406,6 +504,8 @@ public sealed class PointRechargeService(ISqlSugarClient db, ICurrentUser curren
 
         return packageCode;
     }
+
+    private static int? NormalizeValidityDays(int? value) => value is > 0 ? value : null;
 
     private static IReadOnlyList<string> ParseBenefits(string? value)
     {

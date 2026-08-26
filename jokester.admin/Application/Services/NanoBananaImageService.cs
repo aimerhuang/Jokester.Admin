@@ -43,6 +43,8 @@ public sealed class NanoBananaImageService(
     {
         var taskId = await CreateAsync(new CreateNanoBananaImageTaskRequest
         {
+            SizeMode = request.SizeMode,
+            CatalogVersion = request.CatalogVersion,
             IdempotencyKey = request.IdempotencyKey,
             SourcePromptId = request.SourcePromptId,
             Prompt = request.Prompt,
@@ -138,6 +140,13 @@ public sealed class NanoBananaImageService(
 
     public async Task<long> CreateAsync(CreateNanoBananaImageTaskRequest request, CancellationToken cancellationToken)
     {
+        if (request.SizeMode is not null || request.CatalogVersion is not null)
+        {
+            throw new AppException(
+                ErrorCodes.BadRequest,
+                MachineErrorCodes.InvalidSizeModeCombination,
+                "Nano Banana compatibility endpoints do not accept sizeMode or catalogVersion.");
+        }
         var imageCount = ValidateImageCount(request.ImageCount);
         var userId = currentUser.UserId ?? throw new AppException(ErrorCodes.Unauthorized, "User is not authenticated");
         var resolvedImageUrls = await mediaAssetService.ResolveOwnedReferenceUrlsAsync(

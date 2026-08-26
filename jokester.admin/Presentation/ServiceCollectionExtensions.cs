@@ -48,6 +48,7 @@ public static class ServiceCollectionExtensions
         services.AddSwaggerGen(options =>
         {
             options.OperationFilter<ApiResponseOperationFilter>();
+            options.OperationFilter<AiImageSizeModeOperationFilter>();
             options.SwaggerDoc("v1", new OpenApiInfo
             {
                 Title = "Jokester Admin API",

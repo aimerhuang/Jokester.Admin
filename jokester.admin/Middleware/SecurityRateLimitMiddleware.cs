@@ -9,8 +9,10 @@ namespace jokester.admin.Middleware;
 
 public sealed class SecurityRateLimitMiddleware(RequestDelegate next, ILogger<SecurityRateLimitMiddleware> logger)
 {
-    private const long MaxUploadBytesPerDay = 50L * 1024 * 1024;
-    private const long UnknownUploadChargeBytes = 10L * 1024 * 1024;
+    private const int MaxAiUploadRequestsPerMinute = 12;
+    private const int MaxBlogUploadRequestsPerMinute = 5;
+    private const long MaxBlogUploadBytesPerDay = 50L * 1024 * 1024;
+    private const long UnknownBlogUploadChargeBytes = 10L * 1024 * 1024;
     private const int MaxPartitionFieldLength = 256;
     private const string FixedWindowScript = """
         local current = redis.call('INCRBY', KEYS[1], ARGV[2])
@@ -83,8 +85,6 @@ public sealed class SecurityRateLimitMiddleware(RequestDelegate next, ILogger<Se
     {
         var method = context.Request.Method;
         var path = context.Request.Path;
-        var uploadWeight = Math.Clamp(context.Request.ContentLength ?? UnknownUploadChargeBytes, 1, MaxUploadBytesPerDay);
-
         if (HttpMethods.IsPost(method) && path.Equals("/api/auth/login"))
         {
             return
@@ -159,13 +159,20 @@ public sealed class SecurityRateLimitMiddleware(RequestDelegate next, ILogger<Se
                 new("comment-ip-1d", RateLimitPartition.Ip, 20, 86400)
             ];
         }
-        if (HttpMethods.IsPost(method)
-            && (path.Equals("/api/ai/images/upload") || path.Equals("/api/blog/media/upload")))
+        if (HttpMethods.IsPost(method) && path.Equals("/api/ai/images/upload"))
         {
+            return [new("upload-user-1m", RateLimitPartition.User, MaxAiUploadRequestsPerMinute, 60)];
+        }
+        if (HttpMethods.IsPost(method) && path.Equals("/api/blog/media/upload"))
+        {
+            var uploadWeight = Math.Clamp(
+                context.Request.ContentLength ?? UnknownBlogUploadChargeBytes,
+                1,
+                MaxBlogUploadBytesPerDay);
             return
             [
-                new("upload-user-1m", RateLimitPartition.User, 5, 60),
-                new("upload-user-bytes-1d", RateLimitPartition.User, MaxUploadBytesPerDay, 86400, Weight: uploadWeight)
+                new("blog-upload-user-1m", RateLimitPartition.User, MaxBlogUploadRequestsPerMinute, 60),
+                new("blog-upload-user-bytes-1d", RateLimitPartition.User, MaxBlogUploadBytesPerDay, 86400, Weight: uploadWeight)
             ];
         }
         if (HttpMethods.IsPost(method)

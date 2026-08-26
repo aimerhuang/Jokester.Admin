@@ -138,6 +138,19 @@ public sealed class PointDetailsTests
                 remark TEXT NULL,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE sys_user_point_bucket (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                business_key TEXT NOT NULL,
+                granted_points INTEGER NOT NULL,
+                remaining_points INTEGER NOT NULL,
+                expired_points INTEGER NOT NULL DEFAULT 0,
+                expires_at TEXT NULL,
+                spend_priority INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NULL
+            );
             """);
         db.Insertable(new SysUserEntity
         {

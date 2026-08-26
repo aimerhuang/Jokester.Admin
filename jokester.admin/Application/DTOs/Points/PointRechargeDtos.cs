@@ -54,6 +54,8 @@ public sealed class RechargeOrderDto
 
     public int Points { get; init; }
 
+    public int? ValidityDays { get; init; }
+
     public decimal PriceAmount { get; init; }
 
     public long PriceMinorUnits { get; init; }
@@ -80,6 +82,8 @@ public sealed class RedeemPointCodeResponse
 
     public int AvailablePoints { get; init; }
 
+    public DateTime? ExpiresAt { get; init; }
+
     public DateTime RedeemedAt { get; init; }
 }
 
@@ -101,6 +105,8 @@ public sealed class IssuedPointRedeemCodesResponse
     public string? PackageCode { get; init; }
 
     public int Points { get; init; }
+
+    public int? ValidityDays { get; init; }
 
     public IReadOnlyList<string> Codes { get; init; } = [];
 }

@@ -164,7 +164,9 @@ public sealed class PromptLibraryContractTests
         var controller = new AiImagesController(
             aiImageService.Object,
             nanoBananaService.Object,
-            modelConfigService.Object);
+            modelConfigService.Object,
+            Mock.Of<IAiImageCatalogService>(),
+            Mock.Of<IAiSizeModeRolloutPolicy>());
 
         await controller.Generate(gptGenerate, default);
         await controller.Create(gptCreate, default);

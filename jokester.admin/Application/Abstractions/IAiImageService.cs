@@ -22,9 +22,13 @@ public interface IAiImageService
 
     Task<GenerateAiImageResponse> GenerateFromResolvedAsync(string prompt, string? modelCode, ResolveAiImageParametersResponse parameters, IReadOnlyList<string> referenceImageUrls, string? maskImageUrl, long ownerUserId, CancellationToken cancellationToken);
 
+    Task<GenerateAiImageResponse> GenerateFromResolvedRoutesAsync(string prompt, IReadOnlyList<ResolvedAiImageModelConfig> routes, ResolveAiImageParametersResponse parameters, IReadOnlyList<string> referenceImageUrls, string? maskImageUrl, long ownerUserId, CancellationToken cancellationToken);
+
     Task<long> CreateAsync(CreateAiImageTaskRequest request, CancellationToken cancellationToken);
 
     Task<IReadOnlyList<long>> CreateTasksAsync(CreateAiImageTaskRequest request, CancellationToken cancellationToken);
+
+    Task<CreateAiImageTasksResponse> CreateTasksResponseAsync(CreateAiImageTaskRequest request, CancellationToken cancellationToken);
 
     Task SetFavoriteAsync(long id, FavoriteAiImageRequest request, CancellationToken cancellationToken);
 

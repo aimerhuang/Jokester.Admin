@@ -23,6 +23,9 @@ public sealed class PointRechargeOrderEntity
     [SugarColumn(ColumnName = "points")]
     public int Points { get; set; }
 
+    [SugarColumn(ColumnName = "point_validity_days")]
+    public int? PointValidityDays { get; set; }
+
     [SugarColumn(ColumnName = "price_amount")]
     public decimal PriceAmount { get; set; }
 

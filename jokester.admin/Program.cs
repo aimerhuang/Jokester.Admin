@@ -13,12 +13,14 @@ using System.Net;
 var rootDirectory = Directory.GetCurrentDirectory();
 var isAiMediaMigration = args.Contains("--migrate-ai-media", StringComparer.OrdinalIgnoreCase);
 var isLegalDocumentConfiguration = args.Contains("--configure-legal-documents", StringComparer.OrdinalIgnoreCase);
-if (isAiMediaMigration && isLegalDocumentConfiguration)
+var isAiImageCatalogConfiguration = args.Contains("--configure-ai-image-catalog", StringComparer.OrdinalIgnoreCase);
+if (new[] { isAiMediaMigration, isLegalDocumentConfiguration, isAiImageCatalogConfiguration }.Count(x => x) > 1)
 {
     throw new InvalidOperationException("Only one maintenance command can run at a time.");
 }
 var applicationArgs = args
     .Where(x => !string.Equals(x, "--configure-legal-documents", StringComparison.OrdinalIgnoreCase))
+    .Where(x => !string.Equals(x, "--configure-ai-image-catalog", StringComparison.OrdinalIgnoreCase))
     .ToArray();
 DotEnvConfiguration.LoadToEnvironment(
     rootDirectory,
@@ -44,6 +46,7 @@ builder.Logging.AddDebug();
 var securityOptions = builder.Configuration.GetSection(SecurityOptions.SectionName).Get<SecurityOptions>() ?? new SecurityOptions();
 if (!isAiMediaMigration
     && !isLegalDocumentConfiguration
+    && !isAiImageCatalogConfiguration
     && !builder.Environment.IsDevelopment()
     && securityOptions.AllowedOrigins.Length == 0)
 {
@@ -156,6 +159,22 @@ if (isLegalDocumentConfiguration)
         + $"types={string.Join(',', result.DocumentTypes)}, "
         + $"providers={string.Join(',', result.ProviderCodes)}, "
         + $"effectiveAt={result.EffectiveAt:O}");
+    return;
+}
+
+if (isAiImageCatalogConfiguration)
+{
+    var options = builder.Configuration
+        .GetSection(AiImageCatalogReleaseConfigurationOptions.SectionName)
+        .Get<AiImageCatalogReleaseConfigurationOptions>() ?? new AiImageCatalogReleaseConfigurationOptions();
+    await using var scope = app.Services.CreateAsyncScope();
+    var db = scope.ServiceProvider.GetRequiredService<SqlSugar.ISqlSugarClient>();
+    var result = await AiImageCatalogReleaseConfiguration.RunAsync(db, options);
+    Console.WriteLine(
+        $"Configured AI image catalog {result.ModelCode}/{result.CatalogVersion}: "
+        + $"releaseId={result.ModelReleaseId}, explicitRoutes={result.ExplicitRouteCount}, "
+        + $"autoRoutes={result.AutoRouteCount}, explicitPrices={result.ExplicitPriceCount}, "
+        + $"autoPrices={result.AutoPriceCount}, reused={result.ReusedExistingRelease}");
     return;
 }
 

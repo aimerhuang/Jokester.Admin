@@ -12,7 +12,7 @@ namespace jokester.admin.Tests;
 public sealed class AiImageParameterOptionsTests
 {
     [Fact]
-    public async Task GetParameterOptionsAsync_ConvertsPriceAfterDatabaseQuery()
+    public async Task GetParameterOptionsAsync_ConvertsPriceAndExcludesAutoAspectRatio()
     {
         SQLitePCL.Batteries_V2.Init();
         using var db = new SqlSugarClient(new ConnectionConfig
@@ -62,6 +62,29 @@ public sealed class AiImageParameterOptionsTests
             Status = 1,
             CreatedAt = DateTime.UtcNow
         }).ExecuteCommand();
+        db.Insertable(new[]
+        {
+            new AiImageParameterEntity
+            {
+                ParamType = "aspect_ratio",
+                ParamCode = "auto",
+                ParamName = "Auto",
+                Sort = 1,
+                Status = 1,
+                CreatedAt = DateTime.UtcNow
+            },
+            new AiImageParameterEntity
+            {
+                ParamType = "aspect_ratio",
+                ParamCode = "1:1",
+                ParamName = "1:1",
+                ValueInt1 = 1,
+                ValueInt2 = 1,
+                Sort = 2,
+                Status = 1,
+                CreatedAt = DateTime.UtcNow
+            }
+        }).ExecuteCommand();
         db.Insertable(new AiImagePointPriceEntity
         {
             ModelCode = "gpt-image-2",
@@ -85,11 +108,14 @@ public sealed class AiImageParameterOptionsTests
             Mock.Of<IAiImageTaskQueue>(),
             Mock.Of<IAiImageAdmissionService>(),
             Options.Create(new OpenAiOptions()),
+            Options.Create(new AiImageSizeModeOptions()),
             Options.Create(new PromptLibraryOptions()),
             Mock.Of<IAiMediaPathResolver>(),
             Mock.Of<IAiPromptFilter>(),
             Mock.Of<IUserConsentService>(),
             Mock.Of<IMediaAssetService>(),
+            Mock.Of<IAiImageCatalogService>(),
+            Mock.Of<IAiSizeModeRolloutPolicy>(),
             NullLogger<AiImageService>.Instance);
 
         var result = await service.GetParameterOptionsAsync(default);
@@ -97,5 +123,6 @@ public sealed class AiImageParameterOptionsTests
         var price = Assert.Single(result.PointPrices);
         Assert.Equal(1.235m, price.PriceAmount);
         Assert.Equal(124, price.PriceMinorUnits);
+        Assert.Equal(["1:1"], result.AspectRatios.Select(x => x.Code));
     }
 }

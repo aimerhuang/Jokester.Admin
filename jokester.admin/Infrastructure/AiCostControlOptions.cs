@@ -25,4 +25,6 @@ public sealed class AiCostControlOptions
     public int ProviderFailureWindowSeconds { get; set; } = 300;
 
     public int ProviderCircuitOpenSeconds { get; set; } = 60;
+
+    public int OutboxBindDeadlineMinutes { get; set; } = 120;
 }

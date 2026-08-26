@@ -78,8 +78,55 @@ public sealed class MobileSwaggerContractTests
         }
 
         var schemas = document.RootElement.GetProperty("components").GetProperty("schemas");
+        var emailCodeRequest = schemas.GetProperty("SendRegisterEmailCodeRequest");
+        var emailCodeRequestProperties = emailCodeRequest
+            .GetProperty("properties")
+            .EnumerateObject()
+            .Select(property => property.Name)
+            .ToArray();
+        Assert.Equal(["email"], emailCodeRequestProperties);
+
+        var registerRequest = schemas.GetProperty("RegisterRequest");
+        var registerRequestProperties = registerRequest
+            .GetProperty("properties")
+            .EnumerateObject()
+            .Select(property => property.Name)
+            .ToArray();
+        Assert.Equal(["email", "emailCode", "password"], registerRequestProperties);
+
         var emailCodeResponse = schemas.GetProperty("SendRegisterEmailCodeResponse");
         Assert.True(emailCodeResponse.GetProperty("properties").TryGetProperty("retryAfterSeconds", out _));
+
+        var userProfile = schemas.GetProperty("UserProfileDto").GetProperty("properties");
+        Assert.True(userProfile.TryGetProperty("membership", out _));
+        var membership = schemas.GetProperty("UserMembershipDto").GetProperty("properties");
+        Assert.True(membership.TryGetProperty("tierCode", out _));
+        Assert.True(membership.TryGetProperty("status", out _));
+        Assert.Equal("string", membership.GetProperty("expiresAt").GetProperty("type").GetString());
+        Assert.Equal("date-time", membership.GetProperty("expiresAt").GetProperty("format").GetString());
+
+        var pricingOperation = FindPath(paths, "/api/ai/images/pricing-options").GetProperty("get");
+        var pricingSchema = pricingOperation
+            .GetProperty("responses")
+            .GetProperty("200")
+            .GetProperty("content")
+            .GetProperty("application/json")
+            .GetProperty("schema");
+        var pricingVariants = pricingSchema.GetProperty("oneOf").EnumerateArray().ToArray();
+        Assert.Equal(2, pricingVariants.Length);
+        Assert.Contains(pricingVariants, variant =>
+            variant.GetProperty("$ref").GetString()!.Contains("AiImageCatalogPricingResponse", StringComparison.Ordinal));
+
+        var pricingHeaders = pricingOperation
+            .GetProperty("parameters")
+            .EnumerateArray()
+            .Where(parameter => parameter.GetProperty("in").GetString() == "header")
+            .Select(parameter => parameter.GetProperty("name").GetString())
+            .ToArray();
+        Assert.Contains("X-Client-Capabilities", pricingHeaders);
+        Assert.Contains("X-Client-Platform", pricingHeaders);
+        Assert.Contains("X-Client-Version", pricingHeaders);
+        Assert.Contains("X-Client-Build", pricingHeaders);
     }
 
     private static JsonElement FindPath(JsonElement paths, string expected)

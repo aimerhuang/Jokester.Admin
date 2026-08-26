@@ -23,6 +23,8 @@ public sealed class AppleTransactionFulfillmentDto
 
     public int AvailablePoints { get; init; }
 
+    public DateTime? ExpiresAt { get; init; }
+
     public DateTime FulfilledAt { get; init; }
 }
 

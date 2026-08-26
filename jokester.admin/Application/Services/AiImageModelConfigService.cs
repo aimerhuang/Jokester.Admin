@@ -42,8 +42,17 @@ public sealed class AiImageModelConfigService(ISqlSugarClient db) : IAiImageMode
             .OrderBy(x => x.Sort)
             .OrderBy(x => x.Id)
             .ToListAsync(cancellationToken);
+        var resolutions = parameters
+            .Where(x => x.ParamType == "resolution")
+            .Select(x => (x.ParamCode ?? string.Empty).Trim().ToLowerInvariant())
+            .Where(x => x.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
         var qualities = parameters.Where(x => x.ParamType == "quality").Select(x => x.ParamCode).Distinct().ToArray();
         var aspectRatios = parameters.Where(x => x.ParamType == "aspect_ratio").Select(x => x.ParamCode).Distinct().ToArray();
+        var explicitAspectRatios = aspectRatios
+            .Where(x => !string.Equals(x, "auto", StringComparison.OrdinalIgnoreCase))
+            .ToArray();
         var enabledPrices = await db.Queryable<AiImagePointPriceEntity>()
             .Where(x => !x.IsDeleted && x.Status == 1)
             .OrderBy(x => x.Sort)
@@ -75,11 +84,10 @@ public sealed class AiImageModelConfigService(ISqlSugarClient db) : IAiImageMode
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .ToArray();
                 var hasGenericRoute = group.Any(x => string.IsNullOrWhiteSpace(x.ResolutionCode));
-                var supportedResolutions = hasGenericRoute
-                    ? pricedResolutions
-                    : routedResolutions
-                        .Where(x => pricedResolutions.Contains(x, StringComparer.OrdinalIgnoreCase))
-                        .ToArray();
+                var supportedResolutions = resolutions
+                    .Where(x => pricedResolutions.Contains(x, StringComparer.OrdinalIgnoreCase))
+                    .Where(x => hasGenericRoute || routedResolutions.Contains(x, StringComparer.OrdinalIgnoreCase))
+                    .ToArray();
                 return new AiImageModelOptionDto
                 {
                     Code = modelCode,
@@ -95,7 +103,7 @@ public sealed class AiImageModelConfigService(ISqlSugarClient db) : IAiImageMode
                     },
                     Resolutions = supportedResolutions,
                     Qualities = isGeminiImage ? [] : qualities,
-                    AspectRatios = aspectRatios,
+                    AspectRatios = isGeminiImage ? aspectRatios : explicitAspectRatios,
                     Sort = config.Sort
                 };
             })

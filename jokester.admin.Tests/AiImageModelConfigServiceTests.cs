@@ -88,20 +88,100 @@ public sealed class AiImageModelConfigServiceTests
         Assert.Equal(["1:1"], model.AspectRatios);
     }
 
+    [Fact]
+    public async Task GetEnabledModelsAsync_Includes2K_WhenGenericRouteAndPriceAreEnabled()
+    {
+        using var context = new TestContext();
+        context.Seed(
+            CreateConfig(
+                1,
+                AiImageModelConfigService.PrimaryRouteRole,
+                "gpt-image-2",
+                "https://api.openai.com/v1",
+                resolutionCode: string.Empty));
+        context.SeedParameters(
+            CreateParameter(1, "resolution", "1k"),
+            CreateParameter(2, "resolution", "2k"),
+            CreateParameter(3, "resolution", "4k"),
+            CreateParameter(4, "quality", "med"),
+            CreateParameter(5, "aspect_ratio", "16:9"));
+        context.SeedPrices(
+            CreatePrice(1, "1k"),
+            CreatePrice(2, "2k"),
+            CreatePrice(3, "4k"));
+
+        var model = Assert.Single(await context.Service.GetEnabledModelsAsync(default));
+
+        Assert.Equal(["1k", "2k", "4k"], model.Resolutions);
+    }
+
+    [Fact]
+    public async Task GetEnabledModelsAsync_Excludes2K_WhenItsParameterIsDisabled()
+    {
+        using var context = new TestContext();
+        context.Seed(
+            CreateConfig(
+                1,
+                AiImageModelConfigService.PrimaryRouteRole,
+                "gpt-image-2",
+                "https://api.openai.com/v1",
+                resolutionCode: "2k"));
+        context.SeedParameters(
+            CreateParameter(1, "resolution", "1k"),
+            CreateParameter(2, "quality", "med"),
+            CreateParameter(3, "aspect_ratio", "16:9"));
+        context.SeedPrices(CreatePrice(1, "2k"));
+
+        var model = Assert.Single(await context.Service.GetEnabledModelsAsync(default));
+
+        Assert.Empty(model.Resolutions);
+    }
+
+    [Fact]
+    public async Task GetEnabledModelsAsync_ExcludesAutoForGptAndKeepsItForGemini()
+    {
+        using var context = new TestContext();
+        context.Seed(
+            CreateConfig(1, AiImageModelConfigService.PrimaryRouteRole, "gpt-image-2", "https://gpt.example/v1"),
+            CreateConfig(
+                2,
+                AiImageModelConfigService.PrimaryRouteRole,
+                "nano-banana-2",
+                "https://gemini.example/v1",
+                modelCode: AiImageModelConfigService.DefaultNanoBananaModelCode,
+                provider: AiImageModelConfigService.GeminiImageProtocol));
+        context.SeedParameters(
+            CreateParameter(1, "resolution", "1k"),
+            CreateParameter(2, "quality", "med"),
+            CreateParameter(3, "aspect_ratio", "auto"),
+            CreateParameter(4, "aspect_ratio", "1:1"));
+        context.SeedPrices(
+            CreatePrice(1, "1k"),
+            CreatePrice(2, "1k", AiImageModelConfigService.DefaultNanoBananaModelCode));
+
+        var models = (await context.Service.GetEnabledModelsAsync(default))
+            .ToDictionary(x => x.Code, StringComparer.OrdinalIgnoreCase);
+
+        Assert.Equal(["1:1"], models[AiImageModelConfigService.DefaultGptModelCode].AspectRatios);
+        Assert.Equal(["auto", "1:1"], models[AiImageModelConfigService.DefaultNanoBananaModelCode].AspectRatios);
+    }
+
     private static AiImageModelConfigEntity CreateConfig(
         long id,
         string routeRole,
         string providerModel,
         string baseUrl,
         int status = 1,
-        string resolutionCode = "1k")
+        string resolutionCode = "1k",
+        string modelCode = AiImageModelConfigService.DefaultGptModelCode,
+        string provider = AiImageModelConfigService.OpenAiImageProtocol)
     {
         return new AiImageModelConfigEntity
         {
             Id = id,
-            ModelCode = "gpt-image-2",
+            ModelCode = modelCode,
             ModelName = "GPT Image 2",
-            Provider = AiImageModelConfigService.OpenAiImageProtocol,
+            Provider = provider,
             ProviderModel = providerModel,
             ResolutionCode = resolutionCode,
             RouteRole = routeRole,
@@ -126,10 +206,13 @@ public sealed class AiImageModelConfigServiceTests
         CreatedAt = DateTime.UtcNow
     };
 
-    private static AiImagePointPriceEntity CreatePrice(long id, string resolutionCode) => new()
+    private static AiImagePointPriceEntity CreatePrice(
+        long id,
+        string resolutionCode,
+        string modelCode = AiImageModelConfigService.DefaultGptModelCode) => new()
     {
         Id = id,
-        ModelCode = "gpt-image-2",
+        ModelCode = modelCode,
         ResolutionCode = resolutionCode,
         QualityCode = "med",
         Points = 10,

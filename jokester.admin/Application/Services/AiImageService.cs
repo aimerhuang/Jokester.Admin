@@ -1,5 +1,6 @@
 using jokester.admin.Application.Abstractions;
 using jokester.admin.Application.DTOs.AiImages;
+using jokester.admin.Application.DTOs.Points;
 using jokester.admin.Application.Models.AiPromptFilter;
 using jokester.admin.Application.Security;
 using jokester.admin.Common;
@@ -26,11 +27,14 @@ public sealed class AiImageService(
     IAiImageTaskQueue taskQueue,
     IAiImageAdmissionService admissionService,
     IOptions<OpenAiOptions> openAiOptions,
+    IOptions<AiImageSizeModeOptions> sizeModeOptions,
     IOptions<PromptLibraryOptions> promptLibraryOptions,
     IAiMediaPathResolver mediaPathResolver,
     IAiPromptFilter promptFilter,
     IUserConsentService userConsentService,
     IMediaAssetService mediaAssetService,
+    IAiImageCatalogService catalogService,
+    IAiSizeModeRolloutPolicy rolloutPolicy,
     ILogger<AiImageService> logger) : IAiImageService
 {
     private const string MimeType = "image/png";
@@ -40,6 +44,7 @@ public sealed class AiImageService(
     private const long MaxGeneratedImageSizeBytes = 25 * 1024 * 1024;
     private const int ProviderDimensionQuantum = 16;
     private const int ProviderMaxLongSide = 3840;
+    private const int ProviderMinTotalPixels = 655_360;
     private const int ProviderMaxTotalPixels = 8_294_400;
     private static readonly TimeSpan GenerateWaitTimeout = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan GenerateWaitPollInterval = TimeSpan.FromSeconds(1);
@@ -94,7 +99,11 @@ public sealed class AiImageService(
 
         var entities = await dbQuery.ToPageListAsync(query.PageIndex, query.PageSize, total);
         var favoriteLookup = await GetFavoriteUrlLookupAsync(entities.Select(x => x.Id).ToArray(), currentUserId, cancellationToken);
-        var items = entities.Select(x => MapTaskDto(x, favoriteLookup.GetValueOrDefault(x.Id, []))).ToArray();
+        var catalogLookup = await GetCatalogVersionLookupAsync(entities, cancellationToken);
+        var items = entities.Select(x => MapTaskDto(
+            x,
+            favoriteLookup.GetValueOrDefault(x.Id, []),
+            x.ModelReleaseId.HasValue ? catalogLookup.GetValueOrDefault(x.ModelReleaseId.Value) : null)).ToArray();
 
         return new PagedResult<AiImageTaskDto>
         {
@@ -137,7 +146,9 @@ public sealed class AiImageService(
         {
             Resolutions = MapOptions(parameters, ResolutionType),
             Qualities = MapOptions(parameters, QualityType),
-            AspectRatios = MapOptions(parameters, AspectRatioType),
+            AspectRatios = MapOptions(parameters, AspectRatioType)
+                .Where(x => !string.Equals(x.Code, "auto", StringComparison.OrdinalIgnoreCase))
+                .ToArray(),
             PointPrices = pointPrices
         };
     }
@@ -203,20 +214,12 @@ public sealed class AiImageService(
         var quality = RequireParameter(parameters, QualityType, qualityCode);
         var providerQuality = string.IsNullOrWhiteSpace(quality.ProviderValue) ? quality.ParamCode : quality.ProviderValue.Trim();
 
-        // When the aspect ratio is "auto", skip resolution/size calculation and let the
-        // provider decide the dimensions by passing size = "auto" straight through.
         if (string.Equals(aspectRatioCode, "auto", StringComparison.OrdinalIgnoreCase))
         {
-            return new ResolveAiImageParametersResponse
-            {
-                ResolutionCode = resolutionCode,
-                QualityCode = quality.ParamCode,
-                AspectRatioCode = "auto",
-                Width = 0,
-                Height = 0,
-                Size = "auto",
-                ProviderQuality = providerQuality
-            };
+            throw new AppException(
+                ErrorCodes.BadRequest,
+                MachineErrorCodes.AutoSizeNotSupported,
+                "当前站点配置不支持自动尺寸");
         }
 
         var resolution = RequireParameter(parameters, ResolutionType, resolutionCode);
@@ -260,26 +263,61 @@ public sealed class AiImageService(
         var isLandscapeOrSquare = ratioWidth >= ratioHeight;
         var longRatio = Math.Max(ratioWidth, ratioHeight);
         var shortRatio = Math.Min(ratioWidth, ratioHeight);
+        if ((long)longRatio > (long)shortRatio * 3)
+        {
+            throw new AppException(ErrorCodes.BadRequest, "Invalid image aspect ratio parameter");
+        }
 
         for (var longSide = cappedLongSide; longSide >= ProviderDimensionQuantum; longSide -= ProviderDimensionQuantum)
         {
-            var shortSide = RoundToNearestMultiple((double)longSide * shortRatio / longRatio, ProviderDimensionQuantum);
-            if (shortSide <= 0)
+            var dimensions = CalculateDimensionsForLongSide(longSide, shortRatio, longRatio, isLandscapeOrSquare);
+            if (IsValidProviderSize(dimensions.Width, dimensions.Height))
             {
-                continue;
+                return dimensions;
             }
+        }
 
-            var width = isLandscapeOrSquare ? longSide : shortSide;
-            var height = isLandscapeOrSquare ? shortSide : longSide;
-            if (width <= ProviderMaxLongSide
-                && height <= ProviderMaxLongSide
-                && (long)width * height <= ProviderMaxTotalPixels)
+        // Wide 1K ratios can fall below the provider's minimum pixel count. Grow only
+        // as much as needed while preserving the requested ratio and 16px alignment.
+        for (var longSide = cappedLongSide + ProviderDimensionQuantum;
+             longSide <= ProviderMaxLongSide;
+             longSide += ProviderDimensionQuantum)
+        {
+            var dimensions = CalculateDimensionsForLongSide(longSide, shortRatio, longRatio, isLandscapeOrSquare);
+            if (IsValidProviderSize(dimensions.Width, dimensions.Height))
             {
-                return (width, height);
+                return dimensions;
             }
         }
 
         throw new AppException(ErrorCodes.BadRequest, "Invalid image size parameter");
+    }
+
+    private static (int Width, int Height) CalculateDimensionsForLongSide(
+        int longSide,
+        int shortRatio,
+        int longRatio,
+        bool isLandscapeOrSquare)
+    {
+        var shortSide = RoundToNearestMultiple(
+            (double)longSide * shortRatio / longRatio,
+            ProviderDimensionQuantum);
+        return isLandscapeOrSquare ? (longSide, shortSide) : (shortSide, longSide);
+    }
+
+    private static bool IsValidProviderSize(int width, int height)
+    {
+        var longSide = Math.Max(width, height);
+        var shortSide = Math.Min(width, height);
+        var totalPixels = (long)width * height;
+        return width > 0
+            && height > 0
+            && width % ProviderDimensionQuantum == 0
+            && height % ProviderDimensionQuantum == 0
+            && longSide <= ProviderMaxLongSide
+            && (long)longSide <= (long)shortSide * 3
+            && totalPixels >= ProviderMinTotalPixels
+            && totalPixels <= ProviderMaxTotalPixels;
     }
 
     private static int RoundDownToMultiple(int value, int multiple)
@@ -319,7 +357,11 @@ public sealed class AiImageService(
         }
 
         var favoriteLookup = await GetFavoriteUrlLookupAsync([entity.Id], currentUserId, cancellationToken);
-        return MapTaskDto(entity, favoriteLookup.GetValueOrDefault(entity.Id, []));
+        var catalogLookup = await GetCatalogVersionLookupAsync([entity], cancellationToken);
+        return MapTaskDto(
+            entity,
+            favoriteLookup.GetValueOrDefault(entity.Id, []),
+            entity.ModelReleaseId.HasValue ? catalogLookup.GetValueOrDefault(entity.ModelReleaseId.Value) : null);
     }
 
     public async Task<GenerateAiImageResponse> GenerateAsync(GenerateAiImageRequest request, CancellationToken cancellationToken)
@@ -339,6 +381,8 @@ public sealed class AiImageService(
                 ModelCode = request.ModelCode,
                 ModelName = request.ModelName,
                 ImageCount = request.ImageCount,
+                SizeMode = request.SizeMode,
+                CatalogVersion = request.CatalogVersion,
                 Resolution = request.Resolution,
                 ResolutionCode = request.ResolutionCode,
                 QualityCode = request.QualityCode,
@@ -348,6 +392,11 @@ public sealed class AiImageService(
                 MaskImageUrl = request.MaskImageUrl,
                 MaskAssetId = request.MaskAssetId
             }, cancellationToken);
+
+            if (request.SizeMode is not null || request.CatalogVersion is not null)
+            {
+                return await WaitForVersionedGenerateResponseAsync(taskIds, cancellationToken);
+            }
 
             var generatedTasks = await Task.WhenAll(
                 taskIds.Select(taskId => WaitForGeneratedTaskAsync(taskId, cancellationToken)));
@@ -375,7 +424,7 @@ public sealed class AiImageService(
                 TaskIds = taskIds,
                 SourcePromptId = firstTask.SourcePromptId,
                 ModelName = firstTask.ModelName,
-                ModelCode = firstTask.ModelName,
+                ModelCode = firstTask.ModelCode,
                 Prompt = firstTask.Prompt,
                 ResolutionCode = firstTask.ResolutionCode,
                 QualityCode = firstTask.QualityCode,
@@ -429,10 +478,37 @@ public sealed class AiImageService(
                 $"Model {requestedModelCode} is not supported by this endpoint. Use {AiImageModelConfigService.DefaultGptModelCode} on /api/ai/images/generate, or call /api/ai/images/nanoBananaImage/generate for Nano Banana.");
         }
 
+        return await GenerateFromResolvedRoutesAsync(
+            normalizedPrompt,
+            modelRoutes,
+            parameters,
+            normalizedReferenceImageUrls,
+            normalizedMaskImageUrl,
+            ownerUserId,
+            cancellationToken);
+    }
+
+    public async Task<GenerateAiImageResponse> GenerateFromResolvedRoutesAsync(
+        string prompt,
+        IReadOnlyList<ResolvedAiImageModelConfig> routes,
+        ResolveAiImageParametersResponse parameters,
+        IReadOnlyList<string> referenceImageUrls,
+        string? maskImageUrl,
+        long ownerUserId,
+        CancellationToken cancellationToken)
+    {
+        if (routes.Count == 0)
+        {
+            throw new AppException(ErrorCodes.ServiceUnavailable, MachineErrorCodes.ServiceUnavailable, "The model release has no executable route.");
+        }
+        var normalizedPrompt = AiImagePromptValidator.Validate(prompt);
+        var normalizedReferenceImageUrls = ValidateReferenceImageUrls(referenceImageUrls);
+        var normalizedMaskImageUrl = ValidateMaskImageUrl(maskImageUrl, normalizedReferenceImageUrls);
+        EnsureOwnedPrivateMediaUrls(ownerUserId, normalizedReferenceImageUrls, normalizedMaskImageUrl);
         httpClient.DefaultRequestHeaders.Authorization = null;
 
         var generatedImage = await GenerateImageWithFallbackAsync(
-            modelRoutes,
+            routes,
             normalizedPrompt,
             parameters,
             normalizedReferenceImageUrls,
@@ -447,15 +523,35 @@ public sealed class AiImageService(
         {
             TaskId = 0,
             ModelName = generatedImage.Route.ModelName,
-            ModelCode = modelConfig.ModelCode,
+            ModelCode = generatedImage.Route.ModelCode,
+            SizeContractVersion = parameters.SizeContractVersion,
+            CatalogVersion = parameters.CatalogVersion,
+            SizeMode = parameters.SizeMode,
+            RequestState = "active",
+            BatchStatus = "succeeded",
+            Results =
+            [
+                new AiImageGenerateResultDto
+                {
+                    Ordinal = 0,
+                    TaskId = 0,
+                    Status = "succeeded",
+                    Url = savedImage.Url,
+                    OutputWidth = savedImage.Width,
+                    OutputHeight = savedImage.Height,
+                    OutputSize = $"{savedImage.Width}x{savedImage.Height}",
+                    MimeType = savedImage.MimeType,
+                    RefundedPoints = 0
+                }
+            ],
             ProviderModel = generatedImage.Route.ProviderModel,
             Prompt = normalizedPrompt,
-            ResolutionCode = parameters.ResolutionCode,
+            ResolutionCode = parameters.ResolutionCode ?? string.Empty,
             QualityCode = parameters.QualityCode,
-            AspectRatioCode = parameters.AspectRatioCode,
-            Width = parameters.Width,
-            Height = parameters.Height,
-            Size = parameters.Size,
+            AspectRatioCode = parameters.AspectRatioCode ?? string.Empty,
+            Width = parameters.SizeMode == AiImageCatalogService.AutoSizeMode ? savedImage.Width : parameters.Width.GetValueOrDefault(),
+            Height = parameters.SizeMode == AiImageCatalogService.AutoSizeMode ? savedImage.Height : parameters.Height.GetValueOrDefault(),
+            Size = parameters.SizeMode == AiImageCatalogService.AutoSizeMode ? $"{savedImage.Width}x{savedImage.Height}" : parameters.Size,
             Quality = parameters.ProviderQuality,
             MimeType = savedImage.MimeType,
             Url = savedImage.Url,
@@ -539,7 +635,12 @@ public sealed class AiImageService(
             cancellationToken);
         var providerResult = ReadFirstOpenAiImage(document.RootElement);
         var savedImage = string.IsNullOrWhiteSpace(providerResult.Base64)
-            ? await DownloadImageAsBase64Async(providerResult.Url!, ownerUserId, cancellationToken)
+            ? await DownloadImageAsBase64Async(
+                providerResult.Url!,
+                modelConfig,
+                parameters.SizeContractVersion == AiImageCatalogService.SizeContractVersion,
+                ownerUserId,
+                cancellationToken)
             : await SaveImageAsync(providerResult.Base64!, ownerUserId, cancellationToken);
         return new GeneratedProviderImage(providerResult, savedImage, modelConfig);
     }
@@ -612,8 +713,9 @@ public sealed class AiImageService(
             parameters.ProviderQuality,
             referenceImageUrls.Count);
 
-        using var response = await httpClient.SendAsync(httpRequest, cancellationToken);
-        var body = await response.Content.ReadAsStringAsync(cancellationToken);
+        using var response = await httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        var maxProviderResponseBytes = checked((int)(Math.Max(MaxGeneratedImageSizeBytes, sizeModeOptions.Value.AutoMaxOutputBytes) * 4 / 3 + 1_048_576));
+        var body = await ReadUtf8ContentLimitedAsync(response.Content, maxProviderResponseBytes, cancellationToken);
         JsonDocument document;
         try
         {
@@ -634,6 +736,34 @@ public sealed class AiImageService(
             httpRequest.RequestUri?.ToString() ?? string.Empty,
             body,
             document);
+    }
+
+    private static async Task<string> ReadUtf8ContentLimitedAsync(
+        HttpContent content,
+        int maxBytes,
+        CancellationToken cancellationToken)
+    {
+        if (content.Headers.ContentLength is > 0 && content.Headers.ContentLength > maxBytes)
+        {
+            throw new AppException(ErrorCodes.BadRequest, MachineErrorCodes.ProviderOutputInvalid, "Image provider response exceeded the allowed size");
+        }
+        await using var source = await content.ReadAsStreamAsync(cancellationToken);
+        await using var buffer = new MemoryStream();
+        var chunk = new byte[81920];
+        while (true)
+        {
+            var read = await source.ReadAsync(chunk, cancellationToken);
+            if (read == 0)
+            {
+                break;
+            }
+            if (buffer.Length + read > maxBytes)
+            {
+                throw new AppException(ErrorCodes.BadRequest, MachineErrorCodes.ProviderOutputInvalid, "Image provider response exceeded the allowed size");
+            }
+            await buffer.WriteAsync(chunk.AsMemory(0, read), cancellationToken);
+        }
+        return System.Text.Encoding.UTF8.GetString(buffer.GetBuffer(), 0, checked((int)buffer.Length));
     }
 
     private async Task<AiImageTaskDto> WaitForGeneratedTaskAsync(long taskId, CancellationToken cancellationToken)
@@ -667,14 +797,145 @@ public sealed class AiImageService(
             ?? throw new NotFoundException($"AI image task does not exist: {taskId}");
     }
 
+    private async Task<GenerateAiImageResponse> WaitForVersionedGenerateResponseAsync(
+        IReadOnlyList<long> taskIds,
+        CancellationToken cancellationToken)
+    {
+        var userId = currentUser.UserId
+            ?? throw new AppException(ErrorCodes.Unauthorized, MachineErrorCodes.Unauthorized, "User is not authenticated");
+        var orderedIds = taskIds.ToArray();
+        var deadline = DateTime.UtcNow.Add(GenerateWaitTimeout);
+        List<AiImageTaskEntity> tasks;
+        while (true)
+        {
+            tasks = await db.Queryable<AiImageTaskEntity>()
+                .Where(x => x.UserId == userId && orderedIds.Contains(x.Id))
+                .ToListAsync(cancellationToken);
+            if (tasks.Count != orderedIds.Length)
+            {
+                throw new AppException(
+                    ErrorCodes.Conflict,
+                    MachineErrorCodes.LegacyIdempotencyUnverifiable,
+                    "The durable AI image request batch is incomplete.");
+            }
+            if (tasks.All(x => !IsTaskActive(x.Status)) || DateTime.UtcNow >= deadline)
+            {
+                break;
+            }
+            await Task.Delay(GenerateWaitPollInterval, cancellationToken);
+        }
+
+        var taskLookup = tasks.ToDictionary(x => x.Id);
+        var orderedTasks = orderedIds.Select(id => taskLookup[id]).ToArray();
+        string? catalogVersion = null;
+        var releaseId = orderedTasks[0].ModelReleaseId;
+        if (releaseId.HasValue)
+        {
+            catalogVersion = await db.Queryable<AiImageModelReleaseEntity>()
+                .Where(x => x.Id == releaseId.Value)
+                .Select(x => x.CatalogVersion)
+                .FirstAsync(cancellationToken);
+        }
+
+        var results = orderedTasks.Select((task, ordinal) =>
+        {
+            var url = task.IsDeleted ? null : DeserializeImageUrls(task.ResultUrls).FirstOrDefault();
+            var succeeded = task.Status == 1 && !task.IsDeleted;
+            var failed = task.Status == 2 && !task.IsDeleted;
+            return new AiImageGenerateResultDto
+            {
+                Ordinal = ordinal,
+                TaskId = task.Id,
+                Status = MapTaskStatus(task.Status),
+                IsDeleted = task.IsDeleted,
+                Url = succeeded ? url : null,
+                OutputWidth = succeeded ? task.OutputWidth : null,
+                OutputHeight = succeeded ? task.OutputHeight : null,
+                OutputSize = succeeded ? task.OutputSize : null,
+                MimeType = succeeded ? task.OutputMimeType : null,
+                FailureCode = failed ? task.FailureCode : null,
+                FailureStage = failed ? task.FailureStage : null,
+                Retryable = failed ? task.Retryable : null,
+                RefundedPoints = failed ? task.RefundedPoints : task.Status == 1 ? 0 : null
+            };
+        }).ToArray();
+        var firstTask = orderedTasks[0];
+        var firstSucceeded = results.FirstOrDefault(x => x.Status == "succeeded" && !x.IsDeleted && x.Url is not null);
+        var batchStatus = orderedTasks.Any(x => IsTaskActive(x.Status))
+            ? "processing"
+            : orderedTasks.All(x => x.Status == 1)
+                ? "succeeded"
+                : orderedTasks.All(x => x.Status == 2)
+                    ? "failed"
+                    : "partial";
+        var compatibilityWidth = firstTask.SizeMode == AiImageCatalogService.AutoSizeMode
+            ? firstSucceeded?.OutputWidth ?? 0
+            : firstTask.Width;
+        var compatibilityHeight = firstTask.SizeMode == AiImageCatalogService.AutoSizeMode
+            ? firstSucceeded?.OutputHeight ?? 0
+            : firstTask.Height;
+        var compatibilitySize = firstTask.SizeMode == AiImageCatalogService.AutoSizeMode
+            ? firstSucceeded?.OutputSize ?? AiImageCatalogService.AutoSizeMode
+            : firstTask.Size;
+        return new GenerateAiImageResponse
+        {
+            TaskId = firstTask.Id,
+            TaskIds = orderedIds,
+            SourcePromptId = firstTask.SourcePromptId,
+            ModelName = firstTask.ModelName ?? string.Empty,
+            ModelCode = firstTask.ModelCode ?? firstTask.ModelName ?? string.Empty,
+            SizeContractVersion = firstTask.SizeContractVersion,
+            CatalogVersion = catalogVersion,
+            SizeMode = firstTask.SizeMode,
+            RequestState = GetRequestState(orderedTasks, orderedTasks.Length),
+            BatchStatus = batchStatus,
+            Results = results,
+            Prompt = firstTask.Prompt,
+            ResolutionCode = firstTask.ResolutionCode ?? string.Empty,
+            QualityCode = firstTask.QualityCode,
+            AspectRatioCode = firstTask.SizeMode == AiImageCatalogService.AutoSizeMode ? "auto" : firstTask.AspectRatioCode ?? string.Empty,
+            Width = compatibilityWidth,
+            Height = compatibilityHeight,
+            Size = compatibilitySize,
+            Quality = firstTask.Quality,
+            MimeType = firstSucceeded?.MimeType ?? string.Empty,
+            Url = firstSucceeded?.Url ?? string.Empty,
+            Urls = results.Where(x => !x.IsDeleted && x.Status == "succeeded" && x.Url is not null).Select(x => x.Url!).ToArray(),
+            MaskImageUrl = firstTask.MaskImageUrl,
+            ReferenceImageUrls = DeserializeReferenceImageUrls(firstTask.ReferenceImageUrls)
+        };
+    }
+
     public async Task<long> CreateAsync(CreateAiImageTaskRequest request, CancellationToken cancellationToken)
     {
         var taskIds = await CreateTasksAsync(request, cancellationToken);
         return taskIds[0];
     }
 
-    public async Task<IReadOnlyList<long>> CreateTasksAsync(CreateAiImageTaskRequest request, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<long>> CreateTasksAsync(CreateAiImageTaskRequest request, CancellationToken cancellationToken) =>
+        (await CreateTasksResponseAsync(request, cancellationToken)).TaskIds;
+
+    public async Task<CreateAiImageTasksResponse> CreateTasksResponseAsync(
+        CreateAiImageTaskRequest request,
+        CancellationToken cancellationToken)
     {
+        if (request.SizeMode is not null || request.CatalogVersion is not null)
+        {
+            var versioned = await CreateVersionedTasksAsync(request, cancellationToken);
+            return BuildCreateTasksResponse(
+                versioned.TaskIds,
+                await GetRequestStateAsync(versioned.RequestId, cancellationToken));
+        }
+
+        var taskIds = await CreateLegacyTasksAsync(request, cancellationToken);
+        return BuildCreateTasksResponse(taskIds, "active");
+    }
+
+    private async Task<IReadOnlyList<long>> CreateLegacyTasksAsync(
+        CreateAiImageTaskRequest request,
+        CancellationToken cancellationToken)
+    {
+
         var prompt = AiImagePromptValidator.Validate(request.Prompt);
         var modelCode = ResolveRequestModelCode(request.ModelCode, request.ModelName, AiImageModelConfigService.DefaultGptModelCode);
         var imageCount = ValidateImageCount(request.ImageCount, modelCode);
@@ -713,7 +974,7 @@ public sealed class AiImageService(
         var modelConfig = await modelConfigService.ResolveAsync(modelCode, parameters.ResolutionCode, cancellationToken);
         var pointCostPerImage = await pointService.GetImageGenerateCostAsync(
             modelConfig.ModelCode,
-            parameters.ResolutionCode,
+            parameters.ResolutionCode ?? string.Empty,
             parameters.QualityCode,
             1,
             cancellationToken);
@@ -811,8 +1072,8 @@ public sealed class AiImageService(
             ResolutionCode = parameters.ResolutionCode,
             QualityCode = parameters.QualityCode,
             AspectRatioCode = parameters.AspectRatioCode,
-            Width = parameters.Width,
-            Height = parameters.Height,
+            Width = parameters.Width.GetValueOrDefault(),
+            Height = parameters.Height.GetValueOrDefault(),
             Size = parameters.Size,
             Quality = parameters.ProviderQuality,
             ReferenceImageUrls = serializedReferenceImageUrls,
@@ -829,7 +1090,7 @@ public sealed class AiImageService(
             var reservation = await pointService.ReserveImageTasksAsync(
                 entities,
                 modelConfig.ModelCode,
-                parameters.ResolutionCode,
+                parameters.ResolutionCode ?? string.Empty,
                 parameters.QualityCode,
                 cancellationToken);
             persisted = reservation.Created;
@@ -1198,21 +1459,59 @@ public sealed class AiImageService(
         return await SaveImageBytesAsync(bytes, ownerUserId, cancellationToken);
     }
 
-    private async Task<SavedImage> DownloadImageAsBase64Async(string imageUrl, long ownerUserId, CancellationToken cancellationToken)
+    private async Task<SavedImage> DownloadImageAsBase64Async(
+        string imageUrl,
+        ResolvedAiImageModelConfig route,
+        bool versioned,
+        long ownerUserId,
+        CancellationToken cancellationToken)
     {
-        using var response = await httpClient.GetAsync(imageUrl, cancellationToken);
+        if (!Uri.TryCreate(imageUrl, UriKind.Absolute, out var uri)
+            || uri.Scheme != Uri.UriSchemeHttps
+            || !string.IsNullOrEmpty(uri.UserInfo))
+        {
+            throw new AppException(ErrorCodes.BadRequest, MachineErrorCodes.ProviderOutputInvalid, "Image provider returned an invalid result URL");
+        }
+        var allowedHosts = sizeModeOptions.Value.ResultAllowedHosts;
+        if (versioned && allowedHosts.Length == 0
+            || allowedHosts.Length > 0 && !allowedHosts.Contains(uri.IdnHost, StringComparer.OrdinalIgnoreCase))
+        {
+            throw new AppException(ErrorCodes.BadRequest, MachineErrorCodes.ProviderOutputInvalid, "Image provider result URL is not approved");
+        }
+        using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+        request.Headers.Authorization = null;
+        using var response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
             throw new AppException(ErrorCodes.BadRequest, "Image generation returned an image URL that could not be downloaded");
         }
-
-        var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
-        if (bytes.Length == 0)
+        var maxBytes = versioned ? sizeModeOptions.Value.AutoMaxOutputBytes : MaxGeneratedImageSizeBytes;
+        if (response.Content.Headers.ContentLength is > 0 && response.Content.Headers.ContentLength > maxBytes)
+        {
+            throw new AppException(ErrorCodes.BadRequest, MachineErrorCodes.ProviderOutputInvalid, "Image provider result exceeded the allowed size");
+        }
+        await using var source = await response.Content.ReadAsStreamAsync(cancellationToken);
+        await using var buffer = new MemoryStream();
+        var chunk = new byte[81920];
+        while (true)
+        {
+            var read = await source.ReadAsync(chunk, cancellationToken);
+            if (read == 0)
+            {
+                break;
+            }
+            if (buffer.Length + read > maxBytes)
+            {
+                throw new AppException(ErrorCodes.BadRequest, MachineErrorCodes.ProviderOutputInvalid, "Image provider result exceeded the allowed size");
+            }
+            await buffer.WriteAsync(chunk.AsMemory(0, read), cancellationToken);
+        }
+        if (buffer.Length == 0)
         {
             throw new AppException(ErrorCodes.BadRequest, "Image generation returned empty image data");
         }
 
-        return await SaveImageBytesAsync(bytes, ownerUserId, cancellationToken);
+        return await SaveImageBytesAsync(buffer.ToArray(), ownerUserId, cancellationToken);
     }
 
     private static bool IsTaskActive(int status) => status is 0 or 3;
@@ -1229,10 +1528,15 @@ public sealed class AiImageService(
         return new SavedImage(
             $"/api/media/ai/{storageKey.Replace('\\', '/')}",
             Convert.ToBase64String(image.Content),
-            image.MimeType);
+            image.MimeType,
+            image.Width,
+            image.Height);
     }
 
-    private static AiImageTaskDto MapTaskDto(AiImageTaskEntity entity, IReadOnlyList<string>? favoriteUrls = null)
+    private static AiImageTaskDto MapTaskDto(
+        AiImageTaskEntity entity,
+        IReadOnlyList<string>? favoriteUrls = null,
+        string? catalogVersion = null)
     {
         var normalizedFavoriteUrls = favoriteUrls ?? [];
         var resultUrls = DeserializeImageUrls(entity.ResultUrls);
@@ -1244,13 +1548,29 @@ public sealed class AiImageService(
             SourcePromptId = entity.SourcePromptId,
             Prompt = entity.Prompt,
             ModelName = entity.ModelName ?? string.Empty,
+            ModelCode = entity.ModelCode ?? entity.ModelName ?? string.Empty,
+            SizeContractVersion = entity.SizeContractVersion,
+            CatalogVersion = catalogVersion,
+            SizeMode = entity.SizeMode,
+            RequestedSize = entity.RequestedSize,
+            RequestedResolutionCode = entity.ResolutionCode,
+            RequestedAspectRatioCode = entity.SizeContractVersion == AiImageCatalogService.SizeContractVersion
+                ? entity.AspectRatioCode
+                : entity.AspectRatioCode,
+            RequestedWidth = entity.RequestedWidth,
+            RequestedHeight = entity.RequestedHeight,
+            OutputWidth = entity.OutputWidth,
+            OutputHeight = entity.OutputHeight,
+            OutputSize = entity.OutputSize,
+            OutputMimeType = entity.OutputMimeType,
             ImageCount = entity.ImageCount,
             CompletedImageCount = entity.CompletedImageCount,
             PointCost = entity.PointCost,
             BillingStatus = entity.BillingStatus,
-            ResolutionCode = entity.ResolutionCode,
+            RefundedPoints = entity.RefundedPoints,
+            ResolutionCode = entity.ResolutionCode ?? string.Empty,
             QualityCode = entity.QualityCode,
-            AspectRatioCode = entity.AspectRatioCode,
+            AspectRatioCode = entity.AspectRatioCode ?? string.Empty,
             Width = entity.Width,
             Height = entity.Height,
             Size = entity.Size,
@@ -1261,6 +1581,9 @@ public sealed class AiImageService(
             FavoriteUrls = normalizedFavoriteUrls,
             IsFavorite = normalizedFavoriteUrls.Count > 0,
             ErrorMessage = entity.ErrorMessage,
+            FailureCode = entity.FailureCode,
+            FailureStage = entity.FailureStage,
+            Retryable = entity.Retryable,
             CreatedAt = HongKongTimeToUtc(entity.CreatedAt),
             UpdatedAt = entity.UpdatedAt.HasValue
                 ? HongKongTimeToUtc(entity.UpdatedAt.Value)
@@ -1273,6 +1596,502 @@ public sealed class AiImageService(
             Assets = resultUrls.Select(url => new AiImageTaskAssetDto { Url = url }).ToArray()
         };
     }
+
+    private async Task<IReadOnlyDictionary<long, string>> GetCatalogVersionLookupAsync(
+        IReadOnlyList<AiImageTaskEntity> tasks,
+        CancellationToken cancellationToken)
+    {
+        var releaseIds = tasks
+            .Where(x => x.ModelReleaseId.HasValue)
+            .Select(x => x.ModelReleaseId!.Value)
+            .Distinct()
+            .ToArray();
+        if (releaseIds.Length == 0)
+        {
+            return new Dictionary<long, string>();
+        }
+        var releases = await db.Queryable<AiImageModelReleaseEntity>()
+            .Where(x => releaseIds.Contains(x.Id))
+            .Select(x => new AiImageModelReleaseEntity { Id = x.Id, CatalogVersion = x.CatalogVersion })
+            .ToListAsync(cancellationToken);
+        return releases.ToDictionary(x => x.Id, x => x.CatalogVersion);
+    }
+
+    private static CreateAiImageTasksResponse BuildCreateTasksResponse(
+        IReadOnlyList<long> taskIds,
+        string requestState) => new()
+    {
+        Id = taskIds[0],
+        TaskId = taskIds[0],
+        Ids = taskIds,
+        TaskIds = taskIds,
+        RequestState = requestState
+    };
+
+    private async Task<string> GetRequestStateAsync(long requestId, CancellationToken cancellationToken)
+    {
+        var taskIds = await db.Queryable<AiImageRequestTaskEntity>()
+            .Where(x => x.RequestId == requestId)
+            .Select(x => x.TaskId)
+            .ToListAsync(cancellationToken);
+        if (taskIds.Count == 0)
+        {
+            return "deleted";
+        }
+        var tasks = await db.Queryable<AiImageTaskEntity>()
+            .Where(x => taskIds.Contains(x.Id))
+            .Select(x => new AiImageTaskEntity { Id = x.Id, IsDeleted = x.IsDeleted })
+            .ToListAsync(cancellationToken);
+        return GetRequestState(tasks, taskIds.Count);
+    }
+
+    private static string GetRequestState(IReadOnlyList<AiImageTaskEntity> tasks, int expectedCount)
+    {
+        var deletedCount = tasks.Count(x => x.IsDeleted) + Math.Max(0, expectedCount - tasks.Count);
+        return deletedCount == 0 ? "active" : deletedCount >= expectedCount ? "deleted" : "partially_deleted";
+    }
+
+    private async Task<VersionedImageTaskBatchReservationResult> CreateVersionedTasksAsync(
+        CreateAiImageTaskRequest request,
+        CancellationToken cancellationToken)
+    {
+        var userId = currentUser.UserId
+            ?? throw new AppException(ErrorCodes.Unauthorized, MachineErrorCodes.Unauthorized, "User is not authenticated");
+        var keyHash = AiImageIdempotency.HashKey(request.IdempotencyKey);
+        var existingRequest = await db.Queryable<AiImageRequestEntity>()
+            .FirstAsync(x => x.UserId == userId && x.IdempotencyKeyHash == keyHash, cancellationToken);
+        var intent = NormalizeVersionedIntent(request);
+        var identity = AiImageIdempotency.Create(request.IdempotencyKey, intent.CanonicalPayload);
+        if (existingRequest is not null)
+        {
+            return await LoadVersionedBatchAsync(existingRequest, identity.RequestFingerprint, cancellationToken);
+        }
+
+        var resolution = await catalogService.ResolveAsync(
+            new ResolveAiImageParametersRequest
+            {
+                ModelCode = intent.ModelCode,
+                SizeMode = intent.SizeMode,
+                CatalogVersion = request.CatalogVersion,
+                Resolution = request.Resolution,
+                ResolutionCode = request.ResolutionCode,
+                QualityCode = intent.QualityCode,
+                AspectRatioCode = request.AspectRatioCode
+            },
+            rolloutPolicy.GetClientContext(),
+            cancellationToken);
+
+        var resolvedReferenceUrls = await mediaAssetService.ResolveOwnedReferenceUrlsAsync(
+            userId,
+            false,
+            request.ReferenceAssetIds,
+            request.ReferenceImageUrls,
+            cancellationToken);
+        var referenceImageUrls = ValidateReferenceImageUrls(resolvedReferenceUrls);
+        var resolvedMaskUrl = await mediaAssetService.ResolveOwnedMaskUrlAsync(
+            userId,
+            false,
+            request.MaskAssetId,
+            request.MaskImageUrl,
+            cancellationToken);
+        var maskImageUrl = ValidateMaskImageUrl(resolvedMaskUrl, referenceImageUrls);
+        var sourcePromptId = await ValidateSourcePromptIdAsync(request.SourcePromptId, cancellationToken);
+        foreach (var referenceImageUrl in referenceImageUrls)
+        {
+            _ = ResolveReferenceImageFile(referenceImageUrl);
+        }
+        if (!string.IsNullOrWhiteSpace(maskImageUrl))
+        {
+            _ = ResolveMaskImageFile(maskImageUrl);
+        }
+
+        foreach (var providerCode in resolution.ConsentProviderCodes)
+        {
+            await userConsentService.EnsureAiProcessingConsentAsync(userId, providerCode, cancellationToken);
+        }
+        var promptPolicyVersion = await promptFilter.EnsureAllAllowedAsync(
+            [
+                new AiPromptFilterText("prompt", intent.Prompt),
+                new AiPromptFilterText("negativePrompt", intent.NegativePrompt)
+            ],
+            cancellationToken);
+        var siteId = await ResolveAiImageSiteIdAsync(request.SiteId, cancellationToken);
+        await ExpireStaleTasksAsync(userId, cancellationToken);
+
+        var pointCost = checked(resolution.Price.Points * intent.ImageCount);
+        var admission = await admissionService.ReserveAsync(
+            userId,
+            identity.KeyHash,
+            identity.RequestFingerprint,
+            intent.ImageCount,
+            pointCost,
+            cancellationToken);
+        if (admission.IsDuplicate)
+        {
+            return await WaitForVersionedBatchAsync(userId, identity, cancellationToken);
+        }
+
+        var createdAt = HongKongNow();
+        var taskInputs = await BuildVersionedTaskInputsAsync(
+            request,
+            userId,
+            intent.ImageCount,
+            createdAt,
+            cancellationToken);
+        var requestEntity = new AiImageRequestEntity
+        {
+            UserId = userId,
+            IdempotencyKeyHash = identity.KeyHash,
+            CanonicalPayloadHash = identity.RequestFingerprint,
+            CanonicalizationVersion = AiImageCatalogService.SizeContractVersion,
+            NormalizationProfile = "native-v1",
+            SizeContractVersion = AiImageCatalogService.SizeContractVersion,
+            ModelReleaseId = resolution.Release.Id,
+            AdmissionReservationId = admission.OwnerToken,
+            AdmissionQuotaDate = admission.QuotaDate,
+            ReservedPointCost = pointCost,
+            RequestedImageCount = intent.ImageCount,
+            TaskCount = intent.ImageCount,
+            LegacyBatchShape = "split-task-per-image",
+            Status = "active",
+            CreatedAt = createdAt
+        };
+        var taskKeyHashes = Enumerable.Range(0, intent.ImageCount)
+            .Select(index => AiImageIdempotency.DeriveTaskKeyHash(identity.KeyHash, index))
+            .ToArray();
+        var serializedReferences = referenceImageUrls.Count == 0 ? null : JsonSerializer.Serialize(referenceImageUrls);
+        var parameters = resolution.Parameters;
+        var entities = taskKeyHashes.Select(taskKeyHash => new AiImageTaskEntity
+        {
+            SiteId = siteId,
+            UserId = userId,
+            SourcePromptId = sourcePromptId,
+            Prompt = intent.Prompt,
+            NegativePrompt = intent.NegativePrompt,
+            PromptPolicyVersion = promptPolicyVersion,
+            PromptCheckedAt = createdAt,
+            ModelName = resolution.Release.ModelCode,
+            ModelCode = resolution.Release.ModelCode,
+            SizeContractVersion = AiImageCatalogService.SizeContractVersion,
+            SizeMode = parameters.SizeMode,
+            RequestedSize = parameters.RequestedSize,
+            RequestedWidth = parameters.Width,
+            RequestedHeight = parameters.Height,
+            ModelReleaseId = resolution.Release.Id,
+            PriceId = resolution.Price.Id,
+            PriceReleaseId = resolution.Release.Id,
+            UnitPointCost = resolution.Price.Points,
+            ImageCount = 1,
+            CompletedImageCount = 0,
+            IdempotencyKey = taskKeyHash,
+            RequestFingerprint = identity.RequestFingerprint,
+            PointCost = resolution.Price.Points,
+            BillingStatus = 0,
+            RefundedPoints = 0,
+            ResolutionCode = parameters.ResolutionCode,
+            QualityCode = parameters.QualityCode,
+            AspectRatioCode = parameters.AspectRatioCode,
+            Width = parameters.Width.GetValueOrDefault(),
+            Height = parameters.Height.GetValueOrDefault(),
+            Size = parameters.Size,
+            Quality = parameters.ProviderQuality,
+            ReferenceImageUrls = serializedReferences,
+            MaskImageUrl = maskImageUrl,
+            Status = 0,
+            CreatedAt = createdAt,
+            IsDeleted = false
+        }).ToArray();
+
+        try
+        {
+            var reservation = await pointService.ReserveVersionedImageTasksAsync(
+                requestEntity,
+                entities,
+                taskInputs,
+                resolution.Price.Id,
+                cancellationToken);
+            if (!reservation.Created)
+            {
+                await admissionService.CancelAsync(admission);
+                return reservation;
+            }
+
+            try
+            {
+                await admissionService.BindBatchAsync(
+                    admission,
+                    reservation.RequestId,
+                    entities.Select((entity, ordinal) => new AiImageAdmissionTask(
+                        entity.Id,
+                        ordinal,
+                        entity.ImageCount,
+                        entity.PointCost)).ToArray(),
+                    cancellationToken);
+            }
+            catch (AppException ex)
+            {
+                logger.LogWarning(
+                    "Versioned AI request was committed but Redis binding is pending. RequestId={RequestId}, FailureCode={FailureCode}",
+                    requestEntity.Id,
+                    ex.MachineCode);
+                return reservation;
+            }
+
+            foreach (var entity in entities)
+            {
+                if (!taskQueue.TryQueue(entity.Id))
+                {
+                    break;
+                }
+                await MarkOutboxDispatchedAsync(entity.Id, cancellationToken);
+            }
+            return reservation;
+        }
+        catch
+        {
+            await admissionService.CancelAsync(admission);
+            var winner = await db.Queryable<AiImageRequestEntity>()
+                .FirstAsync(x => x.UserId == userId && x.IdempotencyKeyHash == identity.KeyHash, CancellationToken.None);
+            if (winner is not null)
+            {
+                return await LoadVersionedBatchAsync(winner, identity.RequestFingerprint, CancellationToken.None);
+            }
+            throw;
+        }
+    }
+
+    private async Task<VersionedImageTaskBatchReservationResult> LoadVersionedBatchAsync(
+        AiImageRequestEntity request,
+        string fingerprint,
+        CancellationToken cancellationToken)
+    {
+        if (!string.Equals(request.CanonicalPayloadHash, fingerprint, StringComparison.Ordinal))
+        {
+            throw new AppException(
+                ErrorCodes.Conflict,
+                MachineErrorCodes.IdempotencyConflict,
+                "The idempotency key was already used with a different AI image request.");
+        }
+        var taskIds = await db.Queryable<AiImageRequestTaskEntity>()
+            .Where(x => x.RequestId == request.Id)
+            .OrderBy(x => x.TaskOrdinal)
+            .Select(x => x.TaskId)
+            .ToListAsync(cancellationToken);
+        if (taskIds.Count != request.TaskCount)
+        {
+            throw new AppException(
+                ErrorCodes.Conflict,
+                MachineErrorCodes.LegacyIdempotencyUnverifiable,
+                "The durable AI image request batch is incomplete.");
+        }
+        return new VersionedImageTaskBatchReservationResult(request.Id, taskIds, false);
+    }
+
+    private async Task<VersionedImageTaskBatchReservationResult> WaitForVersionedBatchAsync(
+        long userId,
+        AiImageRequestIdentity identity,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; attempt < 20; attempt++)
+        {
+            var request = await db.Queryable<AiImageRequestEntity>()
+                .FirstAsync(x => x.UserId == userId && x.IdempotencyKeyHash == identity.KeyHash, cancellationToken);
+            if (request is not null)
+            {
+                return await LoadVersionedBatchAsync(request, identity.RequestFingerprint, cancellationToken);
+            }
+            await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken);
+        }
+        throw new ConflictException("The idempotent AI image request is still being committed; retry shortly");
+    }
+
+    private async Task MarkOutboxDispatchedAsync(long taskId, CancellationToken cancellationToken)
+    {
+        await db.Updateable<AiImageTaskOutboxEntity>()
+            .SetColumns(x => new AiImageTaskOutboxEntity
+            {
+                Status = "dispatched",
+                UpdatedAt = HongKongNow()
+            })
+            .Where(x => x.TaskId == taskId && x.Status == "pending")
+            .ExecuteCommandAsync(cancellationToken);
+    }
+
+    private async Task<IReadOnlyList<AiImageTaskInputEntity>> BuildVersionedTaskInputsAsync(
+        CreateAiImageTaskRequest request,
+        long userId,
+        int taskCount,
+        DateTime createdAt,
+        CancellationToken cancellationToken)
+    {
+        var referenceAssetIds = NormalizeOrderedValues(request.ReferenceAssetIds);
+        var maskAssetId = string.IsNullOrWhiteSpace(request.MaskAssetId) ? null : request.MaskAssetId.Trim();
+        var allAssetIds = referenceAssetIds
+            .Concat(maskAssetId is null ? [] : new[] { maskAssetId })
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        var assets = allAssetIds.Length == 0
+            ? []
+            : await db.Queryable<MediaAssetEntity>()
+                .Where(x => allAssetIds.Contains(x.AssetId) && x.OwnerUserId == userId && !x.IsDeleted)
+                .ToListAsync(cancellationToken);
+        var assetLookup = assets.ToDictionary(x => x.AssetId, StringComparer.Ordinal);
+        if (assetLookup.Count != allAssetIds.Length)
+        {
+            throw new AppException(ErrorCodes.NotFound, MachineErrorCodes.ResourceNotFound, "AI image input does not exist");
+        }
+
+        var legacyReferences = NormalizeOrderedValues(request.ReferenceImageUrls);
+        var legacyMask = string.IsNullOrWhiteSpace(request.MaskImageUrl) ? null : request.MaskImageUrl.Trim();
+        var inputs = new List<AiImageTaskInputEntity>();
+        for (var taskOrdinal = 0; taskOrdinal < taskCount; taskOrdinal++)
+        {
+            var inputOrdinal = 0;
+            foreach (var assetId in referenceAssetIds)
+            {
+                var asset = assetLookup[assetId];
+                inputs.Add(new AiImageTaskInputEntity
+                {
+                    RequestTaskOrdinal = taskOrdinal,
+                    Role = "reference",
+                    InputOrdinal = inputOrdinal++,
+                    InputKind = "asset",
+                    AssetId = asset.AssetId,
+                    OwnerUserId = userId,
+                    StorageKey = asset.StorageKey,
+                    ContentSha256 = asset.Sha256,
+                    CreatedAt = createdAt
+                });
+            }
+            foreach (var legacyUrl in legacyReferences)
+            {
+                inputs.Add(new AiImageTaskInputEntity
+                {
+                    RequestTaskOrdinal = taskOrdinal,
+                    Role = "reference",
+                    InputOrdinal = inputOrdinal++,
+                    InputKind = "legacy_url",
+                    OwnerUserId = userId,
+                    LegacyUrl = legacyUrl,
+                    CreatedAt = createdAt
+                });
+            }
+            if (maskAssetId is not null)
+            {
+                var asset = assetLookup[maskAssetId];
+                inputs.Add(new AiImageTaskInputEntity
+                {
+                    RequestTaskOrdinal = taskOrdinal,
+                    Role = "mask",
+                    InputOrdinal = 0,
+                    InputKind = "asset",
+                    AssetId = asset.AssetId,
+                    OwnerUserId = userId,
+                    StorageKey = asset.StorageKey,
+                    ContentSha256 = asset.Sha256,
+                    CreatedAt = createdAt
+                });
+            }
+            else if (legacyMask is not null)
+            {
+                inputs.Add(new AiImageTaskInputEntity
+                {
+                    RequestTaskOrdinal = taskOrdinal,
+                    Role = "mask",
+                    InputOrdinal = 0,
+                    InputKind = "legacy_url",
+                    OwnerUserId = userId,
+                    LegacyUrl = legacyMask,
+                    CreatedAt = createdAt
+                });
+            }
+        }
+        return inputs;
+    }
+
+    private static VersionedRequestIntent NormalizeVersionedIntent(CreateAiImageTaskRequest request)
+    {
+        if (request.SizeMode is null)
+        {
+            throw new AppException(
+                ErrorCodes.BadRequest,
+                MachineErrorCodes.InvalidSizeModeCombination,
+                "catalogVersion cannot be submitted without sizeMode.");
+        }
+        var sizeMode = request.SizeMode.Trim().ToLowerInvariant();
+        if (sizeMode is not (AiImageCatalogService.ExplicitSizeMode or AiImageCatalogService.AutoSizeMode))
+        {
+            throw new AppException(ErrorCodes.BadRequest, MachineErrorCodes.InvalidSizeModeCombination, "sizeMode must be explicit or auto.");
+        }
+        var modelCode = string.IsNullOrWhiteSpace(request.ModelCode)
+            ? throw new AppException(ErrorCodes.BadRequest, MachineErrorCodes.ValidationError, "modelCode is required")
+            : AiImageModelConfigService.NormalizeModelCode(request.ModelCode);
+        var qualityCode = string.IsNullOrWhiteSpace(request.QualityCode)
+            ? throw new AppException(ErrorCodes.BadRequest, MachineErrorCodes.ValidationError, "qualityCode is required")
+            : request.QualityCode.Trim().ToLowerInvariant();
+        var imageCount = ValidateImageCount(request.ImageCount, modelCode);
+        var prompt = AiImagePromptValidator.Validate(request.Prompt);
+        var negativePrompt = string.IsNullOrWhiteSpace(request.NegativePrompt) ? null : request.NegativePrompt.Trim();
+        if (negativePrompt?.Length > 2000)
+        {
+            throw new AppException(ErrorCodes.BadRequest, MachineErrorCodes.ValidationError, "Negative prompt is too long");
+        }
+        var resolutionCode = request.ResolutionCode?.Trim().ToLowerInvariant();
+        var aspectRatioCode = request.AspectRatioCode?.Trim().ToLowerInvariant();
+        if (sizeMode == AiImageCatalogService.AutoSizeMode
+            && (request.Resolution is not null || request.ResolutionCode is not null || request.AspectRatioCode is not null))
+        {
+            throw new AppException(ErrorCodes.BadRequest, MachineErrorCodes.InvalidSizeModeCombination,
+                "Auto size must omit resolution and aspect ratio fields.");
+        }
+        if (sizeMode == AiImageCatalogService.ExplicitSizeMode
+            && (request.Resolution is not null || string.IsNullOrWhiteSpace(resolutionCode) || string.IsNullOrWhiteSpace(aspectRatioCode)))
+        {
+            throw new AppException(ErrorCodes.BadRequest, MachineErrorCodes.ValidationError,
+                "Explicit size requires resolutionCode and aspectRatioCode and does not accept the legacy resolution alias.");
+        }
+        var referenceAssetIds = NormalizeOrderedValues(request.ReferenceAssetIds);
+        var referenceUrls = NormalizeOrderedValues(request.ReferenceImageUrls);
+        var maskAssetId = string.IsNullOrWhiteSpace(request.MaskAssetId) ? null : request.MaskAssetId.Trim();
+        var maskUrl = string.IsNullOrWhiteSpace(request.MaskImageUrl) ? null : request.MaskImageUrl.Trim();
+        var canonical = new
+        {
+            Endpoint = "ai-images-size-mode-v1",
+            request.SourcePromptId,
+            Prompt = prompt,
+            NegativePrompt = negativePrompt,
+            ModelCode = modelCode,
+            ImageCount = imageCount,
+            SizeMode = sizeMode,
+            QualityCode = qualityCode,
+            ResolutionCode = sizeMode == AiImageCatalogService.AutoSizeMode ? null : resolutionCode,
+            AspectRatioCode = sizeMode == AiImageCatalogService.AutoSizeMode ? null : aspectRatioCode,
+            ReferenceAssetIds = referenceAssetIds,
+            ReferenceImageUrls = referenceUrls,
+            MaskAssetId = maskAssetId,
+            MaskImageUrl = maskUrl
+        };
+        return new VersionedRequestIntent(
+            prompt,
+            negativePrompt,
+            modelCode,
+            imageCount,
+            sizeMode,
+            qualityCode,
+            canonical);
+    }
+
+    private static IReadOnlyList<string> NormalizeOrderedValues(IReadOnlyList<string>? values) =>
+        values?.Select(x => x?.Trim() ?? string.Empty).ToArray() ?? [];
+
+    private sealed record VersionedRequestIntent(
+        string Prompt,
+        string? NegativePrompt,
+        string ModelCode,
+        int ImageCount,
+        string SizeMode,
+        string QualityCode,
+        object CanonicalPayload);
 
     private static string MapTaskStatus(int status) => status switch
     {
@@ -1329,12 +2148,12 @@ public sealed class AiImageService(
             ?? throw new AppException(ErrorCodes.BadRequest, $"Unsupported image {paramType.Replace('_', ' ')}");
     }
 
-    private static string NormalizeCode(string code, string defaultValue)
+    private static string NormalizeCode(string? code, string defaultValue)
     {
         return string.IsNullOrWhiteSpace(code) ? defaultValue : code.Trim().ToLowerInvariant();
     }
 
-    private static string ResolveCodeAlias(string aliasCode, string canonicalCode)
+    private static string? ResolveCodeAlias(string? aliasCode, string? canonicalCode)
     {
         return !string.IsNullOrWhiteSpace(aliasCode) ? aliasCode : canonicalCode;
     }
@@ -1545,6 +2364,19 @@ public sealed class AiImageService(
         return normalized;
     }
 
+    private static void EnsureOwnedPrivateMediaUrls(
+        long ownerUserId,
+        IReadOnlyList<string> referenceImageUrls,
+        string? maskImageUrl)
+    {
+        var ownerPrefix = $"/api/media/ai/{ownerUserId}/";
+        if (referenceImageUrls.Any(url => !url.StartsWith(ownerPrefix, StringComparison.Ordinal))
+            || maskImageUrl is not null && !maskImageUrl.StartsWith(ownerPrefix, StringComparison.Ordinal))
+        {
+            throw new AppException(ErrorCodes.NotFound, MachineErrorCodes.ResourceNotFound, "AI image input does not exist");
+        }
+    }
+
     private static string? ValidateMaskImageUrl(string? maskImageUrl, IReadOnlyList<string> referenceImageUrls)
     {
         if (string.IsNullOrWhiteSpace(maskImageUrl))
@@ -1604,7 +2436,7 @@ public sealed class AiImageService(
 
     private sealed record ReferenceImageFile(string Path, string FileName, string MimeType);
 
-    private sealed record SavedImage(string Url, string Base64, string MimeType);
+    private sealed record SavedImage(string Url, string Base64, string MimeType, int Width, int Height);
 
     private sealed record OpenAiImageResult(string? Base64, string? Url, string? RevisedPrompt);
 

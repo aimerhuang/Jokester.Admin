@@ -7,6 +7,7 @@ using jokester.admin.Common.Exceptions;
 using jokester.admin.Domain.Entities;
 using jokester.admin.Infrastructure;
 using Microsoft.Extensions.Options;
+using MySqlConnector;
 using SqlSugar;
 using StackExchange.Redis;
 
@@ -17,15 +18,20 @@ public sealed class RegistrationService(
     IPasswordHasher passwordHasher,
     IEmailValidationService emailValidationService,
     IEmailSender emailSender,
-    IBlogCaptchaService captchaService,
-    ILegalDocumentService legalDocumentService,
     IConnectionMultiplexer connectionMultiplexer,
-    IOptions<RedisOptions> redisOptions) : IRegistrationService
+    IOptions<RedisOptions> redisOptions,
+    ILogger<RegistrationService> logger) : IRegistrationService
 {
     private const int RegisterGiftPoints = 50;
     private const int EmailCodeRetryAfterSeconds = 60;
     private const string DefaultRegisteredUserRoleCode = "ai_operator";
     private const string DefaultRegisteredUserSiteCode = "ai_image";
+    private const string DeleteEmailCodeIfMatchesScript = """
+        if redis.call('get', KEYS[1]) == ARGV[1] then
+            return redis.call('del', KEYS[1])
+        end
+        return 0
+        """;
     private static readonly TimeSpan CodeLifetime = TimeSpan.FromMinutes(10);
     private readonly IDatabase _redis = connectionMultiplexer.GetDatabase();
     private readonly string _emailCodePrefix = $"{redisOptions.Value.InstanceName}register_email_code:";
@@ -35,35 +41,52 @@ public sealed class RegistrationService(
         CancellationToken cancellationToken)
     {
         var email = await emailValidationService.ValidateAndNormalizeAsync(request.Email, cancellationToken);
-        if (!await captchaService.ValidateAsync(request.CaptchaId, request.CaptchaAnswer, cancellationToken))
-        {
-            throw new AppException(ErrorCodes.BadRequest, "验证码无效或已过期");
-        }
-
         var code = RandomNumberGenerator.GetInt32(100000, 1000000).ToString();
-        await _redis.StringSetAsync(_emailCodePrefix + email, code, CodeLifetime);
+        var emailCodeKey = _emailCodePrefix + email;
+        await _redis.StringSetAsync(emailCodeKey, code, CodeLifetime);
 
-        await emailSender.SendAsync(
-            email,
-            "Jokester registration code",
-            $"Your registration verification code is {code}. It expires in 10 minutes.",
-            cancellationToken);
+        try
+        {
+            await emailSender.SendAsync(
+                email,
+                "Jokester registration code",
+                $"Your registration verification code is {code}. It expires in 10 minutes.",
+                cancellationToken);
+        }
+        catch
+        {
+            try
+            {
+                await _redis.ScriptEvaluateAsync(
+                    DeleteEmailCodeIfMatchesScript,
+                    [emailCodeKey],
+                    [code]);
+            }
+            catch (Exception cleanupException)
+            {
+                logger.LogWarning(
+                    cleanupException,
+                    "Failed to clean up a registration email code after email delivery failed.");
+            }
+
+            throw;
+        }
 
         return new SendRegisterEmailCodeResponse { RetryAfterSeconds = EmailCodeRetryAfterSeconds };
     }
 
     public async Task<RegisterResponse> RegisterAsync(RegisterRequest request, CancellationToken cancellationToken)
     {
-        var userName = ValidateRegisterRequest(request);
         var email = await emailValidationService.ValidateAndNormalizeAsync(request.Email, cancellationToken);
-        await ValidateEmailCodeAsync(email, request.GetEmailCode());
-        await EnsureUserAvailableAsync(userName, email, cancellationToken);
+        ValidatePassword(request.Password);
+        await ValidateEmailCodeAsync(email, request.EmailCode);
+        var identity = await ResolveIdentityAsync(email, cancellationToken);
 
         var hashed = passwordHasher.HashPassword(request.Password);
         var entity = new SysUserEntity
         {
-            UserName = userName,
-            NickName = string.IsNullOrWhiteSpace(request.NickName) ? userName : request.NickName.Trim(),
+            UserName = identity.UserName,
+            NickName = identity.NickName,
             PasswordHash = hashed.Hash,
             Salt = hashed.Salt,
             Email = email,
@@ -75,11 +98,11 @@ public sealed class RegistrationService(
             IsDeleted = false
         };
 
+        long userId;
         await db.Ado.BeginTranAsync();
         try
         {
-            var userId = await db.Insertable(entity).ExecuteReturnBigIdentityAsync();
-            await legalDocumentService.ValidateAndRecordRegistrationConsentsAsync(userId, request, cancellationToken);
+            userId = await InsertUserWithCollisionRetryAsync(entity, email, cancellationToken);
             await AssignDefaultAiImageAccessAsync(userId, cancellationToken);
             await db.Insertable(new UserPointDetailEntity
             {
@@ -93,14 +116,28 @@ public sealed class RegistrationService(
                 CreatedAt = DateTime.Now
             }).ExecuteCommandAsync(cancellationToken);
             await db.Ado.CommitTranAsync();
-            await _redis.KeyDeleteAsync(_emailCodePrefix + email);
-            return new RegisterResponse { UserId = userId };
         }
         catch
         {
             await db.Ado.RollbackTranAsync();
             throw;
         }
+
+        try
+        {
+            await _redis.ScriptEvaluateAsync(
+                DeleteEmailCodeIfMatchesScript,
+                [_emailCodePrefix + email],
+                [request.EmailCode.Trim()]);
+        }
+        catch (Exception cleanupException)
+        {
+            logger.LogWarning(
+                cleanupException,
+                "Registration succeeded, but its email code could not be removed.");
+        }
+
+        return new RegisterResponse { UserId = userId };
     }
 
     private async Task AssignDefaultAiImageAccessAsync(long userId, CancellationToken cancellationToken)
@@ -148,25 +185,82 @@ public sealed class RegistrationService(
         }
     }
 
-    private async Task EnsureUserAvailableAsync(string userName, string email, CancellationToken cancellationToken)
+    private async Task<long> InsertUserWithCollisionRetryAsync(
+        SysUserEntity entity,
+        string email,
+        CancellationToken cancellationToken)
     {
-        var exists = await db.Queryable<SysUserEntity>()
-            .AnyAsync(x => !x.IsDeleted && (x.UserName == userName || x.Email == email), cancellationToken);
-        if (exists)
+        try
         {
-            throw new ConflictException("User name or email already exists");
+            return await db.Insertable(entity).ExecuteReturnBigIdentityAsync();
+        }
+        catch (Exception exception) when (IsDuplicateKey(exception))
+        {
+            if (await db.Queryable<SysUserEntity>().AnyAsync(x => x.Email == email, cancellationToken))
+            {
+                throw new ConflictException("Email already exists");
+            }
+
+            var defaultUserName = RegistrationIdentityFactory.Create(email).UserName;
+            if (!string.Equals(entity.UserName, defaultUserName, StringComparison.Ordinal))
+            {
+                throw new ConflictException("Unable to assign an account name for this email");
+            }
+
+            entity.UserName = RegistrationIdentityFactory.CreateDisambiguatedUserName(email);
+            try
+            {
+                return await db.Insertable(entity).ExecuteReturnBigIdentityAsync();
+            }
+            catch (Exception retryException) when (IsDuplicateKey(retryException))
+            {
+                if (await db.Queryable<SysUserEntity>().AnyAsync(x => x.Email == email, cancellationToken))
+                {
+                    throw new ConflictException("Email already exists");
+                }
+
+                throw new ConflictException("Unable to assign an account name for this email");
+            }
         }
     }
 
-    private static string ValidateRegisterRequest(RegisterRequest request)
+    private async Task<RegistrationIdentity> ResolveIdentityAsync(string email, CancellationToken cancellationToken)
     {
-        var userName = RegistrationUserNameValidator.Validate(request.UserName);
+        if (await db.Queryable<SysUserEntity>().AnyAsync(x => x.Email == email, cancellationToken))
+        {
+            throw new ConflictException("Email already exists");
+        }
 
-        if (request.Password.Length < 8 || request.Password.Length > 64)
+        var identity = RegistrationIdentityFactory.Create(email);
+        if (!await db.Queryable<SysUserEntity>().AnyAsync(x => x.UserName == identity.UserName, cancellationToken))
+        {
+            return identity;
+        }
+
+        var disambiguated = RegistrationIdentityFactory.CreateDisambiguatedUserName(email);
+        if (await db.Queryable<SysUserEntity>().AnyAsync(x => x.UserName == disambiguated, cancellationToken))
+        {
+            throw new ConflictException("Unable to assign an account name for this email");
+        }
+
+        return identity with { UserName = disambiguated };
+    }
+
+    private static void ValidatePassword(string? password)
+    {
+        if (string.IsNullOrEmpty(password) || password.Length is < 8 or > 64)
         {
             throw new AppException(ErrorCodes.BadRequest, "Password length must be between 8 and 64");
         }
+    }
 
-        return userName;
+    private static bool IsDuplicateKey(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is MySqlException { Number: 1062 }) return true;
+        }
+
+        return false;
     }
 }

@@ -5,7 +5,7 @@
 - 项目根目录：`D:\Project\jokester.admin`
 - 实际 Web API 项目目录：`D:\Project\jokester.admin\jokester.admin`
 - 根目录设计文档：`后台管理系统设计书.md`
-- 项目 docs：`docs/integration-guide.md`、`docs/architecture.md`、`docs/runbook.md`、`docs/point-recharge.md`、`docs/ai-prompt-filter.md`
+- 项目 docs：`docs/integration-guide.md`、`docs/architecture.md`、`docs/runbook.md`、`docs/point-recharge.md`、`docs/ai-prompt-filter.md`、`docs/ai-image-size-mode-prd.md`
 - 根目录数据库脚本：`jokester.admin.sql`
 
 ## Current Stack
@@ -67,10 +67,11 @@ POST /api/dev/bootstrap/super-admin
 ## Registration Email Contract
 
 - 注册邮箱验证码分两步：
-  - 先调用 `GET /api/blog/comments/captcha` 获取图片验证码
-  - `POST /api/auth/register/email-code`：请求体传 `email`、`captchaId`、`captchaAnswer`
-  - `POST /api/auth/register`：除 `userName`、`nickName`、`password`、`email`、`emailCode` 外，还必须提交已接受的当前隐私政策与服务条款版本
-- 图片验证码为 6 位大写字母/数字，写入 Redis 后 5 分钟过期并在校验时一次性消费；评论提交、注册邮件发送和登录失败后的二次验证共用该接口
+  - `POST /api/auth/register/email-code`：请求体只传 `email`
+  - `POST /api/auth/register`：请求体只传 `email`、`emailCode`、`password`
+- 后端使用规范化邮箱 `@` 前的账号部分生成 `userName` 和 `nickName`；用户名冲突由后端自动消歧，不要求客户端处理
+- 登录接口同时支持用户名和邮箱，注册成功后可直接使用邮箱登录
+- 图片验证码为 6 位大写字母/数字，写入 Redis 后 5 分钟过期并在校验时一次性消费；仅用于评论提交和登录失败后的二次验证，不参与注册邮件发送
 - `emailCode` 由后端生成后通过 SMTP 发到用户邮箱，并按规范化后的 `email` 写入 Redis，10 分钟过期
 - 注册时前端必须传同一个 `email` 和用户输入的 `emailCode`；验证通过后后端删除验证码键
 - `EmailValidation.EnableApiValidation=false` 时只做本地基础验证：邮箱格式、长度和 `BlacklistDomains`
@@ -92,13 +93,17 @@ POST /api/dev/bootstrap/super-admin
 
 ## Points And AI Image Billing
 
-- 当前积分余额保存在 `sys_user.point_balance`，流水保存在 `sys_user_point_detail`。
+- 当前聚合积分余额保存在 `sys_user.point_balance`，流水保存在 `sys_user_point_detail`；套餐/签到积分批次和扣款分摊分别保存在 `sys_user_point_bucket`、`sys_user_point_bucket_usage`，`expires_at=NULL` 表示永久套餐批次。
 - 用户注册成功自动赠送 50 积分，来源 `register`。
 - `POST /api/points/sign-in` 每日签到赠送 25 积分，来源 `sign_in`；同一自然日只能签到一次。
-- 签到积分当天有效；次日由 `PointService` 在余额查询、签到或生图扣分路径写入 `source=sign_in_expire` 的过期扣减流水。
-- 生图创建任务前必须按 `ai_image_point_price.model_code + resolution_code + quality_code` 查价格，并扣除 `points * imageCount`。
-- GPT Image2 价格匹配使用 `modelCode + resolutionCode + qualityCode`；Nano Banana2 官方无 `quality` 参数，价格只按 `modelCode + resolutionCode` 匹配，`quality_code` 列与画幅比例都不参与匹配（库中存 `''` 或 `NULL` 都不影响）。`PointService.GetImageGenerateCostAsync` 仅在调用方显式传入 `quality` 时才把 `quality_code` 加入查询条件。
+- 签到积分当天有效；次日由积分账本在余额查询、登录/刷新/资料、签到或生图扣分路径写入 `source=sign_in_expire` 的过期扣减流水。
+- 充值套餐由 `GET /api/points/recharge/packages` 动态提供；Web/Android 固定只允许 `monthly`、`trial`、`basic`、`value` 四档且缺档时失败。`monthly` 必须到账 5000 积分，自核销或 Apple 履约到账起 30 天有效，其余三档永久有效。
+- 月卡 VIP 以 `sys_user_membership_entitlement` 独立来源账本为准，不能从积分余额或积分批次推断；有效期内积分耗尽仍是 VIP，多笔有效权益取最晚到期时间，Apple 退款只撤销对应交易权益。
+- 生图扣分顺序固定为限时套餐积分、签到积分、永久积分；同优先级按最早到期批次。失败退款必须回原扣款批次并保留原到期时间。
+- legacy 生图创建任务前按 `ai_image_point_price` 查价：GPT Image2 使用 `modelCode + resolutionCode + qualityCode`，Nano Banana2 只使用 `modelCode + resolutionCode`；扣除 `points * imageCount`。
+- `size-mode-v1` 必须在创建事务内锁定客户端提交的 current `modelCode + catalogVersion` 对应 release 价格；explicit 按 `sizeMode + resolutionCode + qualityCode`，auto 按 `sizeMode + qualityCode` 且 `resolutionCode=NULL`。不得回退到 legacy 价格或按最终输出尺寸改价。
 - 任务失败或超时时，`AiImageTaskProcessor` 会调用积分服务写入 `source=image_refund` 的返还流水。
+- Apple 退款遇到尚未结算的月卡生图预留时，必须在 `sys_user_point_bucket_usage` 标记延后追扣：失败不恢复已撤销额度，成功才追扣余额/记 debt；存在未结算延后追扣时拒绝新生图。
 - 不要把扣积分逻辑散落到 Controller；统一走 `IPointService`。
 - 四个 AI 生成/创建请求都必须传 `idempotencyKey`；后端只保存 key 的 SHA-256。同用户同 key 同 payload 返回原任务，不重复扣分；同 key 不同 payload 返回 409。
 - `ai_image_task.status`：`0` 待处理、`3` 处理中、`1` 成功、`2` 失败；`billing_status`：`0` 预留、`1` 确认、`2` 部分退款、`3` 全额退款。
@@ -107,24 +112,26 @@ POST /api/dev/bootstrap/super-admin
 - Provider 调用必须通过 `IAiImageProviderGate` 的全局 Redis 租约，不要在具体 Provider Service 中另建进程内并发计数。
 - GPT 多图请求按 `imageCount` 拆成同等数量的单图任务，每条任务固定 `image_count=1`；整批任务、余额扣减和逐任务预留流水在同一事务提交，`AiImageTaskRecoveryWorker` 负责重启后的待处理任务恢复和超时处理中任务结算。
 - Worker 保存生成图时必须显式使用任务 `user_id` 作为 `private-media/ai/{userId}` 所有者目录，不能依赖后台线程中不存在的 `ICurrentUser`。
+- Apple `REFUND` / `REVOKE` 内部处理失败必须持续保留可重试路径；不得用固定 `retry_count` 上限把真实退款永久丢弃。
 
 ## Point Recharge Contract
 
 - `GET /api/points/recharge/packages`、`POST /api/points/recharge/orders`、`POST /api/points/recharge/redeem` 均要求登录。
+- Web 套餐编码固定为 `monthly`、`trial`、`basic`、`value`；管理端签发套餐码时应从套餐查询接口动态读取，不另行硬编码。
 - `POST /api/points/recharge/admin/codes` 只允许超级管理员签发兑换码；支持 `packageCode` 套餐模式或 `points` 自定义积分模式（二选一），自定义积分范围为 1–1,000,000，`count` 范围为 1–100。明文码只在签发响应中返回一次，服务端仅保存 SHA-256 哈希和掩码。
 - 签发兑换码时必须在事务内重新查询并锁定当前用户，验证其仍为启用、未删除的超级管理员；接口通过 Redis 按用户和 IP 双重限流。
 - 购买接口只创建 24 小时有效的待支付订单，不直接增加积分；不能由前端伪造支付完成。
 - 套餐购买地址由 `point_recharge_package.purchase_url` 配置，支持 `{orderNo}`、`{packageCode}`、`{userId}` 占位符；只接受绝对 HTTP(S) URL。
 - 兑换码区分大小写且只能使用一次；核销、余额增加和 `source=recharge` 积分流水必须保持同一事务。
 - 首充体验包首次兑换 200 积分，同一用户后续兑换该套餐为 100 积分。
-- 现有数据库使用 `docs/migrations/20260809-add-point-recharge.sql` 升级；完整接口说明见 `docs/point-recharge.md`。
+- 现有数据库依次使用 `docs/migrations/20260809-add-point-recharge.sql`、`docs/migrations/20260819-add-expiring-point-buckets.sql`、`docs/migrations/20260820-add-user-membership-entitlements.sql` 升级；完整接口说明见 `docs/point-recharge.md`。
 
 ## Mobile And iOS API Contract
 
 - 移动端响应中的时间统一为带 `Z`/UTC offset 的 ISO 8601；历史积分、充值表仍按现有本地时间写库，只在 API DTO 边界转换为 UTC，新 Apple/法律/授权/账号删除/Asset 表直接存 UTC。
 - Apple IAP Product ID 只能来自 `apple_iap_product` 的服务端映射，客户端不得提交积分或价格；Apple Bundle ID、Issuer ID、Key ID 和私钥必须由部署配置/Secret Manager 注入，仓库中不得保存真实值，多行 PEM 不通过 `.env` 文件注入。
 - iOS 套餐查询不返回外部购买链接；交易履约、积分入账和流水必须同事务，App Store Server Notification 必须验签并按 notification UUID 幂等处理。
-- `GET /api/legal/documents/current` 必须解析当前隐私政策和服务条款，任一缺失都返回 503；AI processing 告知可暂不启用，此时响应 `aiProcessingNotice=null`。注册只校验当前隐私政策与服务条款版本。
+- `GET /api/legal/documents/current` 必须解析当前隐私政策和服务条款，任一缺失都返回 503；该法律文档系统与注册解耦，注册不提交或校验法律版本。AI processing 告知可暂不启用，此时响应 `aiProcessingNotice=null`。
 - 所有第三方 AI 生成入口必须校验 AI processing 告知和 consent：未配置已审批告知时 fail-closed 返回 `503 SERVICE_UNAVAILABLE`；已有告知但用户缺少当前 Provider 授权时返回 `412 AI_CONSENT_REQUIRED`。不得因为 TestFlight 或小范围使用绕过。
 - 部署专属法律版本和 URL 不进迁移或仓库配置；拿到审批值后用 `--configure-legal-documents` 幂等维护命令配置。暂不启用 AI 告知时显式设置 `AiProcessing.Enabled=false`；启用时 `providerCodes` 必须覆盖当前启用模型路由映射出的 `openai` / `google`。
 - 移动端新调用统一走 `POST /api/ai/images`，按服务端模型能力路由；旧 GPT/Nano 专用入口只用于 Web/Android 兼容，不作为新客户端契约。
@@ -136,16 +143,30 @@ POST /api/dev/bootstrap/super-admin
 
 - `GET /api/ai/images/parameters` returns enabled image parameter options for resolution (`1k/2k/4k`), quality (`low/med/high`), aspect ratio (`1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `3:2`, `2:3`, `21:9`), and enabled `pointPrices`.
 - `POST /api/ai/images/parameters/resolve` resolves `resolutionCode` + `qualityCode` + `aspectRatioCode` into `width`, `height`, `size`, and provider quality.
-- Resolution tiers use long-side pixels: `1k=1024`, `2k=2048`, `4k=3840`; provider dimensions are rounded to `16px` multiples and capped at `8,294,400` total pixels. For example `4k + med + 1:1` resolves to `2880x2880`, `4k + med + 16:9` resolves to `3840x2160`, and provider quality is `medium`.
+- Resolution tiers use long-side pixels: `1k=1024`, `2k=2048`, `4k=3840`. GPT `size` dimensions must both be `16px` multiples and at most `3840`, the long-to-short-side ratio must not exceed `3:1`, and total pixels must be between `655,360` and `8,294,400`. Typical results include `1k + 1:1 = 1024x1024`, `2k + 16:9 = 2048x1152`, `4k + 1:1 = 2880x2880`, and `4k + 16:9 = 3840x2160`.
+- Legacy GPT Image2 does not accept the project-level `aspectRatioCode=auto`; callers must provide an explicit supported ratio. `size-mode-v1` uses `sizeMode=auto` instead, while Nano Banana2 keeps its existing legacy `auto` behavior.
 - `POST /api/ai/images/generate` directly generates one GPT Image2 image and returns `url`, `base64`, `dataUrl`, `resolutionCode`, `qualityCode`, `aspectRatioCode`, computed `width`/`height`, `size`, `quality`, and prompt metadata.
 - `POST /api/ai/images/generate` and `POST /api/ai/images` prefer `referenceAssetIds` plus optional `maskAssetId`, with a maximum of 6 reference images. Legacy `referenceImageUrls` / `maskImageUrl` remain only for current-user same-origin private-media compatibility; arbitrary remote URLs are rejected.
 - When resolved references are non-empty, the service calls OpenAI `/images/edits` and sends multipart `image[]` file fields; without references it calls `/images/generations`. Asset ownership and file existence must be checked before admission and Provider calls.
 - `POST /api/ai/images` creates one queued task per requested image. Every row records `image_count=1` plus the shared prompt/parameter/reference snapshots, and the response returns all task ids in `ids`.
-- GPT primary and fallback routes are both stored in `ai_image_model_config` and distinguished by `route_role=primary/fallback`. Each route owns its provider model, URL, key, and paths; enabled primary failures fall back to the enabled fallback row for the same model and resolution. `OpenAI.PrimaryTimeoutSeconds` remains the primary-attempt timeout.
+- GPT primary and fallback routes are both stored in `ai_image_model_config` and distinguished by `route_role=primary/fallback`. Each route owns its provider model, URL, key, and paths; enabled primary failures fall back to the enabled fallback row for the same model and resolution. `OpenAI.PrimaryTimeoutSeconds` is the primary-attempt timeout and defaults to `180` seconds.
 - AI reference and generated images are saved outside `wwwroot` under `private-media/ai`. Clients receive `/api/media/ai/...` URLs and must send the JWT when downloading; anonymous or cross-user access returns `401/404`.
 - Blog media and avatars remain in separate public `/blog` and `/avatar` static prefixes.
 - `GET /api/ai/images` and `GET /api/ai/images/{id}` return `resultUrls`, `errorMessage`, `createdAt`, and `updatedAt`; non-super-admin users only see or delete their own tasks.
 - Existing databases also need `docs/migrations/20260811-add-ai-image-route-role.sql`; keep [jokester.admin.sql](jokester.admin.sql) aligned when schema changes.
+
+## AI Image Size Mode V1 Contract
+
+- 新协议客户端通过 `X-Client-Capabilities: ai-size-mode-v1` 协商 schema，并同时传平台、版本和 build Header；Header 不授予 auto，服务端用户 cohort 仍必须通过。
+- `GET /api/ai/images/models` 是模型能力权威源。`sizeContractVersion=size-mode-v1` 时读取模型级 `catalogVersion` 与 `capabilities.sizeModes`；`/parameters` 不能扩大模型能力。
+- v2 pricing 必须传 `modelCode + catalogVersion`，返回 envelope；auto 价格 `resolutionCode=null`。legacy pricing 保持扁平 non-null resolution schema。
+- v1 resolve/create/generate 新 key 都必须提交 current `catalogVersion`。auto 必须省略或传 null 的所有尺寸字段；explicit 必须传规范 `resolutionCode + aspectRatioCode`。Nano 兼容端点拒绝 `sizeMode/catalogVersion`。
+- durable 幂等事实优先于 catalog、Redis、Asset 和价格检查；catalog 不进入客户端意图指纹。创建响应保持 `id/taskId/ids/taskIds` 并返回 `requestState`，软删除不得导致重建或重扣。
+- `size-mode-v1` auto 任务的 `resolution_code`、`aspect_ratio_code`、请求宽高必须保存 NULL，`requested_size=auto`；实际输出尺寸只从图片解码结果回填。不要给 nullable 实体属性恢复 legacy 初始化默认值。
+- 请求头、ordinal 明细、单图任务、输入快照、Outbox、release price 锁定、积分扣减和逐任务预留必须同一事务。Redis 使用不可猜测 owner token 绑定整批；未提交 owner 才能撤销。
+- Worker 必须按任务 release、claim epoch/token 和 Provider owner lease 执行。未知 inflight attempt 不自动再次外发，最晚在 `reconcile_by` 失败退款；部分队列写入由 Outbox 恢复，超过 `AiCostControl.OutboxBindDeadlineMinutes` 的未派发任务统一结算。
+- migration 为 `docs/migrations/20260821-add-ai-image-size-mode-v1.sql`，并已同步 `jokester.admin.sql`。它不发布 auto 路由/价格/URL/Secret；仓库默认关闭 `AiImageSizeMode.Enabled/AutoEnabled`。
+- release 只能通过 `--configure-ai-image-catalog` 受控发布：`Approved=true`、auto 三条操作路径验证、独立审批价格和 endpoint/result allowlist 缺一不可。已发布 `CatalogVersion` 不可改写；`EnsureGptImage2TwoK=true` 会补齐并固定 `1k/2k/4k` 参数顺序，复制路由前必须确认 Provider 模型不按分辨率使用不同别名。
 
 ## Nano Banana2 Image API Contract
 
@@ -188,29 +209,6 @@ POST /api/dev/bootstrap/super-admin
 - 本地没有第三方邮箱验证服务时：
   - 设置 `EmailValidation.EnableApiValidation=false`
   - 这会保留本地基础验证，并跳过 `EmailValidation.ApiEndpoint`
-
-## Current API Additions
-
-- 角色接口已支持分页筛选、状态更新、删除
-- 站点接口已支持分页筛选、状态更新、删除和公开 `site_code` 列表
-- 菜单接口已支持树查询、分页筛选、状态更新、删除
-- 用户接口已支持按用户查询授权菜单树和通过用户专属授权角色保存菜单权限，权限码为 `System.User.Authorize`
-- 博客评论接口已支持公开图片验证码、公开提交、公开已审核列表、后台分页、审核、删除
-- 博客仪表盘接口已支持文章/评论/媒体统计和最新待审核评论
-- 日志接口已支持登录日志/操作日志查询与批量删除
-- AI 生图已支持按 `modelCode` 统一创建后台任务、Asset ID 参考图、兼容同源私有 URL、鉴权下载、参数解析、按价格表扣积分和失败返还
-- GPT Image2 与 Nano Banana2 旧专用入口仍保留 Web/Android 兼容；新移动端不依赖这些路由
-- 积分接口已支持余额查询和每日签到
-- 博客评论和仪表盘权限码包括：
-  - `Blog.Comment.View`
-  - `Blog.Comment.Review`
-  - `Blog.Comment.Delete`
-  - `Blog.Dashboard.View`
-- 日志接口当前权限码包括：
-  - `System.Log.Login.View`
-  - `System.Log.Login.Delete`
-  - `System.Log.Operation.View`
-  - `System.Log.Operation.Delete`
 
 ## Known Environment Issue
 

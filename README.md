@@ -19,6 +19,7 @@
 - [docs/architecture.md](./docs/architecture.md)：架构和数据流说明
 - [docs/runbook.md](./docs/runbook.md)：本地运行、冒烟检查和排障
 - [docs/point-recharge.md](./docs/point-recharge.md)：充值套餐、订单、兑换码与购买地址配置
+- [docs/point-package-frontend-prd.md](./docs/point-package-frontend-prd.md)：积分套餐、兑换、StoreKit 与生图积分的前端改造 PRD
 - [docs/architecture.md](./docs/architecture.md#提示词库数据流)：提示词库数据源、同步、图片与快照边界
 - [docs/ai-prompt-filter.md](./docs/ai-prompt-filter.md)：基于中英文关键词词库的生图过滤、热更新和管理接口
 - [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)：第三方数据来源、固定版本与许可证说明
@@ -81,14 +82,14 @@ dotnet run --launch-profile http
 - `BootstrapAdmin.UserName`
 - `BootstrapAdmin.Password`
 - `BootstrapAdmin.Secret`
-- `OpenAI.PrimaryTimeoutSeconds`（默认 120 秒，超时后切换回退路由）
+- `OpenAI.PrimaryTimeoutSeconds`（默认 180 秒，主路由超时后切换回退路由）
 - `AppleAppStore.*`（仅启用 Apple IAP 时必填；私钥必须由 Secret Manager 或部署密钥注入）
 - `Mobile.MinimumSupportedVersion`
 - `Mobile.LatestVersion`
 - `Mobile.MaintenanceMode`
 - `Mobile.Features.*`
 
-完整环境变量模板见 [.env.example](./.env.example)。GPT Image2 与 Nano Banana2 的 Provider 地址、模型、Key 和请求路径以数据库 `ai_image_model_config` 为准，不从 `.env` 或 `appsettings.json` 读取。
+核心生产环境变量模板见 [.env.example](./.env.example)。可选、部署专属或多行密钥配置以 [appsettings.json](./jokester.admin/appsettings.json) 和 [runbook](./docs/runbook.md) 为准。GPT Image2 与 Nano Banana2 的 Provider 地址、模型、Key 和请求路径以数据库 `ai_image_model_config` 为准，不从 `.env` 或 `appsettings.json` 读取。
 
 JWT、MySQL 和 Redis 的核心配置没有代码内兜底，缺失时应用会在启动阶段失败。生产环境还必须配置至少一个精确的 `Security.AllowedOrigins`。Mail、第三方邮箱验证、开发管理员引导和提示词库等配置只在对应功能启用或调用时要求提供。
 
@@ -166,14 +167,14 @@ X-Bootstrap-Secret: <BootstrapAdmin.Secret>
 - `DELETE /api/auth/account-deletion/requests/{requestId}`
 
 注册邮箱验证码流程：
-- 前端先调用 `GET /api/blog/comments/captcha` 获取 `captchaId`、`imageBase64`、`mimeType` 和 `expiresInSeconds`
-- 图片验证码是 6 位大写字母/数字，5 分钟过期且校验时一次性消费
-- 调用 `POST /api/auth/register/email-code` 时必须同时传 `email`、`captchaId` 和 `captchaAnswer`
+- 前端直接调用 `POST /api/auth/register/email-code`，请求体只传 `email`
 - 后端生成 6 位验证码，写入 Redis，键前缀为 `register_email_code:` 加上配置的 `Redis.InstanceName`，有效期 10 分钟，并通过 SMTP 发信；成功响应的 `data.retryAfterSeconds=60` 用于客户端发送按钮倒计时
 - 用户收到验证码后，前端再调用 `POST /api/auth/register`
-- 注册前按客户端平台调用 `GET /api/legal/documents/current?platform=<ios|android|web>&locale=zh-CN` 获取当前版本；三类文档任一未配置时接口返回 503 并暂停注册
-- 注册请求体除账号字段外，还必须传 `acceptedPrivacyPolicy=true`、`privacyPolicyVersion`、`acceptedTermsOfService=true`、`termsOfServiceVersion`、`clientPlatform` 和 `locale`
+- 注册请求体只传 `email`、`emailCode`、`password`，不传图片验证码、用户名、昵称或法律文档版本
+- 后端按规范化邮箱 `@` 前的账号部分生成 `userName` 和 `nickName`，用户名冲突时自动消歧
 - 注册时后端会用同一个 `email` 去 Redis 查验证码；验证成功后创建用户并删除验证码键
+- 注册成功后可以直接使用邮箱和密码登录
+- 隐私政策、服务条款和 AI 数据处理授权继续由独立法律文档与授权流程维护；其中当前 AI processing 授权仍是第三方 AI 生图的前置条件
 
 登录成功返回：
 
@@ -309,13 +310,16 @@ Refresh Token 单次轮换并只按 SHA-256 哈希定位。旧 Token 在 10 秒�
 - `GET /api/ai/images/{id}`：查询 AI 生图任务详情
 - `GET /api/ai/images/models`：查询启用的 AI 图片模型
 - `GET /api/ai/images/parameters`：查询 GPT Image2 参数选项和积分价格表
-- `GET /api/ai/images/pricing-options`：查询 AI 图片积分定价列表，每项包含模型、分辨率、画质和消耗积分
+- `GET /api/ai/images/pricing-options`：legacy 客户端返回扁平定价列表；`size-mode-v1` 客户端按 `modelCode + catalogVersion` 返回版本化定价 envelope
 - `POST /api/ai/images/parameters/resolve`：解析 GPT Image2 参数为实际宽高和供应商画质
 - `POST /api/ai/images/upload`：上传 AI 图片引用文件
 - `GET /api/assets/{assetId}/content`、`GET /api/assets/{assetId}/thumbnail`：鉴权读取当前用户的 Asset 原图和缩略图
 - `DELETE /api/assets/{assetId}`：由 Asset 所有者软删除记录并清理原图和缩略图；跨用户与不存在统一返回 404
 - `POST /api/ai/images/{id}/favorite`：收藏或取消收藏任务中的单张结果图片
 - `DELETE /api/ai/images/{id}`：软删除 AI 生图任务记录，不级联删除上传 Asset 或生成文件
+- `size-mode-v1` 客户端通过 capability/platform/version/build Header 获取模型级 `catalogVersion` 与 `sizeModes`；v2 pricing、resolve、create 和 generate 使用同一不可变 catalog
+- 新协议支持 `sizeMode=explicit|auto`、durable 幂等批次、逐图结果、请求/输出尺寸分离和稳定失败字段；auto 只有在路由验证、独立价格、服务端 cohort 与配置全部就绪时才开放
+- schema 迁移不会发布模型目录；审批完成后由 `dotnet run --project .\jokester.admin -- --configure-ai-image-catalog` 在单事务中补齐受控参数/路由/价格、发布 immutable release 并切换 current pointer，完整配置和回滚顺序见 [runbook](./docs/runbook.md#ai-尺寸模式升级与回滚)
 
 ## 提示词库接口约定
 
@@ -341,7 +345,8 @@ Refresh Token 单次轮换并只按 SHA-256 哈希定位。旧 Token 在 10 秒�
 - 列表查询支持 `prompt` 对提示词做模糊查询，`startDate`/`endDate` 按创建时间筛选；只传日期的 `endDate` 会包含当天
 - 列表查询支持 `isFavorite=true` 只返回包含当前用户收藏图片的任务，`isFavorite=false` 返回不包含当前用户收藏图片的任务
 - 请求体记录 `prompt`、`resolutionCode`、`qualityCode`、`aspectRatioCode`；GPT 多图请求按 `imageCount` 创建同等数量的单图任务，每条任务固定 `imageCount=1`
-- GPT Image2 分辨率档位按长边计算：`1k=1024`、`2k=2048`、`4k=3840`；最终尺寸会压到 `16px` 倍数且总像素不超过 `8,294,400`，例如 `4k + 1:1` 为 `2880x2880`
+- GPT Image2 分辨率档位按长边计算：`1k=1024`、`2k=2048`、`4k=3840`。上游 `size` 的宽高都必须为 `16px` 倍数且不超过 `3840`，长短边比例不超过 `3:1`，总像素必须在 `655,360` 到 `8,294,400` 之间；典型结果包括 `1k + 1:1 = 1024x1024`、`2k + 16:9 = 2048x1152`、`4k + 1:1 = 2880x2880`、`4k + 16:9 = 3840x2160`
+- legacy GPT Image2 不接受项目层 `aspectRatioCode=auto`；`size-mode-v1` 的 GPT auto 使用独立 `sizeMode=auto` 契约且仓库默认关闭，Nano Banana2 的 legacy auto 行为保持不变
 - 上传响应返回 `assetId`、同源内容/缩略图地址、真实 MIME、尺寸、字节数和 `metadataStripped`；HEIC/HEIF 主图解码并规范化为 PNG，JPEG、PNG、WebP 清除元数据后保持原格式，512px 缩略图统一保存为 WebP；新版 iOS 通过 `referenceAssetIds` / `maskAssetId` 引用资源
 - 兼容期仍接受当前用户私有 `/api/media/ai/...` 的 `referenceImageUrls` / `maskImageUrl`，不接受任意远程 URL；后端在入队前校验 Asset 所有权和文件存在性
 - 直接生成响应包含 `taskId`、`taskIds` 和 `url`；创建接口返回首个 `id` 和完整 `ids`。用户关闭网页不会取消已入队任务，完成后仍可在历史记录中找回图片
@@ -365,14 +370,15 @@ Refresh Token 单次轮换并只按 SHA-256 哈希定位。旧 Token 在 10 秒�
 - `GET /api/points/details`：分页查询当前用户积分流水。
 - `POST /api/points/sign-in`：每日签到领取 25 积分；同一自然日只能领取一次。
 - 注册成功自动赠送 50 积分。
-- 签到积分当天有效；第二天调用积分查询、签到或生图扣分时会清理上一日未使用签到积分。
-- AI 生图按 `ai_image_point_price` 的 `model_code + resolution_code + quality_code` 扣积分，扣分数量为 `points * imageCount`。
-- `GET /api/ai/images/pricing-options`：返回可直接用于前端展示的积分定价列表，每项包含 `modelCode`、`modelName`、`resolutionCode`、`resolutionName`、`qualityCode`、`qualityName` 和 `points`。
-- GPT Image2 价格匹配使用 `modelCode + resolutionCode + qualityCode`；Nano Banana2 官方无 `quality` 参数，价格只按 `modelCode + resolutionCode` 匹配，`quality` 与画幅比例都不参与积分价格匹配。
-- 生图任务失败或超时时，会写入 `source=image_refund` 的积分返还流水。
+- Web/Android 充值套餐固定为 `monthly`、`trial`、`basic`、`value`；`monthly` 到账 5000 积分并在 30 天后到期，其余三档积分永久有效。
+- 到期批次会在积分查询、登录/刷新/资料、签到或生图扣分事务内先结算；生图依次消费限时套餐积分、签到积分和永久积分。
+- legacy 生图按 `ai_image_point_price` 扣分：GPT Image2 使用 `modelCode + resolutionCode + qualityCode`，Nano Banana2 只使用 `modelCode + resolutionCode`；总额为 `points * imageCount`。
+- `size-mode-v1` 在创建事务内锁定 `modelCode + catalogVersion` 的不可变 release 价格：explicit 包含分辨率，auto 的 `resolutionCode` 为 `null`，两者都不会按最终输出尺寸补扣或退款。
+- `GET /api/ai/images/pricing-options` 对 legacy 返回扁平列表；声明新能力的客户端必须带 `modelCode + catalogVersion`，返回 `{ modelCode, catalogVersion, items }`。
+- 生图任务失败或超时时，会写入 `source=image_refund` 流水并按原扣款批次、原到期时间返还积分。
 
 ## 当前完成范围
 
-- 已完成：API-01 至 API-14 的服务端代码、数据库脚本、Swagger 强类型契约和自动化测试；Web/Android 旧充值与参考图 URL 仍保留兼容期
-- 待部署配置：执行 `docs/migrations/20260812-ios-api-upgrade.sql`，按 [runbook](./docs/runbook.md#ios-api-升级与发布检查) 使用维护命令配置已审批法律文档和真实 StoreKit Product 映射，通过秘密存储注入 Apple 凭据，并先完成 Sandbox/TestFlight 验收
+- 已实现（当前工作树）：API-01 至 API-14 以及 AI `size-mode-v1` 的服务端代码、数据库脚本、Swagger 强类型契约和定向自动化测试；Web/Android 旧充值、legacy 尺寸和参考图 URL 仍保留兼容期。此状态不等同于已合并、已部署或已获公网发布批准。
+- 待部署配置：已有数据库按 [runbook](./docs/runbook.md#积分充值上线检查) 核对并只应用尚未执行的 `20260809-add-point-recharge.sql`、`20260812-ios-api-upgrade.sql`、`20260819-add-expiring-point-buckets.sql`、`20260820-add-user-membership-entitlements.sql`；再配置已审批法律文档、真实 StoreKit Product 映射和 Apple 秘密，并完成 Sandbox/TestFlight 验收。
 - 其他未完成：更完整的博客内容模型和真实前台发布链路；公网发布仍需关闭 [安全加固 PRD](./docs/security-hardening-prd.md#42-当前未关闭的发布阻断) 中的生产环境阻断项

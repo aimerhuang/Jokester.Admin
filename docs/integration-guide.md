@@ -44,23 +44,27 @@ Authorization: Bearer <accessToken>
 注册邮箱验证码流程：
 
 ```http
-GET /api/blog/comments/captcha
-
 POST /api/auth/register/email-code
 Content-Type: application/json
 
 {
-  "email": "<email>",
-  "captchaId": "<captchaId>",
-  "captchaAnswer": "<图片中的 6 位字符>"
+  "email": "<email>"
 }
 ```
 
-- 图片验证码由 `GET /api/blog/comments/captcha` 返回，包含 `captchaId`、`imageBase64`、`mimeType` 和 `expiresInSeconds`；5 分钟过期并在校验时一次性消费。
 - 邮件验证码为 6 位数字，按规范化邮箱写入 Redis，10 分钟过期。发送成功响应为 `data.retryAfterSeconds=60`；触发邮箱或 IP 限流时返回 HTTP 429、`Retry-After` 和 `details.retryAfterSeconds`，客户端以受限响应为准。
-- 注册前按真实客户端调用 `GET /api/legal/documents/current?platform=<ios|android|web>&locale=zh-CN` 获取当前法律版本。隐私政策或服务条款缺失时服务端返回 503，客户端应暂停注册而不能自行填充版本。AI 处理告知可以独立停用；此时 `aiProcessingNotice` 为 `null`，客户端不显示 AI 授权提示，也不能因此阻断注册。
-- 收到邮件后调用 `POST /api/auth/register`，除账号字段外，还要传同一个 `email`、`emailCode`，以及已接受的隐私政策/服务条款布尔值与版本号；版本不是当前生效版本时后端拒绝注册。
-- 注册 `userName` 必须为 6-20 位 ASCII 字母和数字组合，且至少各含一个；空格、下划线及其他特殊字符不允许。
+- 收到邮件后调用 `POST /api/auth/register`，请求体只包含同一个 `email`、用户输入的 `emailCode` 和 `password`：
+
+```json
+{
+  "email": "user@example.com",
+  "emailCode": "123456",
+  "password": "password"
+}
+```
+
+- 注册不使用图片验证码，也不接收用户名、昵称、隐私政策/服务条款同意字段或版本号。
+- 后端按规范化邮箱 `@` 前的账号部分生成 `userName` 和 `nickName`，用户名冲突时自动消歧；登录接口支持直接使用邮箱。
 - 登录连续失败 3 次后，再次调用 `POST /api/auth/login` 需要附带新的 `captchaId` 与 `captchaAnswer`；缺少或错误时返回 `CAPTCHA_REQUIRED`。累计失败 5 次后，账号与 IP 组合锁定 15 分钟并返回 `LOGIN_LOCKED`。
 
 登录和刷新成功都返回 `sessionId`、`accessToken`、`refreshToken`、`accessTokenExpiresAt` 和 `refreshTokenExpiresAt`。Refresh Token 只按 SHA-256 哈希存储并单次轮换；同一个旧 Token 在 10 秒并发宽限内重试会拿到同一轮换结果，超窗重放会撤销该 session family。客户端按以下 401 错误码处理：
@@ -68,6 +72,20 @@ Content-Type: application/json
 - `ACCESS_TOKEN_EXPIRED`：尝试刷新。
 - `REFRESH_TOKEN_EXPIRED`：清理本地会话并重新登录。
 - `SESSION_REVOKED`：清理本地会话并重新登录。
+
+登录、刷新和 `GET /api/auth/profile` 的 `user` 都包含可空的动态会员权益：
+
+```json
+{
+  "membership": {
+    "tierCode": "monthly_vip",
+    "status": "active",
+    "expiresAt": "2026-09-19T08:00:00Z"
+  }
+}
+```
+
+仅当月卡权益已开始、未撤销且尚未到期时返回该对象，否则 `membership=null`。客户端不得从积分余额或签到/积分批次推断 VIP；月卡积分耗尽不影响权益在到期前继续显示。多笔有效月卡同时存在时，`expiresAt` 返回其中最晚的到期时间。
 
 ### 法律文档、AI 授权和账户删除
 
@@ -205,13 +223,17 @@ Authorization: Bearer <accessToken>
 
 - 注册成功后后端自动赠送 50 积分，并写入 `sys_user_point_detail`，来源为 `register`。
 - 每日签到接口 `POST /api/points/sign-in` 每个自然日只能成功一次，成功后领取 25 积分。
-- 签到积分当天有效；第二天调用积分查询、签到或生图扣分时，后端会把上一日未使用签到积分写为 `source=sign_in_expire` 的过期扣减流水。
+- 签到积分当天有效，套餐限时积分按各自 `expiresAt` 到期；后端在积分查询、登录/刷新/资料、签到或生图扣分事务内先结算到期批次，签到过期流水使用 `source=sign_in_expire`。
 
 查询余额响应 `data`：
 
 ```json
 {
   "availablePoints": 75,
+  "permanentPoints": 50,
+  "expiringPoints": 25,
+  "nextExpiringPoints": 25,
+  "nextExpireAt": "2026-06-11T16:00:00Z",
   "hasSignedInToday": true,
   "todaySignInPoints": 25
 }
@@ -239,15 +261,16 @@ POST /api/points/recharge/admin/codes
 Authorization: Bearer <accessToken>
 ```
 
-- 套餐接口按当前用户返回首充资格和实际可得积分。
+- Web 套餐接口按当前用户返回 `monthly`、`trial`、`basic`、`value` 四档启用套餐、首充资格和实际可得积分；管理员发码界面以这里的 `code` 作为 `packageCode` 动态选项。
 - `platform=ios` 只返回已映射的 StoreKit 商品，`purchaseMethod=apple_iap`，包含 `appleProductId`/`appleProductType`，不返回外部购买 URL。响应 `data` 仍是数组，以兼容现有 Web/Android 客户端。
 - 下单接口只创建待支付订单；`purchaseUrl` 来自套餐表配置，未配置时返回 `null`。
 - iOS 不调用外部订单接口。购买后向 Apple 交易接口提交 `transactionId`、`productId`、`appAccountToken`，并在 `Idempotency-Key` 请求头传 UUID；服务端从 App Store Server API 获取并验证交易，履约成功后客户端才调用 StoreKit `finish()`。
-- 兑换成功后原子增加余额并写入 `source=recharge` 积分流水；兑换码区分大小写且只能使用一次。
+- 兑换成功后原子增加余额并写入 `source=recharge` 积分流水；兑换码区分大小写且只能使用一次。`monthly` 到账 5000 积分，自到账起 30 天有效，响应通过可空 `expiresAt` 返回到期时间。
+- 生图默认先扣限时套餐积分，再扣签到积分，最后扣永久积分；任务失败按原批次、原到期时间退款。
 - 兑换按用户和 IP 共享限流。成功、无效码、冲突及 `429 RATE_LIMITED` 都写入最小化操作审计结果（HTTP 状态、成功标记和稳定错误码），不会记录明文兑换码。
 - 管理员签发接口仅限超级管理员，可在 `packageCode` 套餐模式和 `points` 自定义积分模式中二选一；明文兑换码只在签发响应中返回一次。
 - 签发时服务端会在事务内重新锁定并核验当前用户仍是启用的超级管理员；Redis 同时按用户和 IP 限流。
-- Apple 退款/撤销由公开的 App Store Server Notifications V2 入口验签接收。余额不足以扣回时记录 `apple_iap_debt`，未结清债务会阻止继续生图。
+- Apple 退款/撤销由公开的 App Store Server Notifications V2 入口验签接收。已被活动任务预留的月卡积分延后到任务结算：失败不恢复撤销额度，成功才追扣；余额不足时记录 `apple_iap_debt`。未结清债务或未结算延后追扣都会阻止继续生图。
 
 请求、响应、订单状态和 `purchase_url` 配置详见
 [point-recharge.md](./point-recharge.md)。
@@ -282,15 +305,16 @@ Authorization: Bearer <accessToken>
 
 移动端统一使用 `POST /api/ai/images` 创建任务，并始终传 `modelCode`。后端从 `ai_image_model_config.provider` 判断 OpenAI Images 或 Gemini Images 协议；模型编码无需包含 `nano` 等命名约定。`/nanoBananaImage` 仅在兼容期保留并已在 Swagger 标记 Deprecated。`GET /api/ai/images/models` 返回 `providerCode`、参考图/画质能力、最大参考图数量、支持的图片数量及参数选项。
 
-生成图片会按 `ai_image_point_price` 的 `model_code + resolution_code + quality_code` 查询积分价格：
+legacy 请求从 `ai_image_point_price` 查询积分价格；`size-mode-v1` 请求改为锁定客户端提交 catalog 对应的不可变 release 价格：
 
-- GPT Image2 使用 `modelCode + resolutionCode + qualityCode`。
-- Nano Banana2 官方无 `quality` 参数，价格只按 `modelCode + resolutionCode` 匹配，`quality` 与画幅比例都不参与积分价格匹配。
+- legacy GPT Image2 使用 `modelCode + resolutionCode + qualityCode`。
+- legacy Nano Banana2 官方无 `quality` 参数，只按 `modelCode + resolutionCode` 匹配，`quality` 与画幅比例都不参与积分价格匹配。
+- `size-mode-v1` 在任务创建事务内锁定 current `modelCode + catalogVersion`：explicit 价格包含 `resolutionCode + qualityCode`，auto 价格只包含 `sizeMode=auto + qualityCode`，API 中 `resolutionCode=null`，不得回退 legacy 价格。
 - 扣分数量为价格表 `points * imageCount`。
 - `imageCount` 为单次生成的图片数量，按各供应商官方限制校验：GPT Image2 支持 `1-10`，Nano Banana2 支持 `1-4`；超出范围后端拒绝请求。
 - 积分不足或价格组合未配置时，后端拒绝创建任务，不调用上游生图服务。
 - 四个生成/创建接口都必须传 `idempotencyKey`（8-128 个非控制字符）。同一用户使用相同 key 和相同请求时返回原任务（多图 GPT 请求返回原任务集合）且不重复扣分；同 key 不同请求返回 HTTP 409。
-- 任务与积分预留在同一数据库事务提交；任务成功确认预留，失败或超时只对未完成图片写入一次 `source=image_refund` 流水。
+- 任务与积分预留在同一数据库事务提交；任务成功确认预留，失败或超时只对未完成图片写入一次 `source=image_refund` 流水。即使 Apple 已撤销原月卡导致实际到账为 0，该唯一审计流水仍会写入。
 - Redis 原子限制用户每日图片/积分额度、单用户活动任务数和全局任务积压；Redis 或成本控制状态不可用时拒绝新任务，不调用 Provider。
 
 参数选项与解析：
@@ -302,9 +326,56 @@ POST /api/ai/images/parameters/resolve
 Authorization: Bearer <accessToken>
 ```
 
-`GET /api/ai/images/parameters` 会同时返回启用的分辨率、画质、画幅比例选项和 `pointPrices`。`GET /api/ai/images/pricing-options` 返回可直接用于前端展示的积分定价列表，每项包含 `modelCode`、`modelName`、`resolutionCode`、`resolutionName`、`qualityCode`、`qualityName`、`points`、`priceAmount`、`currency` 和 `sort`，其中 `points` 表示该选项单张图片消耗的积分。`resolutionCode` 支持 `1k`、`2k`、`4k`，按长边计算；其中 `4k` 的长边上限为 `3840`，同时会按供应商限制把宽高压到 `16px` 倍数且总像素不超过 `8,294,400`。例如 `4k + 1:1` 会解析为 `2880x2880`，`4k + 16:9` 会解析为 `3840x2160`。`qualityCode` 支持 `low`、`med`、`high`；`aspectRatioCode` 支持 `1:1`、`16:9`、`9:16`、`4:3`、`3:4`、`3:2`、`2:3`、`21:9`。
+`GET /api/ai/images/parameters` 会同时返回启用的分辨率、画质、画幅比例选项和 legacy `pointPrices`。未声明新能力时，`GET /api/ai/images/pricing-options` 返回扁平定价列表，每项包含 `modelCode`、`resolutionCode`、`qualityCode`、`points`、`priceAmount`、`priceMinorUnits`、`currency` 和 `sort`；`points` 表示该选项单张图片消耗的积分。`resolutionCode` 支持 `1k`、`2k`、`4k`，按长边 `1024`、`2048`、`3840` 计算；`qualityCode` 支持 `low`、`med`、`high`。新协议的 envelope 见下节。
+
+GPT Image2 的上游 `size` 必须同时满足：宽高均为 `16px` 倍数且单边不超过 `3840`，长短边比例不超过 `3:1`，总像素在 `655,360` 到 `8,294,400` 之间。服务端会在保持所选画幅比例的前提下调整到合法尺寸，常用结果如下：
+
+| 分辨率档位 | `1:1` | `16:9` |
+|------------|-------|--------|
+| `1k` | `1024x1024` | `1088x608` |
+| `2k` | `2048x2048` | `2048x1152` |
+| `4k` | `2880x2880` | `3840x2160` |
+
+legacy GPT Image2 的 `aspectRatioCode` 必须显式传入 `1:1`、`16:9`、`9:16`、`4:3`、`3:4`、`3:2`、`2:3`、`21:9` 之一。legacy 提交 `aspectRatioCode=auto` 时返回 HTTP 400 和机器码 `AUTO_SIZE_NOT_SUPPORTED`；已受控发布的自动尺寸能力只使用下节的 `sizeMode=auto`。Nano Banana2 仍可使用 legacy `aspectRatioCode=auto`。
 
 `resolution` 可作为 `resolutionCode` 的兼容别名；两者同时传入时优先使用 `resolution`。`modelCode` 是业务模型编码，后端会按 `model_code + resolution_code + route_role` 读取数据库路由，并把当前路由的 `provider_model` 原样传给上游 `model` 字段。不要假设主、备供应商模型参数彼此相同或等于 `modelCode`。
+
+### size-mode-v1 协议
+
+理解新协议的客户端必须发送以下请求头；服务端仍会结合登录账号的稳定 cohort 判定 auto 资格，伪造 Header 不会获得 auto 权限：
+
+```http
+X-Client-Capabilities: ai-size-mode-v1
+X-Client-Platform: web|android|ios
+X-Client-Version: <semantic-version>
+X-Client-Build: <build-id>
+```
+
+`GET /api/ai/images/models` 对新协议客户端返回模型级 `sizeContractVersion`、`catalogVersion` 和 `capabilities.sizeModes/defaultSizeMode/supportsAutoSize`。模型能力是唯一选择依据；`/parameters` 只是显示和显式尺寸算法目录。模型与 v2 定价响应使用 `Cache-Control: private, no-store`，不得跨用户缓存。
+
+GPT explicit 目录的业务分辨率集合固定为 `1k/2k/4k`。客户端展示时使用 `1K、2K、4K` 的业务顺序，不依赖数据库行、路由或价格响应的偶然顺序；最终可选项仍取模型能力与当前 catalog 价格的交集。
+
+带上述 capability 调用 `GET /api/ai/images/pricing-options?modelCode=...&catalogVersion=...` 时，响应为 `{ modelCode, catalogVersion, items }`。`items[].sizeMode=auto` 的 `resolutionCode` 为 `null`，积分以 `points` 为准。未声明 capability 的调用继续得到原扁平价格数组，且不会出现 auto 价格行。
+
+新显式尺寸请求必须提交 `sizeMode=explicit`、刚从模型接口读取的 `catalogVersion`、`resolutionCode`、`aspectRatioCode` 和 `qualityCode`。新自动尺寸请求必须提交 `sizeMode=auto`、`catalogVersion` 和 `qualityCode`，并完全省略或传 JSON `null` 的 `resolution`、`resolutionCode`、`aspectRatioCode`；空字符串也会以 `INVALID_SIZE_MODE_COMBINATION` 拒绝。示例：
+
+```json
+{
+  "idempotencyKey": "img-size-v1-20260821-001",
+  "prompt": "一张写实风格博客封面图",
+  "modelCode": "gpt-image-2",
+  "imageCount": 2,
+  "sizeMode": "auto",
+  "catalogVersion": "imgcat_20260821_01",
+  "qualityCode": "med"
+}
+```
+
+`catalogVersion` 未提供返回 `400 VALIDATION_ERROR`，未知或已切换的版本返回 `409 IMAGE_CATALOG_CHANGED`。同一用户相同 `idempotencyKey` 的 durable 事实优先于当前 catalog、Redis、Asset 和价格状态：相同规范化 payload 返回原有序任务，不同 payload 返回 `409 IDEMPOTENCY_CONFLICT`；catalog 不参与客户端意图指纹。
+
+异步创建响应保留 `id/taskId` 首任务与 `ids/taskIds` 完整有序列表，并增加 `requestState=active|partially_deleted|deleted`。`size-mode-v1` 的同步 `/generate` 返回 `batchStatus=processing|succeeded|partial|failed` 和逐图 `results[]`；每项包含 ordinal、taskId、status、删除状态、实际输出尺寸、稳定失败字段和最终退款积分。任务 DTO 通过 `requested*` 表示请求尺寸、`output*` 表示真实解码尺寸；auto 排队时请求尺寸为 `auto`、请求宽高和输出尺寸均为 `null`，成功后才写入实际输出尺寸。
+
+仓库默认 `AiImageSizeMode.Enabled=false`、`AutoEnabled=false`，迁移也不写入 auto 路由、价格、地址或密钥。旧 Nano/Gemini 继续使用 `legacy-aspect-auto`；兼容端点显式提交 `sizeMode/catalogVersion` 会返回 `INVALID_SIZE_MODE_COMBINATION`。
 
 GPT Image2 直接生成请求体：
 
@@ -352,7 +423,7 @@ GPT Image2 创建后台任务请求体：
 
 GPT 多图按请求 `imageCount` 拆成同等数量的任务，每条 `ai_image_task.image_count` 固定为 `1`，并由 worker 在全局 Provider 并发限制内同时处理。创建接口返回 `id` 和 `ids`：`id` 是首个任务 id，`ids` 包含本批全部任务 id。整批任务插入、总积分扣减和每个任务的 `image:{taskId}:reserve` 流水在同一数据库事务提交；同一幂等键重试返回原 `ids`。
 
-GPT 主备上游都来自 `ai_image_model_config`。后端按 `model_code + resolution_code` 先读取启用的 `route_role=primary`，失败后切换到同一槽位启用的 `route_role=fallback`；两条记录分别提供自己的 `provider_model`、地址、Key 和请求路径。禁用主记录即可强制直连备用记录，切换不需要重启服务。
+GPT 主备上游都来自 `ai_image_model_config`。后端按 `model_code + resolution_code` 先读取启用的 `route_role=primary`，失败后切换到同一槽位启用的 `route_role=fallback`；两条记录分别提供自己的 `provider_model`、地址、Key 和请求路径。`OpenAI.PrimaryTimeoutSeconds` 默认 `180` 秒，仅控制主路由单次尝试的等待时间；禁用主记录即可强制直连备用记录，切换不需要重启服务。
 
 列表接口支持以下筛选参数：
 
