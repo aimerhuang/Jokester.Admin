@@ -1,6 +1,7 @@
 .env
 .env.*
 !.env.example
+!deploy/.env.production.example
 
 bin/
 obj/
@@ -14,6 +15,7 @@ artifacts/
 /logs/
 /wwwroot/ai-images/
 /wwwroot/avatar/
+/.claude/worktrees/
 
 *.user
 *.suo
