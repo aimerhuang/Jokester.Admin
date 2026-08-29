@@ -78,13 +78,15 @@ $caddyPath = Join-Path $PSScriptRoot 'Caddyfile'
 $environmentExamplePath = Join-Path $PSScriptRoot '.env.production.example'
 $serverDeployPath = Join-Path $PSScriptRoot 'server-deploy.sh'
 $serverImportPath = Join-Path $PSScriptRoot 'server-import-database.sh'
+$serverPrepareEnvironmentPath = Join-Path $PSScriptRoot 'server-prepare-environment.sh'
 $uploadPaths = @(
     $archivePath,
     $composePath,
     $caddyPath,
     $environmentExamplePath,
     $serverDeployPath,
-    $serverImportPath
+    $serverImportPath,
+    $serverPrepareEnvironmentPath
 )
 foreach ($path in $uploadPaths) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {

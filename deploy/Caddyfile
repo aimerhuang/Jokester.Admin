@@ -32,8 +32,30 @@
 
 {$APP_DOMAIN} {
 	encode zstd gzip
-	reverse_proxy api:8080 {
-		header_up X-Forwarded-For {client_ip}
+
+	@backend path \
+ /api \
+ /api/* \
+ /avatar/* \
+ /blog/* \
+ /prompt-images \
+ /prompt-images/* \
+ /swagger \
+ /swagger/*
+
+	handle @backend {
+		reverse_proxy api:8080 {
+			header_up X-Forwarded-For {client_ip}
+		}
+	}
+
+	@assets path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+
+	handle {
+		root * /srv/frontend
+		try_files {path} /index.html
+		file_server
 	}
 
 	log {

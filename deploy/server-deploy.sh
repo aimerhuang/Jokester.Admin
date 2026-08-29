@@ -30,7 +30,7 @@ command -v docker >/dev/null
 docker compose version >/dev/null
 command -v flock >/dev/null
 
-install -d -m 0755 "$deploy_root" "$deploy_root/releases" "$deploy_root/data"
+install -d -m 0755 "$deploy_root" "$deploy_root/releases" "$deploy_root/data" "$deploy_root/frontend"
 exec 9>"$deploy_root/.deploy.lock"
 if ! flock -n 9; then
   echo "Another deployment is already running." >&2
@@ -41,6 +41,7 @@ install -m 0644 "$script_directory/docker-compose.production.yml" "$compose_file
 install -m 0644 "$script_directory/Caddyfile" "$deploy_root/Caddyfile"
 install -m 0644 "$script_directory/.env.production.example" "$deploy_root/.env.production.example"
 install -m 0755 "$script_directory/server-import-database.sh" "$deploy_root/server-import-database.sh"
+install -m 0755 "$script_directory/server-prepare-environment.sh" "$deploy_root/server-prepare-environment.sh"
 
 for data_directory in private-media prompt-images blog avatar data-protection; do
   install -d -m 0750 "$deploy_root/data/$data_directory"

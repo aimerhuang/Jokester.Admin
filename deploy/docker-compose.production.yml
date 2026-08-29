@@ -81,7 +81,7 @@ services:
       - ./data/avatar:/app/wwwroot/avatar
       - ./data/data-protection:/home/app/.aspnet/DataProtection-Keys
     healthcheck:
-      test: ["CMD-SHELL", "curl --fail --silent --show-error http://127.0.0.1:8080/api/sites/site_code >/dev/null"]
+      test: ["CMD-SHELL", "curl --fail --silent --show-error --header 'Host: ${APP_DOMAIN}' http://127.0.0.1:8080/api/sites/site_code >/dev/null"]
       interval: 15s
       timeout: 10s
       retries: 20
@@ -108,6 +108,7 @@ services:
       - 443:443/udp
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./frontend:/srv/frontend:ro
       - caddy-data:/data
       - caddy-config:/config
     networks:
