@@ -74,6 +74,8 @@ compose=(
 )
 
 "${compose[@]}" config --quiet
+"${compose[@]}" run --rm --no-deps caddy \
+  caddy validate --config /etc/caddy/Caddyfile
 
 wait_for_api() {
   local status
@@ -116,6 +118,12 @@ if ! wait_for_api; then
   echo "API did not become healthy within five minutes." >&2
   "${compose[@]}" logs --tail 200 api mysql redis caddy || true
   rollback || true
+  exit 1
+fi
+
+if ! "${compose[@]}" up --detach --no-deps --force-recreate caddy; then
+  echo "Caddy failed to reload the deployment configuration." >&2
+  "${compose[@]}" logs --tail 200 caddy || true
   exit 1
 fi
 
