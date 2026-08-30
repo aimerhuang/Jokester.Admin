@@ -74,7 +74,11 @@ compose=(
 )
 
 "${compose[@]}" config --quiet
-"${compose[@]}" run --rm --no-deps caddy \
+docker run --rm \
+  --network none \
+  --env-file "$environment_file" \
+  --volume "$deploy_root/Caddyfile:/etc/caddy/Caddyfile:ro" \
+  caddy:2.10-alpine \
   caddy validate --config /etc/caddy/Caddyfile
 
 wait_for_api() {
