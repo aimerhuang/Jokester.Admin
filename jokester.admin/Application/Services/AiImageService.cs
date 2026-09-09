@@ -469,13 +469,12 @@ public sealed class AiImageService(
         var normalizedMaskImageUrl = ValidateMaskImageUrl(maskImageUrl, normalizedReferenceImageUrls);
         var requestedModelCode = AiImageModelConfigService.NormalizeModelCode(modelCode);
         var modelRoutes = await modelConfigService.ResolveRoutesAsync(requestedModelCode, parameters.ResolutionCode, cancellationToken);
-        var modelConfig = modelRoutes[0];
-
-        if (!string.Equals(modelConfig.ModelCode, AiImageModelConfigService.DefaultGptModelCode, StringComparison.OrdinalIgnoreCase))
+        if (modelRoutes.Any(route => !string.Equals(
+            route.ProviderProtocol, AiImageModelConfigService.OpenAiImageProtocol, StringComparison.Ordinal)))
         {
             throw new AppException(
                 ErrorCodes.BadRequest,
-                $"Model {requestedModelCode} is not supported by this endpoint. Use {AiImageModelConfigService.DefaultGptModelCode} on /api/ai/images/generate, or call /api/ai/images/nanoBananaImage/generate for Nano Banana.");
+                $"Model {requestedModelCode} requires a different provider protocol. This endpoint only supports OpenAI Images routes.");
         }
 
         return await GenerateFromResolvedRoutesAsync(

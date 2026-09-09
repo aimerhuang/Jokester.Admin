@@ -4,6 +4,8 @@ using System.Text;
 using jokester.admin.Application.Abstractions;
 using jokester.admin.Application.DTOs.AiImages;
 using jokester.admin.Application.Services;
+using jokester.admin.Common;
+using jokester.admin.Common.Exceptions;
 using jokester.admin.Infrastructure;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -17,8 +19,17 @@ public sealed class AiImageRouteFallbackTests
 {
     private const string OnePixelPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
-    [Fact]
-    public async Task GenerateFromResolved_SendsExplicit2KSize_AndUsesFallbackRoute_WhenPrimaryFails()
+    [Theory]
+    [InlineData("gpt-image-2", "configured-fallback-model", false)]
+    [InlineData("gpt-image-2", "configured-fallback-model", true)]
+    [InlineData("gpt-image-2.5-flare", "gpt-image-2.5-flare", false)]
+    [InlineData("gpt-image-2.5-flare", "gpt-image-2.5-flare", true)]
+    [InlineData("gpt-image-2.5-sunburst", "gpt-image-2.5-sunburst", false)]
+    [InlineData("gpt-image-2.5-sunburst", "gpt-image-2.5-sunburst", true)]
+    public async Task GenerateFromResolved_SendsExplicit2KSize_AndUsesFallbackRoute_WhenPrimaryFails(
+        string modelCode,
+        string fallbackProviderModel,
+        bool withReferenceImage)
     {
         var testRoot = Path.Combine(Path.GetTempPath(), $"jokester-ai-route-test-{Guid.NewGuid():N}");
         var contentRoot = Path.Combine(testRoot, "app");
@@ -26,28 +37,31 @@ public sealed class AiImageRouteFallbackTests
         Directory.CreateDirectory(contentRoot);
         try
         {
-            var handler = new SequenceHandler(
+            var failure = new Func<HttpRequestMessage, HttpResponseMessage>(
                 _ => new HttpResponseMessage(HttpStatusCode.BadGateway)
                 {
                     Content = new StringContent("{\"error\":\"primary unavailable\"}", Encoding.UTF8, "application/json")
-                },
+                });
+            var success = new Func<HttpRequestMessage, HttpResponseMessage>(
                 _ => new HttpResponseMessage(HttpStatusCode.OK)
                 {
                     Content = new StringContent($"{{\"data\":[{{\"b64_json\":\"{OnePixelPng}\"}}]}}", Encoding.UTF8, "application/json")
                 });
+            var handler = new SequenceHandler(withReferenceImage ? [failure, failure, success] : [failure, success]);
             using var httpClient = new HttpClient(handler);
 
             var modelConfigService = new Mock<IAiImageModelConfigService>();
             modelConfigService
-                .Setup(x => x.ResolveRoutesAsync("gpt-image-2", "2k", It.IsAny<CancellationToken>()))
+                .Setup(x => x.ResolveRoutesAsync(modelCode, "2k", It.IsAny<CancellationToken>()))
                 .ReturnsAsync([
                     new ResolvedAiImageModelConfig
                     {
                         Id = 10,
-                        ModelCode = "gpt-image-2",
-                        ModelName = "GPT Image 2",
+                        ModelCode = modelCode,
+                        ModelName = modelCode,
                         Provider = "primary-openai-image",
-                        ProviderModel = "gpt-image-2",
+                        ProviderProtocol = AiImageModelConfigService.OpenAiImageProtocol,
+                        ProviderModel = modelCode,
                         ResolutionCode = "2k",
                         RouteRole = AiImageModelConfigService.PrimaryRouteRole,
                         BaseUrl = "https://primary.example/v1",
@@ -58,10 +72,11 @@ public sealed class AiImageRouteFallbackTests
                     new ResolvedAiImageModelConfig
                     {
                         Id = 11,
-                        ModelCode = "gpt-image-2",
-                        ModelName = "GPT Image 2",
+                        ModelCode = modelCode,
+                        ModelName = modelCode,
                         Provider = "fallback-openai-image",
-                        ProviderModel = "configured-fallback-model",
+                        ProviderProtocol = AiImageModelConfigService.OpenAiImageProtocol,
+                        ProviderModel = fallbackProviderModel,
                         ResolutionCode = "2k",
                         RouteRole = AiImageModelConfigService.FallbackRouteRole,
                         BaseUrl = "https://fallback.example/v1",
@@ -103,9 +118,19 @@ public sealed class AiImageRouteFallbackTests
                 Mock.Of<IAiSizeModeRolloutPolicy>(),
                 NullLogger<AiImageService>.Instance);
 
+            string[] referenceImageUrls = [];
+            if (withReferenceImage)
+            {
+                var inputKey = "42/assets/reference.png";
+                var inputPath = mediaPathResolver.ResolveFilePath(inputKey);
+                Directory.CreateDirectory(Path.GetDirectoryName(inputPath)!);
+                await File.WriteAllBytesAsync(inputPath, Convert.FromBase64String(OnePixelPng));
+                referenceImageUrls = [$"/api/media/ai/{inputKey}"];
+            }
+
             var result = await service.GenerateFromResolvedAsync(
                 "test image",
-                "gpt-image-2",
+                modelCode,
                 new ResolveAiImageParametersResponse
                 {
                     ResolutionCode = "2k",
@@ -116,25 +141,29 @@ public sealed class AiImageRouteFallbackTests
                     Size = "2048x1152",
                     ProviderQuality = "medium"
                 },
-                [],
+                referenceImageUrls,
                 null,
                 42,
                 default);
 
-            Assert.Equal(2, handler.Requests.Count);
-            Assert.Equal("https://primary.example/v1/images/generations", handler.Requests[0].Uri);
+            Assert.Equal(withReferenceImage ? 3 : 2, handler.Requests.Count);
+            var operation = withReferenceImage ? "edits" : "generations";
+            var contentType = withReferenceImage ? "multipart/form-data" : "application/json";
+            Assert.All(handler.Requests, request => Assert.Equal(contentType, request.ContentType));
+            Assert.Equal($"https://primary.example/v1/images/{operation}", handler.Requests[0].Uri);
             Assert.Equal("primary-key", handler.Requests[0].BearerToken);
-            Assert.Equal("gpt-image-2", handler.Requests[0].Model);
+            Assert.Equal(modelCode, handler.Requests[0].Model);
             Assert.Equal("2048x1152", handler.Requests[0].Size);
             Assert.Equal("medium", handler.Requests[0].Quality);
             Assert.Equal(1, handler.Requests[0].ImageCount);
-            Assert.Equal("https://fallback.example/v1/images/generations", handler.Requests[1].Uri);
-            Assert.Equal("fallback-key", handler.Requests[1].BearerToken);
-            Assert.Equal("configured-fallback-model", handler.Requests[1].Model);
-            Assert.Equal("2048x1152", handler.Requests[1].Size);
-            Assert.Equal("medium", handler.Requests[1].Quality);
-            Assert.Equal(1, handler.Requests[1].ImageCount);
-            Assert.Equal("configured-fallback-model", result.ProviderModel);
+            var fallbackRequest = handler.Requests[^1];
+            Assert.Equal($"https://fallback.example/v1/images/{operation}", fallbackRequest.Uri);
+            Assert.Equal("fallback-key", fallbackRequest.BearerToken);
+            Assert.Equal(fallbackProviderModel, fallbackRequest.Model);
+            Assert.Equal("2048x1152", fallbackRequest.Size);
+            Assert.Equal("medium", fallbackRequest.Quality);
+            Assert.Equal(1, fallbackRequest.ImageCount);
+            Assert.Equal(fallbackProviderModel, result.ProviderModel);
             Assert.StartsWith("/api/media/ai/42/", result.Url, StringComparison.Ordinal);
             var storedFile = mediaPathResolver.ResolveFilePath(result.Url["/api/media/ai/".Length..]);
             Assert.True(File.Exists(storedFile));
@@ -144,6 +173,60 @@ public sealed class AiImageRouteFallbackTests
         {
             Directory.Delete(testRoot, recursive: true);
         }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GenerateFromResolved_RejectsNonOpenAiProtocol_BeforeSending(bool incompatibleFallback)
+    {
+        const string modelCode = "gpt-image-2.5-flare";
+        var modelConfigService = new Mock<IAiImageModelConfigService>();
+        modelConfigService
+            .Setup(service => service.ResolveRoutesAsync(modelCode, "2k", It.IsAny<CancellationToken>()))
+            .ReturnsAsync([
+                new ResolvedAiImageModelConfig
+                {
+                    ModelCode = modelCode,
+                    ProviderProtocol = incompatibleFallback
+                        ? AiImageModelConfigService.OpenAiImageProtocol
+                        : AiImageModelConfigService.GeminiImageProtocol
+                },
+                new ResolvedAiImageModelConfig
+                {
+                    ModelCode = modelCode,
+                    RouteRole = AiImageModelConfigService.FallbackRouteRole,
+                    ProviderProtocol = AiImageModelConfigService.GeminiImageProtocol
+                }
+            ]);
+        var handler = new SequenceHandler();
+        using var httpClient = new HttpClient(handler);
+        var service = new AiImageService(
+            httpClient,
+            modelConfigService.Object,
+            Mock.Of<IPointService>(),
+            Mock.Of<ISqlSugarClient>(),
+            Mock.Of<ICurrentUser>(),
+            Mock.Of<IAiImageTaskQueue>(),
+            Mock.Of<IAiImageAdmissionService>(),
+            Options.Create(new OpenAiOptions()),
+            Options.Create(new AiImageSizeModeOptions()),
+            Options.Create(new PromptLibraryOptions()),
+            Mock.Of<IAiMediaPathResolver>(),
+            Mock.Of<IAiPromptFilter>(),
+            Mock.Of<IUserConsentService>(),
+            Mock.Of<IMediaAssetService>(),
+            Mock.Of<IAiImageCatalogService>(),
+            Mock.Of<IAiSizeModeRolloutPolicy>(),
+            NullLogger<AiImageService>.Instance);
+
+        var exception = await Assert.ThrowsAsync<AppException>(() => service.GenerateFromResolvedAsync(
+            "test image", modelCode,
+            new ResolveAiImageParametersResponse { ResolutionCode = "2k" },
+            [], null, 42, default));
+
+        Assert.Equal(ErrorCodes.BadRequest, exception.Code);
+        Assert.Empty(handler.Requests);
     }
 
     [Fact]

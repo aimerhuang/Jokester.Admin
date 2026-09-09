@@ -166,6 +166,65 @@ public sealed class AiImageModelConfigServiceTests
         Assert.Equal(["auto", "1:1"], models[AiImageModelConfigService.DefaultNanoBananaModelCode].AspectRatios);
     }
 
+    [Theory]
+    [InlineData("gpt-image-2.5-flare", "GPT Image 2.5 Flare")]
+    [InlineData("gpt-image-2.5-sunburst", "GPT Image 2.5 Sunburst")]
+    public async Task GetEnabledModelsAsync_ExposesGpt25AsDistinctModel_WithItsOwnRoutesAndPrices(
+        string modelCode,
+        string modelName)
+    {
+        using var context = new TestContext();
+        var primary = CreateConfig(
+            2, AiImageModelConfigService.PrimaryRouteRole, modelCode,
+            "https://primary.example/v1", resolutionCode: string.Empty, modelCode: modelCode);
+        primary.ModelName = modelName;
+        var fallback = CreateConfig(
+            3, AiImageModelConfigService.FallbackRouteRole, modelCode,
+            "https://fallback.example/v1", resolutionCode: string.Empty, modelCode: modelCode);
+        fallback.ModelName = modelName;
+        context.Seed(
+            CreateConfig(1, AiImageModelConfigService.PrimaryRouteRole, "gpt-image-2", "https://primary.example/v1"),
+            primary,
+            fallback);
+        context.SeedParameters(
+            CreateParameter(1, "resolution", "1k"),
+            CreateParameter(2, "resolution", "2k"),
+            CreateParameter(3, "resolution", "4k"),
+            CreateParameter(4, "quality", "med"),
+            CreateParameter(5, "aspect_ratio", "auto"),
+            CreateParameter(6, "aspect_ratio", "1:1"));
+        context.SeedPrices(
+            CreatePrice(1, "1k"),
+            CreatePrice(2, "1k", modelCode),
+            CreatePrice(3, "2k", modelCode),
+            CreatePrice(4, "4k", modelCode));
+
+        var models = await context.Service.GetEnabledModelsAsync(default);
+        var model = Assert.Single(models, option => option.Code == modelCode);
+        Assert.Equal(2, models.Count);
+        Assert.Equal(modelName, model.Name);
+        Assert.Equal("openai", model.ProviderCode);
+        Assert.Equal(["1k", "2k", "4k"], model.Resolutions);
+        Assert.Equal(["med"], model.Qualities);
+        Assert.Equal(["1:1"], model.AspectRatios);
+        Assert.True(model.Capabilities.SupportsQuality);
+        Assert.True(model.Capabilities.SupportsReferenceImages);
+
+        foreach (var resolution in model.Resolutions)
+        {
+            var routes = await context.Service.ResolveRoutesAsync(modelCode, resolution, default);
+            Assert.Equal(2, routes.Count);
+            Assert.All(routes, route =>
+            {
+                Assert.Equal(modelCode, route.ModelCode);
+                Assert.Equal(modelCode, route.ProviderModel);
+                Assert.Equal(AiImageModelConfigService.OpenAiImageProtocol, route.ProviderProtocol);
+            });
+            Assert.Equal("primary-key", routes[0].ApiKey);
+            Assert.Equal("fallback-key", routes[1].ApiKey);
+        }
+    }
+
     private static AiImageModelConfigEntity CreateConfig(
         long id,
         string routeRole,

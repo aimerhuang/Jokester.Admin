@@ -305,6 +305,13 @@ Authorization: Bearer <accessToken>
 
 移动端统一使用 `POST /api/ai/images` 创建任务，并始终传 `modelCode`。后端从 `ai_image_model_config.provider` 判断 OpenAI Images 或 Gemini Images 协议；模型编码无需包含 `nano` 等命名约定。`/nanoBananaImage` 仅在兼容期保留并已在 Swagger 标记 Deprecated。`GET /api/ai/images/models` 返回 `providerCode`、参考图/画质能力、最大参考图数量、支持的图片数量及参数选项。
 
+新增 `gpt-image-2.5-flare`（GPT Image 2.5 Flare）和 `gpt-image-2.5-sunburst`（GPT Image 2.5 Sunburst）时，已有数据库执行 `docs/migrations/20260909-add-gpt-image-25-models.sql`，并部署配套后端代码。下拉框继续读取 `/api/ai/images/models`，提交所选项的 `code`，不要在客户端维护固定模型列表。
+
+- 迁移在数据库内复制 `gpt-image-2` 的未删除主备路由，包括分辨率、协议、地址、密钥、文生图/图生图路径及启用状态；`provider_model` 分别设为两个新模型编码，不沿用旧模型或旧分辨率别名。真实密钥不进入脚本或仓库。
+- 两个新模型的 legacy 积分价格初始化为 GPT Image 2 对应档位的价格，可在各自的 `ai_image_point_price` 记录中独立调整；客户端不得复用旧模型的计费编码。
+- 迁移只补缺失记录，重复执行不会覆盖已存在的新模型路由、密钥、价格或软删除状态，也不改动 GPT Image 2。应先配置好源模型，再执行迁移；新装数据库的密钥仍为空占位，之后须分别配置各模型。
+- 不复制已发布的 `size-mode-v1` release，也不自动开放 auto；需要该协议时，按现有受控 catalog 发布流程为新模型单独审批和发布。上线前需在各自渠道验证新模型的文生图和图生图支持。
+
 legacy 请求从 `ai_image_point_price` 查询积分价格；`size-mode-v1` 请求改为锁定客户端提交 catalog 对应的不可变 release 价格：
 
 - legacy GPT Image2 使用 `modelCode + resolutionCode + qualityCode`。
