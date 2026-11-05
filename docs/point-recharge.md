@@ -199,7 +199,18 @@ SET purchase_url = 'https://pay.example.com/checkout?orderNo={orderNo}&packageCo
 WHERE package_code = 'basic';
 ```
 
-当前初始化脚本中的四个套餐默认都未配置 `purchase_url`。接入真实支付平台时，
+当前四个套餐的 `purchase_url` 指向外部发卡平台（用户购买后获得兑换码，再回站内核销）：
+
+| package_code | 积分 | purchase_url |
+| --- | --- | --- |
+| `monthly` | 5000 | `https://wzyp.cn/item/r1bw3i` |
+| `trial` | 200 | `https://wzyp.cn/item/jxmbco` |
+| `basic` | 1000 | `https://wzyp.cn/item/w0yeju` |
+| `value` | 3600 | `https://wzyp.cn/item/9c22yo` |
+
+已有数据库执行 `docs/migrations/20261105-set-point-recharge-purchase-urls.sql`；
+新库由 `jokester.admin.sql` 初始化。后续改链接只需按上面的示例 `UPDATE` 对应行，
+前端在创建订单后直接跳转该地址，无需改代码或重新部署。接入真实支付平台时，
 应增加签名校验和服务端支付回调，再由可信回调确认订单并签发兑换码；不能由前端
 直接把待支付订单改为已支付。
 
@@ -212,12 +223,14 @@ docs/migrations/20260809-add-point-recharge.sql
 docs/migrations/20260812-ios-api-upgrade.sql
 docs/migrations/20260819-add-expiring-point-buckets.sql
 docs/migrations/20260820-add-user-membership-entitlements.sql
+docs/migrations/20261105-set-point-recharge-purchase-urls.sql
 ```
 
 - `20260809-add-point-recharge.sql` 创建充值套餐、订单、兑换码并写入四档默认套餐。
 - `20260812-ios-api-upgrade.sql` 创建 Apple 商品、交易、通知和退款负债等移动端表，不写入真实 Product ID。
 - `20260819-add-expiring-point-buckets.sql` 增加套餐/签到积分批次、有效期、原批次退款和 Apple 延后追扣结构；空到期时间表示永久批次。
 - `20260820-add-user-membership-entitlements.sql` 创建独立会员权益来源账本，并从仍有效的 Web 月卡核销及未退款 Apple 月卡履约回填动态 VIP 权益。
+- `20261105-set-point-recharge-purchase-urls.sql` 为四档套餐写入外部购买链接（`purchase_url`）。
 
 执行 `20260819` 前必须结算活动生图任务并停止全部 API/Worker 写入，禁止旧、新节点滚动混写。迁移只按保守下界回填停写时点当天仍能证明属于签到赠送的积分，不会自动重分类历史月卡或 Apple 履约；legacy Apple 退款只扣未追踪余额，不会扣后来到账的新批次，不足部分进入 `apple_iap_debt`。生产库存在历史月卡核销、Apple 履约或未结算生图任务时，发布前必须人工对账。
 

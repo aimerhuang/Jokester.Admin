@@ -701,14 +701,16 @@ public sealed class AiImageService(
         httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", modelConfig.ApiKey);
 
         logger.LogInformation(
-            "Sending AI image request. Mode={Mode}, ModelCode={ModelCode}, RouteRole={RouteRole}, RouteConfigId={RouteConfigId}, ProviderModel={ProviderModel}, Endpoint={Endpoint}, Size={Size}, Quality={Quality}, ReferenceImageCount={ReferenceImageCount}",
+            "Sending AI image request. Mode={Mode}, ModelCode={ModelCode}, RouteRole={RouteRole}, RouteConfigId={RouteConfigId}, ProviderModel={ProviderModel}, Endpoint={Endpoint}, RequestFormat={RequestFormat}, Size={Size}, AspectRatio={AspectRatio}, Quality={Quality}, ReferenceImageCount={ReferenceImageCount}",
             referenceImageUrls.Count == 0 ? "generations" : "edits",
             modelConfig.ModelCode,
             modelConfig.RouteRole,
             modelConfig.Id,
             modelConfig.ProviderModel,
             httpRequest.RequestUri,
+            modelConfig.RequestFormat,
             parameters.Size,
+            parameters.AspectRatioCode,
             parameters.ProviderQuality,
             referenceImageUrls.Count);
 
@@ -2195,7 +2197,7 @@ public sealed class AiImageService(
             Content = JsonContent.Create(new
             {
                 model = config.ProviderModel,
-                prompt,
+                prompt = BuildProviderPrompt(config, prompt, parameters),
                 size = parameters.Size,
                 quality = parameters.ProviderQuality,
                 n = 1
@@ -2205,12 +2207,34 @@ public sealed class AiImageService(
         return request;
     }
 
+    // prompt-aspect-ratio 中转只按提示词决定宽高比，追加的说明只发给供应商，不写回任务提示词。
+    public static string BuildProviderPrompt(ResolvedAiImageModelConfig config, string prompt, ResolveAiImageParametersResponse parameters)
+    {
+        if (!string.Equals(config.RequestFormat, AiImageModelConfigService.PromptAspectRatioRequestFormat, StringComparison.Ordinal))
+        {
+            return prompt;
+        }
+
+        var parts = parameters.AspectRatioCode?.Trim().Split(':');
+        if (parts is not { Length: 2 }
+            || !int.TryParse(parts[0], out var width)
+            || !int.TryParse(parts[1], out var height)
+            || width <= 0
+            || height <= 0)
+        {
+            return prompt;
+        }
+
+        var orientation = width < height ? "portrait" : width > height ? "landscape" : "square";
+        return $"{prompt}\n\nOutput image aspect ratio: {width}:{height} ({orientation}).";
+    }
+
     private HttpRequestMessage BuildEditRequest(ResolvedAiImageModelConfig config, string prompt, ResolveAiImageParametersResponse parameters, IReadOnlyList<string> referenceImageUrls, string? maskImageUrl, string imageFieldName)
     {
         var content = new MultipartFormDataContent
         {
             { new StringContent(config.ProviderModel), "model" },
-            { new StringContent(prompt), "prompt" },
+            { new StringContent(BuildProviderPrompt(config, prompt, parameters)), "prompt" },
             { new StringContent(parameters.Size), "size" },
             { new StringContent(parameters.ProviderQuality), "quality" },
             { new StringContent("1"), "n" }

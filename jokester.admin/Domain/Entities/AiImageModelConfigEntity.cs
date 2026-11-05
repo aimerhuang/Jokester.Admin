@@ -38,6 +38,9 @@ public sealed class AiImageModelConfigEntity
     [SugarColumn(ColumnName = "image_to_image_path")]
     public string ImageToImagePath { get; set; } = "/images/edits";
 
+    [SugarColumn(ColumnName = "request_format")]
+    public string RequestFormat { get; set; } = "openai-size";
+
     [SugarColumn(ColumnName = "sort")]
     public int Sort { get; set; }
 

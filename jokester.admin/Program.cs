@@ -14,11 +14,18 @@ var rootDirectory = Directory.GetCurrentDirectory();
 var isAiMediaMigration = args.Contains("--migrate-ai-media", StringComparer.OrdinalIgnoreCase);
 var isLegalDocumentConfiguration = args.Contains("--configure-legal-documents", StringComparer.OrdinalIgnoreCase);
 var isAiImageCatalogConfiguration = args.Contains("--configure-ai-image-catalog", StringComparer.OrdinalIgnoreCase);
-if (new[] { isAiMediaMigration, isLegalDocumentConfiguration, isAiImageCatalogConfiguration }.Count(x => x) > 1)
+// --seed-admin [user-name] [password]；省略时读取 BootstrapAdmin:UserName / BootstrapAdmin:Password。
+var seedAdminIndex = Array.FindIndex(args, x => string.Equals(x, "--seed-admin", StringComparison.OrdinalIgnoreCase));
+var isSeedAdmin = seedAdminIndex >= 0;
+var seedAdminValues = isSeedAdmin
+    ? args.Skip(seedAdminIndex + 1).TakeWhile(x => !x.StartsWith("--", StringComparison.Ordinal)).Take(2).ToArray()
+    : [];
+if (new[] { isAiMediaMigration, isLegalDocumentConfiguration, isAiImageCatalogConfiguration, isSeedAdmin }.Count(x => x) > 1)
 {
     throw new InvalidOperationException("Only one maintenance command can run at a time.");
 }
 var applicationArgs = args
+    .Where((x, index) => !isSeedAdmin || index < seedAdminIndex || index > seedAdminIndex + seedAdminValues.Length)
     .Where(x => !string.Equals(x, "--configure-legal-documents", StringComparison.OrdinalIgnoreCase))
     .Where(x => !string.Equals(x, "--configure-ai-image-catalog", StringComparison.OrdinalIgnoreCase))
     .ToArray();
@@ -47,6 +54,7 @@ var securityOptions = builder.Configuration.GetSection(SecurityOptions.SectionNa
 if (!isAiMediaMigration
     && !isLegalDocumentConfiguration
     && !isAiImageCatalogConfiguration
+    && !isSeedAdmin
     && !builder.Environment.IsDevelopment()
     && securityOptions.AllowedOrigins.Length == 0)
 {
@@ -175,6 +183,23 @@ if (isAiImageCatalogConfiguration)
         + $"releaseId={result.ModelReleaseId}, explicitRoutes={result.ExplicitRouteCount}, "
         + $"autoRoutes={result.AutoRouteCount}, explicitPrices={result.ExplicitPriceCount}, "
         + $"autoPrices={result.AutoPriceCount}, reused={result.ReusedExistingRelease}");
+    return;
+}
+
+if (isSeedAdmin)
+{
+    var userName = seedAdminValues.ElementAtOrDefault(0) ?? builder.Configuration["BootstrapAdmin:UserName"];
+    var password = seedAdminValues.ElementAtOrDefault(1) ?? builder.Configuration["BootstrapAdmin:Password"];
+    if (string.IsNullOrWhiteSpace(userName) || string.IsNullOrWhiteSpace(password))
+    {
+        throw new InvalidOperationException(
+            "--seed-admin requires <user-name> <password> or BootstrapAdmin:UserName and BootstrapAdmin:Password configuration.");
+    }
+
+    await using var scope = app.Services.CreateAsyncScope();
+    var adminBootstrapService = scope.ServiceProvider.GetRequiredService<IAdminBootstrapService>();
+    var id = await adminBootstrapService.UpsertSuperAdminAsync(userName, password, CancellationToken.None);
+    Console.WriteLine($"Super admin is ready: id={id}, userName={userName}");
     return;
 }
 

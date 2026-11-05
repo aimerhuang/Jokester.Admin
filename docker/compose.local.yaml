@@ -1,0 +1,46 @@
+# 本地测试叠加：从两个仓库源码构建镜像，开放调试端口，并用 Mailpit 接收邮件。
+
+services:
+  mysql:
+    ports:
+      - 127.0.0.1:${MYSQL_HOST_PORT:-3307}:3306
+
+  redis:
+    ports:
+      - 127.0.0.1:${REDIS_HOST_PORT:-6380}:6379
+
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        DOTNET_SDK_IMAGE: ${DOTNET_SDK_IMAGE:-mcr.microsoft.com/dotnet/sdk:10.0}
+        DOTNET_ASPNET_IMAGE: ${DOTNET_ASPNET_IMAGE:-mcr.microsoft.com/dotnet/aspnet:10.0}
+    ports:
+      # 直连 API（Swagger: http://localhost:5050/swagger），不经过 nginx。
+      - 127.0.0.1:${API_HOST_PORT:-5050}:8080
+    depends_on:
+      mailpit:
+        condition: service_started
+
+  web:
+    build:
+      context: ${FRONTEND_DIR:-../../Jokester-Ai-Image}
+      dockerfile: Dockerfile
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:24-alpine}
+        NGINX_IMAGE: ${NGINX_IMAGE:-nginx:1.28-alpine}
+        NPM_REGISTRY: ${NPM_REGISTRY:-}
+        VITE_CLIENT_BUILD: ${VITE_CLIENT_BUILD:-local}
+
+  mailpit:
+    image: ${MAILPIT_IMAGE:-axllent/mailpit:latest}
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      MP_SMTP_AUTH_ACCEPT_ANY: "true"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "true"
+    ports:
+      - 127.0.0.1:${MAILPIT_UI_PORT:-8025}:8025
+    networks:
+      - backend

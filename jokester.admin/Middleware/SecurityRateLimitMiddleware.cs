@@ -10,6 +10,8 @@ namespace jokester.admin.Middleware;
 public sealed class SecurityRateLimitMiddleware(RequestDelegate next, ILogger<SecurityRateLimitMiddleware> logger)
 {
     private const int MaxAiUploadRequestsPerMinute = 12;
+    private const int MaxCanvasWriteRequestsPerMinute = 120;
+    private const int MaxAiResultAssetRequestsPerMinute = 60;
     private const int MaxBlogUploadRequestsPerMinute = 5;
     private const long MaxBlogUploadBytesPerDay = 50L * 1024 * 1024;
     private const long UnknownBlogUploadChargeBytes = 10L * 1024 * 1024;
@@ -180,6 +182,14 @@ public sealed class SecurityRateLimitMiddleware(RequestDelegate next, ILogger<Se
             && !path.Equals("/api/ai/images/parameters/resolve"))
         {
             return [new("ai-create-user-1m", RateLimitPartition.User, 2, 60)];
+        }
+        if (!HttpMethods.IsGet(method) && !HttpMethods.IsHead(method) && path.StartsWithSegments("/api/ai/canvases"))
+        {
+            return [new("canvas-write-user-1m", RateLimitPartition.User, MaxCanvasWriteRequestsPerMinute, 60)];
+        }
+        if (HttpMethods.IsPost(method) && path.Equals("/api/assets/from-ai-result"))
+        {
+            return [new("asset-from-ai-result-user-1m", RateLimitPartition.User, MaxAiResultAssetRequestsPerMinute, 60)];
         }
         if (HttpMethods.IsGet(method) && path.StartsWithSegments("/api"))
         {

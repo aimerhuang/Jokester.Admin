@@ -26,6 +26,10 @@ public sealed class AiImageRouteFallbackTests
     [InlineData("gpt-image-2.5-flare", "gpt-image-2.5-flare", true)]
     [InlineData("gpt-image-2.5-sunburst", "gpt-image-2.5-sunburst", false)]
     [InlineData("gpt-image-2.5-sunburst", "gpt-image-2.5-sunburst", true)]
+    [InlineData("gpt-image-2.6-flare", "gpt-image-2.6-flare", false)]
+    [InlineData("gpt-image-2.6-flare", "gpt-image-2.6-flare", true)]
+    [InlineData("gpt-image-2.6-sunburst", "gpt-image-2.6-sunburst", false)]
+    [InlineData("gpt-image-2.6-sunburst", "gpt-image-2.6-sunburst", true)]
     public async Task GenerateFromResolved_SendsExplicit2KSize_AndUsesFallbackRoute_WhenPrimaryFails(
         string modelCode,
         string fallbackProviderModel,
@@ -82,7 +86,8 @@ public sealed class AiImageRouteFallbackTests
                         BaseUrl = "https://fallback.example/v1",
                         ApiKey = "fallback-key",
                         TextToImagePath = "/images/generations",
-                        ImageToImagePath = "/images/edits"
+                        ImageToImagePath = "/images/edits",
+                        RequestFormat = AiImageModelConfigService.PromptAspectRatioRequestFormat
                     }
                 ]);
             var environment = new Mock<IWebHostEnvironment>();
@@ -156,6 +161,7 @@ public sealed class AiImageRouteFallbackTests
             Assert.Equal("2048x1152", handler.Requests[0].Size);
             Assert.Equal("medium", handler.Requests[0].Quality);
             Assert.Equal(1, handler.Requests[0].ImageCount);
+            Assert.Equal("test image", handler.Requests[0].Prompt);
             var fallbackRequest = handler.Requests[^1];
             Assert.Equal($"https://fallback.example/v1/images/{operation}", fallbackRequest.Uri);
             Assert.Equal("fallback-key", fallbackRequest.BearerToken);
@@ -163,7 +169,9 @@ public sealed class AiImageRouteFallbackTests
             Assert.Equal("2048x1152", fallbackRequest.Size);
             Assert.Equal("medium", fallbackRequest.Quality);
             Assert.Equal(1, fallbackRequest.ImageCount);
+            Assert.Equal("test image\n\nOutput image aspect ratio: 16:9 (landscape).", fallbackRequest.Prompt);
             Assert.Equal(fallbackProviderModel, result.ProviderModel);
+            Assert.Equal("test image", result.Prompt);
             Assert.StartsWith("/api/media/ai/42/", result.Url, StringComparison.Ordinal);
             var storedFile = mediaPathResolver.ResolveFilePath(result.Url["/api/media/ai/".Length..]);
             Assert.True(File.Exists(storedFile));
@@ -173,6 +181,43 @@ public sealed class AiImageRouteFallbackTests
         {
             Directory.Delete(testRoot, recursive: true);
         }
+    }
+
+    [Theory]
+    [InlineData("prompt-aspect-ratio", "9:16", "draw\n\nOutput image aspect ratio: 9:16 (portrait).")]
+    [InlineData("prompt-aspect-ratio", "21:9", "draw\n\nOutput image aspect ratio: 21:9 (landscape).")]
+    [InlineData("prompt-aspect-ratio", " 1:1 ", "draw\n\nOutput image aspect ratio: 1:1 (square).")]
+    [InlineData("prompt-aspect-ratio", "auto", "draw")]
+    [InlineData("prompt-aspect-ratio", null, "draw")]
+    [InlineData("prompt-aspect-ratio", "0:16", "draw")]
+    [InlineData("openai-size", "9:16", "draw")]
+    public void BuildProviderPrompt_AppendsAspectRatio_OnlyForPromptAspectRatioRoutes(
+        string requestFormat,
+        string? aspectRatioCode,
+        string expected)
+    {
+        var prompt = AiImageService.BuildProviderPrompt(
+            new ResolvedAiImageModelConfig { RequestFormat = requestFormat },
+            "draw",
+            new ResolveAiImageParametersResponse { AspectRatioCode = aspectRatioCode });
+
+        Assert.Equal(expected, prompt);
+    }
+
+    [Theory]
+    [InlineData(null, "openai-size")]
+    [InlineData(" Prompt-Aspect-Ratio ", "prompt-aspect-ratio")]
+    public void NormalizeRequestFormat_DefaultsAndNormalizes(string? requestFormat, string expected)
+    {
+        Assert.Equal(expected, AiImageModelConfigService.NormalizeRequestFormat(requestFormat, "gpt-image-2"));
+    }
+
+    [Fact]
+    public void NormalizeRequestFormat_RejectsUnknownFormat()
+    {
+        var exception = Assert.Throws<AppException>(() => AiImageModelConfigService.NormalizeRequestFormat("aspect_ratio", "gpt-image-2"));
+
+        Assert.Equal(ErrorCodes.BadRequest, exception.Code);
     }
 
     [Theory]
@@ -333,6 +378,7 @@ public sealed class AiImageRouteFallbackTests
                 ? string.Empty
                 : await request.Content.ReadAsStringAsync(cancellationToken);
             var model = string.Empty;
+            var prompt = string.Empty;
             var size = string.Empty;
             var quality = string.Empty;
             var imageCount = 0;
@@ -341,6 +387,7 @@ public sealed class AiImageRouteFallbackTests
             {
                 using var document = System.Text.Json.JsonDocument.Parse(body);
                 model = document.RootElement.GetProperty("model").GetString() ?? string.Empty;
+                prompt = document.RootElement.GetProperty("prompt").GetString() ?? string.Empty;
                 size = document.RootElement.GetProperty("size").GetString() ?? string.Empty;
                 quality = document.RootElement.GetProperty("quality").GetString() ?? string.Empty;
                 imageCount = document.RootElement.GetProperty("n").GetInt32();
@@ -350,10 +397,11 @@ public sealed class AiImageRouteFallbackTests
                 foreach (var part in multipart)
                 {
                     var name = part.Headers.ContentDisposition?.Name?.Trim('"');
-                    var value = name is "model" or "size" or "quality" or "n"
+                    var value = name is "model" or "prompt" or "size" or "quality" or "n"
                         ? await part.ReadAsStringAsync(cancellationToken)
                         : string.Empty;
                     if (name == "model") model = value;
+                    if (name == "prompt") prompt = value;
                     if (name == "size") size = value;
                     if (name == "quality") quality = value;
                     if (name == "n" && int.TryParse(value, out var parsed)) imageCount = parsed;
@@ -369,7 +417,8 @@ public sealed class AiImageRouteFallbackTests
                 size,
                 quality,
                 imageCount,
-                request.Content?.Headers.ContentType?.MediaType ?? string.Empty));
+                request.Content?.Headers.ContentType?.MediaType ?? string.Empty,
+                prompt));
             var response = responses[requestIndex++](request);
             response.RequestMessage = request;
             return response;
@@ -383,5 +432,6 @@ public sealed class AiImageRouteFallbackTests
         string Size,
         string Quality,
         int ImageCount,
-        string ContentType);
+        string ContentType,
+        string Prompt);
 }

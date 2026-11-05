@@ -53,6 +53,9 @@ public static class MachineErrorCodes
     public const string AiConsentRequired = "AI_CONSENT_REQUIRED";
     public const string PromptBlocked = "PROMPT_BLOCKED";
     public const string RateLimited = "RATE_LIMITED";
+    public const string CanvasRevisionConflict = "CANVAS_REVISION_CONFLICT";
+    public const string CanvasDocumentTooLarge = "CANVAS_DOCUMENT_TOO_LARGE";
+    public const string CanvasLimitExceeded = "CANVAS_LIMIT_EXCEEDED";
     public const string ReauthenticationRequired = "REAUTH_REQUIRED";
     public const string ServiceUnavailable = "SERVICE_UNAVAILABLE";
     public const string ServerError = "SERVER_ERROR";

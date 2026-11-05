@@ -19,5 +19,5 @@ public sealed class MobileFeatureOptions
 
     public bool AccountDeletion { get; set; } = true;
 
-    public bool PromptLibrary { get; set; } = true;
+    public bool PromptLibrary { get; set; } = false;
 }

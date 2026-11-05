@@ -18,6 +18,7 @@ public sealed class MediaAssetService(ISqlSugarClient db, IAiMediaPathResolver m
     private const long MaxUploadBytes = 10 * 1024 * 1024;
     private const int ThumbnailLongSide = 512;
     private const string PrivateMediaPrefix = "/api/media/ai/";
+    private const string GeneratedAssetType = "generated";
 
     public async Task<UploadAiImageResponse> UploadAsync(
         long ownerUserId,
@@ -62,6 +63,102 @@ public sealed class MediaAssetService(ISqlSugarClient db, IAiMediaPathResolver m
         {
             TryDelete(storagePath);
             TryDelete(thumbnailPath);
+            throw;
+        }
+    }
+
+    public async Task<UploadAiImageResponse> RegisterAiResultAsync(
+        long ownerUserId,
+        long taskId,
+        int resultOrdinal,
+        CancellationToken cancellationToken)
+    {
+        if (taskId <= 0 || resultOrdinal < 0)
+        {
+            throw HiddenAssetNotFound();
+        }
+
+        var existing = await FindAiResultAssetAsync(taskId, resultOrdinal, cancellationToken);
+        if (existing is not null)
+        {
+            if (existing.OwnerUserId != ownerUserId) throw HiddenAssetNotFound();
+            if (!existing.IsDeleted) return MapUploadResponse(existing);
+        }
+
+        var task = await db.Queryable<AiImageTaskEntity>()
+            .Where(x => x.Id == taskId && x.UserId == ownerUserId && !x.IsDeleted && x.Status == 1)
+            .Select(x => new AiImageTaskEntity { Id = x.Id, ResultUrls = x.ResultUrls })
+            .FirstAsync(cancellationToken);
+        if (task is null) throw HiddenAssetNotFound();
+        var storageKey = await ResolveAiResultStorageKeyAsync(task, resultOrdinal, ownerUserId, cancellationToken);
+        var storagePath = ResolveStoredFilePath(storageKey);
+        if (!File.Exists(storagePath)) throw HiddenAssetNotFound();
+
+        var content = await File.ReadAllBytesAsync(storagePath, cancellationToken);
+        ImageInfo imageInfo;
+        try
+        {
+            imageInfo = Image.Identify(content);
+        }
+        catch (Exception ex) when (ex is UnknownImageFormatException or InvalidImageContentException)
+        {
+            throw HiddenAssetNotFound();
+        }
+
+        var now = DateTime.UtcNow;
+        if (existing is not null)
+        {
+            // 生成型 Asset 删除后重新登记：恢复原记录并重建被删除的缩略图，保持 assetId 稳定。
+            var restoredThumbnailKey = existing.ThumbnailKey ?? CreateGeneratedThumbnailKey(ownerUserId, now);
+            var restoredThumbnailPath = ResolveStoredFilePath(restoredThumbnailKey);
+            Directory.CreateDirectory(Path.GetDirectoryName(restoredThumbnailPath)!);
+            await WriteThumbnailAsync(content, restoredThumbnailPath, cancellationToken);
+            await db.Updateable<MediaAssetEntity>()
+                .SetColumns(x => new MediaAssetEntity { IsDeleted = false, DeletedAt = null, ThumbnailKey = restoredThumbnailKey })
+                .Where(x => x.Id == existing.Id && x.OwnerUserId == ownerUserId)
+                .ExecuteCommandAsync(cancellationToken);
+            existing.IsDeleted = false;
+            existing.DeletedAt = null;
+            existing.ThumbnailKey = restoredThumbnailKey;
+            return MapUploadResponse(existing);
+        }
+
+        var thumbnailKey = CreateGeneratedThumbnailKey(ownerUserId, now);
+        var thumbnailPath = ResolveStoredFilePath(thumbnailKey);
+        Directory.CreateDirectory(Path.GetDirectoryName(thumbnailPath)!);
+        await WriteThumbnailAsync(content, thumbnailPath, cancellationToken);
+        var entity = new MediaAssetEntity
+        {
+            AssetId = CreateAssetId(now),
+            OwnerUserId = ownerUserId,
+            AssetType = GeneratedAssetType,
+            StorageKey = storageKey,
+            ThumbnailKey = thumbnailKey,
+            MimeType = imageInfo.Metadata.DecodedImageFormat?.DefaultMimeType ?? "application/octet-stream",
+            Width = imageInfo.Width,
+            Height = imageInfo.Height,
+            SizeBytes = content.LongLength,
+            Sha256 = Convert.ToHexString(SHA256.HashData(content)),
+            MetadataStripped = false,
+            SourceTaskId = taskId,
+            SourceResultOrdinal = resultOrdinal,
+            CreatedAt = now,
+            IsDeleted = false
+        };
+        try
+        {
+            await db.Insertable(entity).ExecuteCommandAsync(cancellationToken);
+            return MapUploadResponse(entity);
+        }
+        catch
+        {
+            TryDelete(thumbnailPath);
+            // 并发登记同一结果时由唯一键兜底，返回先写入的记录。
+            var winner = await FindAiResultAssetAsync(taskId, resultOrdinal, cancellationToken);
+            if (winner is not null && winner.OwnerUserId == ownerUserId && !winner.IsDeleted)
+            {
+                return MapUploadResponse(winner);
+            }
             throw;
         }
     }
@@ -206,12 +303,69 @@ public sealed class MediaAssetService(ISqlSugarClient db, IAiMediaPathResolver m
                 .ExecuteCommandAsync(cancellationToken);
         }
 
-        DeleteStoredFile(storagePath);
+        // 生成型 Asset 复用生图结果原文件，原图归生图历史所有，删除 Asset 只清理其缩略图。
+        if (asset.SourceTaskId is null)
+        {
+            DeleteStoredFile(storagePath);
+        }
         if (thumbnailPath is not null)
         {
             DeleteStoredFile(thumbnailPath);
         }
     }
+
+    private async Task<MediaAssetEntity?> FindAiResultAssetAsync(long taskId, int resultOrdinal, CancellationToken cancellationToken) =>
+        await db.Queryable<MediaAssetEntity>()
+            .FirstAsync(x => x.SourceTaskId == taskId && x.SourceResultOrdinal == resultOrdinal, cancellationToken);
+
+    private async Task<string> ResolveAiResultStorageKeyAsync(
+        AiImageTaskEntity task,
+        int resultOrdinal,
+        long ownerUserId,
+        CancellationToken cancellationToken)
+    {
+        var results = await db.Queryable<AiImageTaskResultEntity>()
+            .Where(x => x.TaskId == task.Id)
+            .ToListAsync(cancellationToken);
+        string? url;
+        if (results.Count > 0)
+        {
+            var result = results.FirstOrDefault(x => x.ResultOrdinal == resultOrdinal);
+            url = result is null || result.IsQuarantined ? null : result.Url;
+        }
+        else
+        {
+            // legacy 任务没有逐图结果事实，按 result_urls JSON 顺序定位。
+            var legacyUrls = DeserializeResultUrls(task.ResultUrls);
+            url = resultOrdinal < legacyUrls.Count ? legacyUrls[resultOrdinal] : null;
+        }
+
+        var ownerPrefix = $"{PrivateMediaPrefix}{ownerUserId}/";
+        if (string.IsNullOrWhiteSpace(url)
+            || !url.StartsWith(ownerPrefix, StringComparison.Ordinal)
+            || url.IndexOfAny(['?', '#', '\\']) >= 0
+            || url.Contains("..", StringComparison.Ordinal))
+        {
+            throw HiddenAssetNotFound();
+        }
+        return url[PrivateMediaPrefix.Length..];
+    }
+
+    private static IReadOnlyList<string> DeserializeResultUrls(string? resultUrls)
+    {
+        if (string.IsNullOrWhiteSpace(resultUrls)) return [];
+        try
+        {
+            return System.Text.Json.JsonSerializer.Deserialize<IReadOnlyList<string>>(resultUrls) ?? [];
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return [];
+        }
+    }
+
+    private static string CreateGeneratedThumbnailKey(long ownerUserId, DateTime now) =>
+        $"{ownerUserId}/assets/{now:yyyyMM}/{Guid.NewGuid():N}_thumb.webp";
 
     private static async Task WriteThumbnailAsync(byte[] content, string path, CancellationToken cancellationToken)
     {

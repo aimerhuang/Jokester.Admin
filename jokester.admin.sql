@@ -27,6 +27,8 @@ DROP TABLE IF EXISTS `apple_iap_product`;
 DROP TABLE IF EXISTS `account_deletion_request`;
 DROP TABLE IF EXISTS `user_consent`;
 DROP TABLE IF EXISTS `legal_document`;
+DROP TABLE IF EXISTS `ai_canvas_project_asset`;
+DROP TABLE IF EXISTS `ai_canvas_project`;
 DROP TABLE IF EXISTS `media_asset`;
 DROP TABLE IF EXISTS `ai_image_favorite`;
 DROP TABLE IF EXISTS `ai_image_provider_attempt`;
@@ -492,6 +494,7 @@ CREATE TABLE `ai_image_model_config` (
   `api_key` VARCHAR(500) NOT NULL DEFAULT '' COMMENT '供应商API Key，生产环境手动写入',
   `text_to_image_path` VARCHAR(200) NOT NULL DEFAULT '/images/generations' COMMENT '文生图端点路径',
   `image_to_image_path` VARCHAR(200) NOT NULL DEFAULT '/images/edits' COMMENT '图生图端点路径',
+  `request_format` VARCHAR(32) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL DEFAULT 'openai-size' COMMENT '请求格式：openai-size按size指定尺寸 prompt-aspect-ratio在提示词追加宽高比',
   `sort` INT NOT NULL DEFAULT 0 COMMENT '排序',
   `status` TINYINT NOT NULL DEFAULT 1 COMMENT '状态：1启用 0禁用',
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
@@ -499,6 +502,7 @@ CREATE TABLE `ai_image_model_config` (
   `is_deleted` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '逻辑删除：1已删除 0未删除',
   PRIMARY KEY (`id`),
   CONSTRAINT `chk_ai_image_model_config_route_role` CHECK (`route_role` IN ('primary', 'fallback')),
+  CONSTRAINT `chk_ai_image_model_config_request_format` CHECK (`request_format` IN ('openai-size', 'prompt-aspect-ratio')),
   UNIQUE KEY `uk_ai_image_model_config_code_resolution_role` (`model_code`, `resolution_code`, `route_role`),
   KEY `idx_ai_image_model_config_resolve` (`model_code`, `resolution_code`, `status`, `is_deleted`, `route_role`, `sort`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI生图模型配置表';
@@ -959,6 +963,8 @@ VALUES
 -- =====================================================
 -- 13. 初始化博客默认配置
 -- =====================================================
+SET @blog_site_id = (SELECT `id` FROM `sys_site` WHERE `site_code` = 'blog' LIMIT 1);
+
 INSERT INTO `blog_category` (`site_id`, `name`, `sort`, `created_by`)
 SELECT @blog_site_id, '技术教程', 1, u.`id`
 FROM `sys_user` u
@@ -1389,18 +1395,58 @@ CREATE TABLE `media_asset` (
   `size_bytes` BIGINT NOT NULL,
   `sha256` CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `metadata_stripped` TINYINT(1) NOT NULL DEFAULT 1,
+  `source_task_id` BIGINT DEFAULT NULL,
+  `source_result_ordinal` INT DEFAULT NULL,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `deleted_at` DATETIME DEFAULT NULL,
   `is_deleted` TINYINT(1) NOT NULL DEFAULT 0,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_media_asset_id` (`asset_id`),
   UNIQUE KEY `uk_media_asset_storage_key` (`storage_key`),
+  UNIQUE KEY `uk_media_asset_source_result` (`source_task_id`, `source_result_ordinal`),
   KEY `idx_media_asset_owner_created` (`owner_user_id`, `is_deleted`, `created_at`),
   KEY `idx_media_asset_sha256` (`sha256`),
   CONSTRAINT `fk_media_asset_owner`
     FOREIGN KEY (`owner_user_id`) REFERENCES `sys_user` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='Private user-owned media assets';
+
+CREATE TABLE `ai_canvas_project` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `canvas_id` VARCHAR(40) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `owner_user_id` BIGINT NOT NULL,
+  `title` VARCHAR(100) NOT NULL,
+  `schema_version` INT NOT NULL DEFAULT 1,
+  `revision` BIGINT NOT NULL DEFAULT 1,
+  `document` MEDIUMTEXT NOT NULL,
+  `document_bytes` INT NOT NULL DEFAULT 0,
+  `node_count` INT NOT NULL DEFAULT 0,
+  `connection_count` INT NOT NULL DEFAULT 0,
+  `cover_asset_id` VARCHAR(40) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
+  `storage_bytes` BIGINT NOT NULL DEFAULT 0,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `deleted_at` DATETIME DEFAULT NULL,
+  `is_deleted` TINYINT(1) NOT NULL DEFAULT 0,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_canvas_project_canvas_id` (`canvas_id`),
+  KEY `idx_ai_canvas_project_owner_updated` (`owner_user_id`, `is_deleted`, `updated_at`),
+  CONSTRAINT `fk_ai_canvas_project_owner`
+    FOREIGN KEY (`owner_user_id`) REFERENCES `sys_user` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='AI infinite canvas projects';
+
+CREATE TABLE `ai_canvas_project_asset` (
+  `canvas_project_id` BIGINT NOT NULL,
+  `asset_id` VARCHAR(40) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `owner_user_id` BIGINT NOT NULL,
+  PRIMARY KEY (`canvas_project_id`, `asset_id`),
+  KEY `idx_ai_canvas_project_asset_asset` (`asset_id`),
+  KEY `idx_ai_canvas_project_asset_owner` (`owner_user_id`),
+  CONSTRAINT `fk_ai_canvas_project_asset_project`
+    FOREIGN KEY (`canvas_project_id`) REFERENCES `ai_canvas_project` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='Assets referenced by AI canvas documents';
 
 CREATE TABLE `apple_iap_product` (
   `id` BIGINT NOT NULL AUTO_INCREMENT,
@@ -1866,10 +1912,10 @@ DROP TEMPORARY TABLE `tmp_ai_prompt_houbb_candidate`;
 INSERT INTO `point_recharge_package`
 (`package_code`, `name`, `description`, `points`, `repeat_points`, `price_amount`, `currency`, `validity_days`, `bonus_percent`, `badge_code`, `benefits_json`, `purchase_url`, `is_featured`, `sort`, `status`)
 VALUES
-('monthly', '特惠月卡', '立得 5000 积分', 5000, NULL, 29.90, 'CNY', 30, 0, 'recommended', '["立即到账 5000 点可用积分","赠 30 天专属尊贵会员标识","生图折合单价低至 ¥0.012","享受生成作品无水印导出"]', NULL, 1, 1, 1),
-('trial', '首充体验包', '首充尝鲜，超低价体验生图', 200, 100, 1.00, 'CNY', NULL, 0, 'first_offer', '["首充到账 200 点永久可用积分","续充为 100 点永久可用积分","生图折合单价低至 ¥0.02","享受生成作品无水印导出"]', NULL, 0, 2, 1),
-('basic', '基础套餐', '适合日常轻度创作用户', 1000, NULL, 10.00, 'CNY', NULL, 0, 'regular_choice', '["到账 1000 点永久可用积分","卡密永久有效无过期限制","生图折合单价低至 ¥0.02","享受生成作品无水印导出"]', NULL, 0, 3, 1),
-('value', '超值套餐', '额外赠送 20%，高性价比', 3600, NULL, 30.00, 'CNY', NULL, 20, 'popular', '["到账 3600 点永久可用积分","包含额外加赠 20% 积分","生图折合单价低至 ¥0.016","享受生成作品无水印导出"]', NULL, 0, 4, 1);
+('monthly', '特惠月卡', '立得 5000 积分', 5000, NULL, 29.90, 'CNY', 30, 0, 'recommended', '["立即到账 5000 点可用积分","赠 30 天专属尊贵会员标识","生图折合单价低至 ¥0.012","享受生成作品无水印导出"]', 'https://wzyp.cn/item/r1bw3i', 1, 1, 1),
+('trial', '首充体验包', '首充尝鲜，超低价体验生图', 200, 100, 1.00, 'CNY', NULL, 0, 'first_offer', '["首充到账 200 点永久可用积分","续充为 100 点永久可用积分","生图折合单价低至 ¥0.02","享受生成作品无水印导出"]', 'https://wzyp.cn/item/jxmbco', 0, 2, 1),
+('basic', '基础套餐', '适合日常轻度创作用户', 1000, NULL, 10.00, 'CNY', NULL, 0, 'regular_choice', '["到账 1000 点永久可用积分","卡密永久有效无过期限制","生图折合单价低至 ¥0.02","享受生成作品无水印导出"]', 'https://wzyp.cn/item/w0yeju', 0, 3, 1),
+('value', '超值套餐', '额外赠送 20%，高性价比', 3600, NULL, 30.00, 'CNY', NULL, 20, 'popular', '["到账 3600 点永久可用积分","包含额外加赠 20% 积分","生图折合单价低至 ¥0.016","享受生成作品无水印导出"]', 'https://wzyp.cn/item/9c22yo', 0, 4, 1);
 
 INSERT INTO `ai_image_point_price` (`id`, `model_code`, `resolution_code`, `quality_code`, `points`, `price_amount`, `currency`, `sort`, `status`, `created_at`, `updated_at`, `is_deleted`) VALUES
 (1, 'gpt-image-2', '1k', 'low', 10, 0.10, 'CNY', 1, 1, '2026-06-11 00:00:00', NULL, 0),
@@ -1955,6 +2001,64 @@ CROSS JOIN (
 ) AS target
 WHERE src.`model_code` = 'gpt-image-2'
   AND src.`is_deleted` = 0
+ON DUPLICATE KEY UPDATE `id` = `ai_image_point_price`.`id`;
+
+COMMIT;
+
+START TRANSACTION;
+
+INSERT INTO `ai_image_model_config`
+  (`model_code`, `model_name`, `provider`, `provider_model`, `resolution_code`,
+   `route_role`, `base_url`, `api_key`, `text_to_image_path`, `image_to_image_path`,
+   `sort`, `status`, `created_at`, `updated_at`, `is_deleted`)
+SELECT
+  target.`model_code`,
+  target.`model_name`,
+  src.`provider`,
+  target.`model_code`,
+  src.`resolution_code`,
+  src.`route_role`,
+  src.`base_url`,
+  src.`api_key`,
+  src.`text_to_image_path`,
+  src.`image_to_image_path`,
+  src.`sort` + 20,
+  src.`status`,
+  CURRENT_TIMESTAMP,
+  NULL,
+  0
+FROM `ai_image_model_config` AS src
+INNER JOIN (
+  SELECT 'gpt-image-2.5-flare' AS `source_model_code`, 'gpt-image-2.6-flare' AS `model_code`, 'GPT Image 2.6 Flare' AS `model_name`
+  UNION ALL
+  SELECT 'gpt-image-2.5-sunburst', 'gpt-image-2.6-sunburst', 'GPT Image 2.6 Sunburst'
+) AS target ON target.`source_model_code` = src.`model_code`
+WHERE src.`is_deleted` = 0
+  AND src.`route_role` IN ('primary', 'fallback')
+ON DUPLICATE KEY UPDATE `id` = `ai_image_model_config`.`id`;
+
+INSERT INTO `ai_image_point_price`
+  (`model_code`, `resolution_code`, `quality_code`, `points`, `price_amount`,
+   `currency`, `sort`, `status`, `created_at`, `updated_at`, `is_deleted`)
+SELECT
+  target.`model_code`,
+  src.`resolution_code`,
+  src.`quality_code`,
+  src.`points`,
+  src.`price_amount`,
+  src.`currency`,
+  src.`sort`,
+  src.`status`,
+  CURRENT_TIMESTAMP,
+  NULL,
+  0
+FROM `ai_image_point_price` AS src
+INNER JOIN (
+  SELECT 'gpt-image-2.5-flare' AS `source_model_code`, 'gpt-image-2.6-flare' AS `model_code`
+  UNION ALL
+  SELECT 'gpt-image-2.5-sunburst', 'gpt-image-2.6-sunburst'
+) AS target ON target.`source_model_code` = src.`model_code`
+WHERE src.`is_deleted` = 0
 ON DUPLICATE KEY UPDATE `id` = `ai_image_point_price`.`id`;
 
 COMMIT;

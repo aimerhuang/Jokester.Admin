@@ -312,6 +312,25 @@ Authorization: Bearer <accessToken>
 - 迁移只补缺失记录，重复执行不会覆盖已存在的新模型路由、密钥、价格或软删除状态，也不改动 GPT Image 2。应先配置好源模型，再执行迁移；新装数据库的密钥仍为空占位，之后须分别配置各模型。
 - 不复制已发布的 `size-mode-v1` release，也不自动开放 auto；需要该协议时，按现有受控 catalog 发布流程为新模型单独审批和发布。上线前需在各自渠道验证新模型的文生图和图生图支持。
 
+新增 `gpt-image-2.6-flare`（GPT Image 2.6 Flare）和 `gpt-image-2.6-sunburst`（GPT Image 2.6 Sunburst）时，已有数据库执行 `docs/migrations/20261105-add-gpt-image-26-models.sql`，无需更新后端代码。
+
+- 迁移按变体复制 GPT Image 2.5 的未删除主备路由与 legacy 积分价格（Flare → Flare、Sunburst → Sunburst），`provider_model` 设为新模型编码；排序在对应 2.5 记录基础上加 20。若上游 2.6 的模型 ID 与编码不同，迁移后修改各路由的 `provider_model`。
+- 与 2.5 迁移一样只补缺失记录，不改动 2.5，也不复制 `size-mode-v1` release；应先执行 2.5 迁移并配置好 2.5 渠道。
+- 不要把 2.5 记录直接改名为 2.6：legacy 待处理任务在 Worker 中按任务的 `model_code` 重新解析路由，改名或停用后这些任务会失败退款。确认 2.6 文生图/图生图可用且 2.5 已无待处理任务后，再将 2.5 路由和价格的 `status` 设为 `0`，使其从 `/api/ai/images/models` 下线。
+
+不同中转对尺寸参数的支持不同，OpenAI Images 路由用 `ai_image_model_config.request_format` 按路由声明请求格式。已有数据库在 2.6 迁移之后执行 `docs/migrations/20261105-add-ai-image-route-request-format.sql`，再部署读取该列的后端。
+
+- `openai-size`（默认）：按 `size=WxH` 指定尺寸，适用于 dawcode 中转，行为与之前一致。
+- `prompt-aspect-ratio`：中转忽略 `size`、`aspect_ratio` 与 `quality`，只按提示词决定宽高比。后端仍发送 `size`/`quality`，并在发给供应商的提示词末尾追加 `Output image aspect ratio: 9:16 (portrait).`；任务记录、幂等指纹和提示词过滤仍使用原始提示词。`aspectRatioCode` 缺失或为 auto（含 `size-mode-v1` auto）时不追加。
+- 2026-11-05 对照 OpenAI Images 官方参数实测 `103678.xyz` 中转（gpt-image-2 / 2.5 / 2.6 结论一致），属于 `prompt-aspect-ratio`：
+  - 8 种宽高比的文生图、图生图均按提示词输出，输出固定约 1.57MP（如 9:16 为 941x1672、1:1 为 1254x1254）；提示词未写比例时由模型自选，图生图也不跟随参考图比例。
+  - 被忽略（含非法值也不报错）：`size`、`quality`（响应里的 `quality` 由中转自行在 low/medium 间决定，从未出现 high）、`n`（始终 1 张）、`output_format`/`output_compression`（始终 PNG）、`moderation`、`complexity`、`response_format`、`style`、`input_fidelity`、`partial_images`。
+  - 生效：`model`（非法模型返回 400）、`mask`（只改遮罩区域且保持原图尺寸）、多张参考图、`stream`（SSE 只有最终图）。GIF 返回 400；`output_format=svg` 仍返回 PNG。
+  - `background=transparent` 只会给整张图加约 90%–97% 的 alpha，并不会抠图，不要发送；真正透明需在提示词中要求抠图，而 `background=opaque` 会覆盖提示词。
+  - 该中转上的 2k/4k 和 med/high 档位不会得到更高像素或更高画质，定价时需注意。
+- 中转地址属于部署配置，不写入迁移；按中转地址更新路由：`UPDATE ai_image_model_config SET request_format='prompt-aspect-ratio', updated_at=CURRENT_TIMESTAMP WHERE provider='openai-image' AND base_url='<中转地址>' AND is_deleted=0;`
+- 已发布的 `size-mode-v1` release 路由不快照该字段，执行时读取所引用路由配置的当前值。
+
 legacy 请求从 `ai_image_point_price` 查询积分价格；`size-mode-v1` 请求改为锁定客户端提交 catalog 对应的不可变 release 价格：
 
 - legacy GPT Image2 使用 `modelCode + resolutionCode + qualityCode`。
@@ -480,3 +499,69 @@ Authorization: Bearer <accessToken>
 `imageUrls` 是可选 JSON 数组，最多 6 张；图片 URL 必须是当前用户可访问的 `/api/media/ai/...` 私有 URL。`imageCount` 默认 `1`，可传 `1-4` 生成多张。Nano Banana2 支持直接传 `size`，也支持传 `resolutionCode` + `aspectRatioCode`。`aspectRatioCode` 传 `auto` 时，后端不会读取参考图尺寸或推导具体画幅比例，而是把上游 `size` 参数直接设为 `auto`，由上游服务自行决定画幅；积分扣减仍按 `resolutionCode` 对应的价格档位匹配，和画幅比例无关。直接生成也先创建同一个持久化后台任务并等待结果，响应 `data` 返回 `taskId`、`modelName`、`prompt`、`size`、`quality`、`mimeType`、`url`、`urls`、`base64`、`dataUrl`、`isImageToImage`、`imageUrls`、`revisedPrompt`。
 
 Nano Banana2 没有单独的配置段，也不参与 GPT 主备切换。文生图和图生图都直接使用 `ai_image_model_config` 中当前启用的 `route_role=primary` 渠道。
+
+## AI 无限画布
+
+产品需求见 [ai-infinite-canvas-prd.md](./ai-infinite-canvas-prd.md)。画布接口均要求登录（无额外菜单权限），按当前用户隔离；跨用户与不存在统一返回 HTTP 404、`RESOURCE_NOT_FOUND`。响应时间均为 UTC。
+
+```http
+GET    /api/ai/canvases?pageIndex=1&pageSize=20
+POST   /api/ai/canvases
+GET    /api/ai/canvases/{canvasId}
+PUT    /api/ai/canvases/{canvasId}/document
+PATCH  /api/ai/canvases/{canvasId}
+DELETE /api/ai/canvases/{canvasId}
+Authorization: Bearer <accessToken>
+```
+
+- 列表返回 `items[]`（`canvasId`、`title`、`coverAssetId`、`coverUrl`、`storageBytes`、`nodeCount`、`connectionCount`、`revision`、`createdAt`、`updatedAt`，不含文档）和 `totalStorageBytes`。
+- 创建请求 `{ "title": "可选" }`，留空时生成“无限画布 N”；返回详情（含空文档，`revision=1`）。每用户未删除画布上限默认 50，超限返回 HTTP 422、`CANVAS_LIMIT_EXCEEDED`。
+- 重命名请求 `{ "title": "..." }`，1–100 个非控制字符。删除为软删除，不删除 Asset 和生图任务。
+- `coverUrl` 指向 `/api/assets/{assetId}/thumbnail`，需带 JWT 读取。
+
+保存文档：
+
+```json
+{
+  "baseRevision": 3,
+  "document": {
+    "schemaVersion": 1,
+    "viewport": { "x": 0, "y": 0, "zoom": 0.73 },
+    "background": "lines",
+    "nodes": [
+      { "id": "img_1", "type": "image", "x": 320, "y": 200, "width": 276, "height": 206, "title": "参考图",
+        "data": { "assetId": "AST2026..." } },
+      { "id": "gen_1", "type": "generate", "x": 815, "y": 235, "width": 276, "height": 155,
+        "data": { "prompt": "使用图片1的构图", "modelCode": "gpt-image-2", "sizeMode": "explicit",
+                  "resolutionCode": "2k", "qualityCode": "low", "aspectRatioCode": "16:9", "imageCount": 1,
+                  "inputOrder": ["img_1"], "runs": [], "primaryResult": null } }
+    ],
+    "connections": [ { "id": "e1", "from": "img_1", "to": "gen_1" } ]
+  }
+}
+```
+
+成功返回新的 `revision`、`updatedAt`、`storageBytes`、`nodeCount`、`connectionCount`、`coverAssetId`、`coverUrl`。保存规则：
+
+- `baseRevision` 必须等于服务端当前修订号，否则返回 HTTP 409、`CANVAS_REVISION_CONFLICT`，`details.currentRevision` 为服务端当前值；客户端应让用户选择加载最新版本或以 `currentRevision` 覆盖保存。
+- 文档按字段白名单校验，出现未知字段、未知节点类型、重复 ID、悬空/成环/类型不允许的连线时返回 HTTP 400、`VALIDATION_ERROR`，`message` 指出字段路径。节点类型只有 `image`、`text`、`generate`，节点可带可选 `groupId`（标识符，相同值的节点属于同一组）；连线只允许 `image → generate`、`generate → generate`，以及表示派生来源的 `image → image`、`generate → image`；每个生图节点最多 6 条输入，每个图片节点最多 1 条输入。
+- 图片节点只能用 `assetId` 引用图片，文档中没有任何图片 URL 字段。所有 `assetId` 和 `sourceTaskId` / `primaryResult.taskId` 必须属于当前用户，否则返回 404；已删除的自有 Asset 允许保留在文档中，但不计入体积、不作为封面。
+- 默认上限：300 个节点、600 条连线、文档 1 MB（`AiCanvas` 配置节），超限返回 HTTP 422、`CANVAS_LIMIT_EXCEEDED` 或 `CANVAS_DOCUMENT_TOO_LARGE`。
+- 文档里的提示词和文本保存时不做敏感词过滤；真正生成仍走 `POST /api/ai/images`，由现有提示词过滤、AI consent、幂等和积分链路处理。生成前应把新 `idempotencyKey` 写入节点 `pendingIdempotencyKey` 并保存，刷新后重试复用同一 key。
+- `storageBytes` = 文档字节数 + 引用的未删除上传素材（`asset_type=reference`）字节数；生成结果不计入画布体积。`totalStorageBytes` 对用户全部未删除画布引用的上传素材去重求和。
+- 画布写接口按用户限流 120 次/分钟，Redis 不可用时与其它限流接口一样返回 503。
+
+生图结果登记为 Asset（供画布节点和下游生成的 `referenceAssetIds` 使用）：
+
+```http
+POST /api/assets/from-ai-result
+Authorization: Bearer <accessToken>
+Content-Type: application/json
+
+{ "taskId": 123, "resultOrdinal": 0 }
+```
+
+- 任务必须属于当前用户、未删除且 `status=1`；结果被隔离、序号不存在或结果文件不在该用户私有目录下时返回 404。size-mode-v1 任务按 `ai_image_task_result` 定位，legacy 任务按 `resultUrls` 顺序定位。
+- 响应结构与 `POST /api/ai/images/upload` 相同（`assetId`、`url`、`thumbnailUrl`、`width`、`height`、`mimeType` 等）。同一 `taskId + resultOrdinal` 始终返回同一 `assetId`，删除后再次登记会恢复原 Asset。
+- 生成型 Asset（`asset_type=generated`）复用生图结果原文件，只额外生成缩略图；`DELETE /api/assets/{assetId}` 只删除记录和缩略图，不删除生图历史中的原图。
+- 按用户限流 60 次/分钟。

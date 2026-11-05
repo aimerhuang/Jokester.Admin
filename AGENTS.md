@@ -5,7 +5,7 @@
 - 项目根目录：`D:\Project\jokester.admin`
 - 实际 Web API 项目目录：`D:\Project\jokester.admin\jokester.admin`
 - 根目录设计文档：`后台管理系统设计书.md`
-- 项目 docs：`docs/integration-guide.md`、`docs/architecture.md`、`docs/runbook.md`、`docs/point-recharge.md`、`docs/ai-prompt-filter.md`、`docs/ai-image-size-mode-prd.md`
+- 项目 docs：`docs/integration-guide.md`、`docs/architecture.md`、`docs/runbook.md`、`docs/point-recharge.md`、`docs/ai-prompt-filter.md`、`docs/ai-image-size-mode-prd.md`、`docs/ai-infinite-canvas-prd.md`
 - 根目录数据库脚本：`jokester.admin.sql`
 
 ## Current Stack
@@ -41,6 +41,8 @@
 ```powershell
 dotnet run --no-build -- --seed-admin <admin-user-name> <admin-password>
 ```
+
+省略用户名和密码时读取 `BootstrapAdmin.UserName` / `BootstrapAdmin.Password`；该命令不受 `ASPNETCORE_ENVIRONMENT` 限制。账号为邮箱时按邮箱定位，新建用户沿用注册规则生成用户名；重置已有账号会撤销其 Refresh Token 会话。Docker 环境使用 `docker\jokester.ps1 seed-admin`（服务器 `./jokester.sh seed-admin`），凭据经环境变量传入，不出现在命令行参数中。
 
 开发环境接口：
 
@@ -147,6 +149,7 @@ POST /api/dev/bootstrap/super-admin
 - Legacy GPT Image2 does not accept the project-level `aspectRatioCode=auto`; callers must provide an explicit supported ratio. `size-mode-v1` uses `sizeMode=auto` instead, while Nano Banana2 keeps its existing legacy `auto` behavior.
 - `POST /api/ai/images/generate` directly generates one GPT Image2 image and returns `url`, `base64`, `dataUrl`, `resolutionCode`, `qualityCode`, `aspectRatioCode`, computed `width`/`height`, `size`, `quality`, and prompt metadata.
 - `POST /api/ai/images/generate` and `POST /api/ai/images` prefer `referenceAssetIds` plus optional `maskAssetId`, with a maximum of 6 reference images. Legacy `referenceImageUrls` / `maskImageUrl` remain only for current-user same-origin private-media compatibility; arbitrary remote URLs are rejected.
+- OpenAI Images routes declare `ai_image_model_config.request_format`: `openai-size` (default, dawcode relay) sends `size=WxH`; `prompt-aspect-ratio` is for relays that ignore size parameters and additionally appends `Output image aspect ratio: W:H (orientation).` to the provider prompt only (never to the stored prompt). Relay URLs stay out of migrations; set the format per deployment. Migration: `docs/migrations/20261105-add-ai-image-route-request-format.sql`.
 - When resolved references are non-empty, the service calls OpenAI `/images/edits` and sends multipart `image[]` file fields; without references it calls `/images/generations`. Asset ownership and file existence must be checked before admission and Provider calls.
 - `POST /api/ai/images` creates one queued task per requested image. Every row records `image_count=1` plus the shared prompt/parameter/reference snapshots, and the response returns all task ids in `ids`.
 - GPT primary and fallback routes are both stored in `ai_image_model_config` and distinguished by `route_role=primary/fallback`. Each route owns its provider model, URL, key, and paths; enabled primary failures fall back to the enabled fallback row for the same model and resolution. `OpenAI.PrimaryTimeoutSeconds` is the primary-attempt timeout and defaults to `180` seconds.
@@ -167,6 +170,18 @@ POST /api/dev/bootstrap/super-admin
 - Worker 必须按任务 release、claim epoch/token 和 Provider owner lease 执行。未知 inflight attempt 不自动再次外发，最晚在 `reconcile_by` 失败退款；部分队列写入由 Outbox 恢复，超过 `AiCostControl.OutboxBindDeadlineMinutes` 的未派发任务统一结算。
 - migration 为 `docs/migrations/20260821-add-ai-image-size-mode-v1.sql`，并已同步 `jokester.admin.sql`。它不发布 auto 路由/价格/URL/Secret；仓库默认关闭 `AiImageSizeMode.Enabled/AutoEnabled`。
 - release 只能通过 `--configure-ai-image-catalog` 受控发布：`Approved=true`、auto 三条操作路径验证、独立审批价格和 endpoint/result allowlist 缺一不可。已发布 `CatalogVersion` 不可改写；`EnsureGptImage2TwoK=true` 会补齐并固定 `1k/2k/4k` 参数顺序，复制路由前必须确认 Provider 模型不按分辨率使用不同别名。
+
+## AI Infinite Canvas Contract
+
+- 画布接口位于 `/api/ai/canvases`，只要求登录，不新增菜单权限；按 `owner_user_id` 隔离，跨用户与不存在统一 404。完整说明见 `docs/ai-infinite-canvas-prd.md` 与 `docs/integration-guide.md`。
+- 节点可带可选 `groupId` 表示绑组（组不单独存储，前端少于 2 个成员时自动解散）。
+- 连线目标只能是 `generate`（参考图输入，最多 6 条）或 `image`（切图/裁剪/标记的派生来源，最多 1 条），来源只能是 `image`/`generate`，不得成环。
+- 画布文档存服务端 `ai_canvas_project.document`（`schemaVersion=1`），由 `AiCanvasDocumentValidator` 白名单校验；不要在文档里加入图片 URL、base64 或任意扩展字段，图片只能用当前用户的 `assetId`。
+- 保存使用 `baseRevision` 乐观并发，冲突返回 409 `CANVAS_REVISION_CONFLICT`；文档、`ai_canvas_project_asset` 引用索引、封面与体积在同一事务更新。
+- 画布不另建生图或扣分通道，生成统一走 `POST /api/ai/images`；保存文档时不做提示词过滤。
+- `POST /api/assets/from-ai-result` 把生图结果登记为 `asset_type=generated` 的 Asset（`source_task_id + source_result_ordinal` 唯一），复用结果原文件；删除生成型 Asset 只删缩略图，不得删除生图历史原图。
+- 账户删除会清空并软删除用户画布与引用索引。
+- 迁移为 `docs/migrations/20261103-add-ai-canvas.sql`，已同步 `jokester.admin.sql`；API 读取 `media_asset` 新列，必须先迁移再部署。
 
 ## Nano Banana2 Image API Contract
 
@@ -193,6 +208,14 @@ POST /api/dev/bootstrap/super-admin
 - houbb 原生标签 `0..4` 不是项目七类 taxonomy。第三方开源词库只能作为离线候选源，必须保留来源、commit、原标签、许可证和原始/审核文件哈希，经人工重分类后仍以 `action=audit,status=0` 导入，禁止整库直接启用。
 - houbb 无覆盖或覆盖不足的项目补充词必须使用独立 `source_code=project-curated`，不能冒充第三方来源；不要启用 `幼女`、`少女`、`学生妹`、`枪`、`换脸` 等单独宽泛词。
 - 现有数据库按顺序使用 `docs/migrations/20260811-add-ai-prompt-sensitive-words.sql`、`docs/migrations/20260811-expand-ai-prompt-sensitive-words-houbb.sql` 升级；完整说明见 `docs/ai-prompt-filter.md`，并保持 `jokester.admin.sql` 同步。
+
+## Docker Deployment
+
+- 全部以 Docker 运行：`web`（前端仓库镜像，nginx 托管 dist、反代 API、终止 HTTPS）+ `api` + `mysql` + `redis`；已移除 Caddy，不要再引入。
+- 编排位于 `docker/`：`compose.yaml` 为基础编排，`compose.local.yaml` 为本地源码构建叠加，`compose.production.yaml` 为生产叠加；说明见 `docker/README.md`，生产发布见 `docs/teamcity-docker-deploy.md`。
+- 生产发布由 TeamCity 调用服务器上的 `docker/jokester.sh deploy-api` / `deploy-web`（自动回滚）；`API_IMAGE` / `WEB_IMAGE` 记录在服务器 `.env`。HTTPS 证书放在服务器 `certs/tls.crt`、`tls.key`（Cloudflare Origin Certificate），不进仓库。
+- 编排变量在 `docker/.env`，API 业务配置在 `docker/api.env`；连接串、`AllowedHosts`、CORS 主来源、`Security.KnownProxies`、媒体目录由 `compose.yaml` 生成，不要写进 `api.env`。
+- MySQL 空数据卷首次启动时由 `docker/mysql/initdb/10-jokester-init.sh` 执行 `jokester.admin.sql`（或导入 `docker/mysql/import/*.sql`），因此表结构变化仍必须同步 `jokester.admin.sql`。
 
 ## Runtime Notes
 

@@ -1,80 +1,64 @@
 # TeamCity + Docker 单机生产部署
 
-本文适用于以下部署拓扑：
+部署拓扑：
 
-- TeamCity Server/Agent：Windows
-- 目标服务器：Ubuntu 26.04，SSH 端口 22
-- API 域名：`johhai.com`
-- API、MySQL、Redis、Caddy：同一台服务器上的 Docker 容器
-- 镜像传输：TeamCity 通过 SSH/SCP 直接发送到服务器，不依赖镜像仓库
+- TeamCity Server/Agent：Windows（需要 Docker、OpenSSH 客户端、`tar`）
+- 目标服务器：Ubuntu，SSH 端口 22，需要 Docker Engine + Compose 插件、`bash`、`curl`、`flock`
+- 域名：`johhai.com`，经 Cloudflare 代理
+- 服务器上全部以 Docker 运行：`web`（nginx + 前端）、`api`、`mysql`、`redis`；不使用 Caddy
+- 镜像传输：TeamCity 通过 SSH/SCP 直接发送 `docker save` 镜像包，不依赖镜像仓库
+
+编排文件与服务器管理脚本都在本仓库 `docker/`，说明见 [docker/README.md](../docker/README.md)。
 
 ## 发布链路
 
-TeamCity 每次构建会生成不可变镜像标签：
+| 构建 | 仓库 | 构建脚本 | 发布脚本 | 服务器命令 |
+| --- | --- | --- | --- | --- |
+| API | Jokester.Admin | `deploy/teamcity-build.ps1` → `jokester-admin:<build>-<commit>` | `deploy/teamcity-deploy.ps1` | `jokester.sh deploy-api` |
+| Web | Jokester-Ai-Image | `deploy/teamcity-build.ps1` → `jokester-web:<build>-<commit>` | `deploy/teamcity-deploy.ps1` | `jokester.sh deploy-web` |
 
-```text
-jokester-admin:<build-number>-<commit-prefix>
-```
+- API 发布同时上传部署包（`docker/` 生产文件 + `jokester.admin.sql`），解压到 `DEPLOY_ROOT` 覆盖
+  `compose.yaml`、`compose.production.yaml`、`jokester.sh` 等；`.env`、`api.env`、`certs/`、`data/` 永远不在包里。
+- `deploy-api`：`docker load` → 写入 `.env` 的 `API_IMAGE` → `docker compose up --wait mysql redis api`；
+  5 分钟内未 healthy 则恢复上一个 `API_IMAGE`。
+- `deploy-web`：检查证书 → 用新镜像离线执行 `nginx -t` → 写入 `WEB_IMAGE` → 启动 web → 通过 443
+  冒烟测试首页和 `/api/sites/site_code`；失败则恢复上一个 `WEB_IMAGE`。
+- 两个发布共用 `DEPLOY_ROOT/.deploy.lock`，不会并发执行。首次部署必须先发 API（它负责安装 `jokester.sh`）。
+- MySQL、Redis、`data/` 不参与镜像回滚。
 
-随后通过 SCP 上传镜像和 Compose 文件。服务器加载镜像、更新容器并等待 API 健康检查；
-新 API 五分钟内未变为 healthy 时，脚本恢复上一个 API 镜像。MySQL、Redis 和持久化目录
-不参与应用镜像回滚。
+## 网络、DNS 与 HTTPS
 
-## 网络和 DNS
+1. `johhai.com`（以及 `www.johhai.com`）DNS 指向服务器，Cloudflare 代理开启。
+2. 云安全组 / UFW 只放行 `22/tcp`、`80/tcp`、`443/tcp`；不要放行 MySQL `3306` 或 Redis `6379`
+   （生产编排不会对宿主机开放这两个端口）。
+3. Cloudflare SSL/TLS 模式使用 `Full (strict)`，不能用 `Flexible`（否则 HTTPS 重定向循环）。
+4. HTTPS 由 nginx 终止。在 Cloudflare 控制台 **SSL/TLS → Origin Server → Create Certificate** 生成
+   Origin Certificate（主机名填 `johhai.com, *.johhai.com`，有效期 15 年，无需续期），保存到服务器：
 
-1. 将 `johhai.com` 的 DNS A 记录指向服务器公网 IPv4。
-2. 如果配置 AAAA 记录，必须确认服务器 IPv6 可以正常接收 80/443 流量。
-3. 云安全组和 UFW 只需放行 `22/tcp`、`80/tcp`、`443/tcp` 和 `443/udp`。
-4. 不要放行 MySQL `3306` 或 Redis `6379`。
+   ```bash
+   install -d -m 700 /opt/jokester-admin/certs
+   nano /opt/jokester-admin/certs/tls.crt   # 粘贴 Origin Certificate
+   nano /opt/jokester-admin/certs/tls.key   # 粘贴 Private Key
+   chmod 600 /opt/jokester-admin/certs/tls.key
+   ```
 
-服务器先确认架构：
+   证书缺失时 `deploy-web` 会在切换流量前直接失败。Origin Certificate 只被 Cloudflare 信任；
+   如果以后关闭 Cloudflare 代理，需要换成公开 CA 证书（同样放到 `certs/`）。
+5. `REAL_IP_MODE=cloudflare` 时 nginx 只信任 Cloudflare 官方网段传来的 `CF-Connecting-IP`，再以
+   `X-Forwarded-For` 交给 API；网段列表在前端仓库 `docker/nginx/snippets/realip-cloudflare.conf`。
 
-```bash
-uname -m
-```
+服务器架构为 `aarch64` 时，在两个 TeamCity 构建的 Parameters 中增加 `env.DOCKER_PLATFORM=linux/arm64`。
 
-`x86_64` 使用默认的 `linux/amd64` 镜像。如果结果为 `aarch64`，在 TeamCity Parameters 中
-增加 `env.DOCKER_PLATFORM=linux/arm64`。
+## TeamCity 配置
 
-Caddy 会自动申请和续期 HTTPS 证书，因此首次启动前必须保证 DNS 已生效，并且 80/443
-没有被宿主机其他 Web 服务占用。
-
-当前 `johhai.com` 使用 Cloudflare 代理，公共 DNS 返回的是 Cloudflare 地址而不是源站地址。
-Cloudflare SSL/TLS 模式必须使用 `Full (strict)`，不能使用 `Flexible`，否则 HTTPS 重定向可能
-循环。首次签发证书失败时，先确认 Cloudflare 能把 80 端口的 ACME 请求转发到源站；必要时可
-临时切换为 DNS only，证书签发成功后再恢复代理。Caddyfile 已限定只信任 Cloudflare 官方网段
-提供的 `CF-Connecting-IP`，并把真实客户端 IP 传给 API。
-
-## TeamCity SSH 身份
-
-建议为 TeamCity 单独生成 Ed25519 密钥。下面的私钥路径只保存在 TeamCity 主机，不进入仓库：
-
-```powershell
-New-Item -ItemType Directory -Force D:\TeamCityKeys
-ssh-keygen -t ed25519 -f D:\TeamCityKeys\jokester-deploy -C teamcity-jokester
-Get-Content D:\TeamCityKeys\jokester-deploy.pub |
-  ssh root@<server-ip> "umask 077; mkdir -p ~/.ssh; cat >> ~/.ssh/authorized_keys"
-```
-
-在 TeamCity 项目的 `SSH Keys` 页面上传 `D:\TeamCityKeys\jokester-deploy` 私钥，然后在
-Build 配置的 `Build Features` 中添加 `SSH Agent` 并选择该密钥。不要把 SSH 私钥保存为
-普通文本参数。
-
-获取服务器 SSH 公钥行：
+两个构建配置都使用 PowerShell 步骤，Working directory 为 `%teamcity.build.checkoutDir%`：
 
 ```powershell
-ssh-keyscan -p 22 -t ed25519 <server-ip>
+.\deploy\teamcity-build.ps1
+.\deploy\teamcity-deploy.ps1
 ```
 
-应通过云控制台登录服务器，并用下面的命令核对指纹，避免直接信任未经核验的扫描结果：
-
-```bash
-ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
-```
-
-## TeamCity 参数
-
-在 Build 配置的 `Parameters` 中添加：
+Parameters（两个构建相同）：
 
 | 参数 | 示例 | 类型 |
 | --- | --- | --- |
@@ -83,130 +67,108 @@ ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
 | `env.DEPLOY_USER` | `root` | Text |
 | `env.DEPLOY_ROOT` | `/opt/jokester-admin` | Text |
 | `env.DEPLOY_HOST_KEY` | `ssh-keyscan` 输出的完整一行 | Text |
+| `env.NODE_IMAGE` / `env.NGINX_IMAGE` / `env.NPM_REGISTRY` | 镜像加速地址（仅 Web，可选） | Text |
 
-`DEPLOY_HOST` 推荐使用服务器 IP 或专用 SSH 域名。如果 `johhai.com` 使用 CDN 代理，不能把
-它作为 SSH 地址；这不影响生产配置中的 `APP_DOMAIN=johhai.com`。
+`DEPLOY_HOST` 使用服务器 IP 或专用 SSH 域名，不能用经 CDN 代理的 `johhai.com`。
 
-## TeamCity Build Steps
-
-保留已有的 Docker 检查步骤，然后按顺序增加两个 PowerShell 步骤。
-
-构建镜像：
+SSH 身份：为 TeamCity 单独生成 Ed25519 密钥，私钥只保存在 TeamCity 主机，在项目 `SSH Keys` 上传，
+并在构建的 `Build Features` 中添加 `SSH Agent`：
 
 ```powershell
-.\deploy\teamcity-build.ps1
+ssh-keygen -t ed25519 -f D:\TeamCityKeys\jokester-deploy -C teamcity-jokester
+Get-Content D:\TeamCityKeys\jokester-deploy.pub |
+  ssh root@<server-ip> "umask 077; mkdir -p ~/.ssh; cat >> ~/.ssh/authorized_keys"
+ssh-keyscan -p 22 -t ed25519 <server-ip>
 ```
 
-上传并部署：
+通过云控制台登录服务器，用 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` 核对指纹后再填入
+`DEPLOY_HOST_KEY`。
 
-```powershell
-.\deploy\teamcity-deploy.ps1
-```
+## 从旧 Caddy 部署原地迁移
 
-两个步骤的 Working directory 都使用 `%teamcity.build.checkoutDir%`。部署步骤依赖构建步骤
-在同一构建工作目录生成的 `artifacts/image-reference.txt`、`image-archive.txt` 和镜像 tar。
+旧部署（`docker-compose.production.yml` + Caddyfile + `.env.production`）已在本地用 docker-in-docker
+完整演练过：数据卷、`data/` 上传文件、Redis 中的 Refresh Token 均保留，过渡期 Caddy 仍可转发到新 API。
 
-需要自动发布时，在 `Triggers` 中增加 VCS Trigger。建议先连续手动运行并完成回滚验收，
-再启用 main 分支自动部署。
+1. **备份**（服务器上）：
 
-## 首次服务器配置
+   ```bash
+   cd /opt/jokester-admin
+   docker exec jokester-mysql sh -c 'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction --routines --triggers --events --hex-blob --default-character-set=utf8mb4 --no-tablespaces "$MYSQL_DATABASE"' > ~/jokester-before-migration.sql
+   chmod 600 ~/jokester-before-migration.sql
+   tar -czf ~/jokester-data-before-migration.tgz data .env.production
+   ```
 
-第一次运行 TeamCity 时，发布会有意停止并提示缺少：
+2. 按上文把 Cloudflare Origin Certificate 放到 `/opt/jokester-admin/certs/`。
+3. 运行 **Jokester.Admin** 的 TeamCity 构建。`deploy-api` 发现只有 `.env.production` 时会自动执行
+   `migrate-from-caddy`：
+   - 生成 `.env`：沿用 `APP_DOMAIN`、MySQL/Redis 账号密码、当前 API 镜像，项目名 `jokester-admin`、
+     子网 `172.29.0.0/24`、web 地址 `172.29.0.10` 与旧部署一致，因此原 `jokester-admin_mysql-data`、
+     `jokester-admin_redis-data` 卷被直接复用；
+   - 生成 `api.env`：旧文件中除连接串、域名、代理等编排管理的键以外的全部业务配置；
+   - 旧 `.env.production` 保留不动。
 
-```text
-/opt/jokester-admin/.env.production
-```
+   随后 MySQL / Redis / API 以新编排重建，`jokester-caddy` 继续运行并转发到新 API。
+4. 运行 **Jokester-Ai-Image** 的 TeamCity 构建。`deploy-web` 停止 `jokester-caddy`，由 nginx 接管
+   80/443；冒烟测试通过后删除 Caddy 容器，失败则重新启动 Caddy。
+5. 验收：
 
-此时 Compose、Caddy、环境模板和数据库导入脚本已经放到服务器。登录服务器执行：
+   ```bash
+   cd /opt/jokester-admin
+   ./jokester.sh ps
+   curl --fail https://johhai.com/api/sites/site_code
+   ```
+
+   并验收登录 / 刷新令牌、注册邮件、私有媒体读写和一个后台任务。
+6. 确认稳定后可手工清理旧文件：`docker-compose.production.yml`、`Caddyfile`、`server-*.sh`、
+   `frontend/`、`frontend-releases/`，以及 Caddy 卷 `jokester-admin_caddy-data`、`jokester-admin_caddy-config`。
+   `.env.production` 建议在确认新 `.env` / `api.env` 无误后移到备份位置。
+
+## 全新服务器
 
 ```bash
-cd /opt/jokester-admin
-cp .env.production.example .env.production
-chmod 600 .env.production
-nano .env.production
+mkdir -p /opt/jokester-admin
 ```
 
-至少替换 MySQL、Redis、JWT、Bootstrap 和 SMTP 密钥。可以使用下面的命令生成适合连接串的
-十六进制随机值：
+1. 先运行一次 Jokester.Admin 构建：部署包会被解压，随后因缺少 `.env` 失败并提示。
+2. 在服务器上生成配置并填写：
 
-```bash
-openssl rand -hex 32
-```
+   ```bash
+   cd /opt/jokester-admin
+   ./jokester.sh init production   # 生成 .env / api.env（600 权限），MySQL/Redis/JWT 密钥自动随机
+   nano .env                       # 确认域名
+   nano api.env                    # 填写 SMTP 等业务配置
+   ```
 
-不要在密码中使用分号或逗号；它们会改变 MySQL/Redis 连接串的字段边界。生产 `.env.production`
-只保存在服务器，并由 `root` 以 `0600` 权限持有。
+3. 放置 HTTPS 证书（见上文）。需要迁入已有数据时，把 `mysqldump` 导出的 `*.sql` 放进
+   `mysql/import/`，首次启动会导入它而不是执行 `jokester.admin.sql`。
+4. 依次运行 Jokester.Admin、Jokester-Ai-Image 构建，然后创建管理员：
 
-## 首次迁移本地 MySQL
+   ```bash
+   ./jokester.sh seed-admin
+   ```
 
-数据库迁移是一次性操作，不属于每次 TeamCity 发布。导出期间应停止本地写入。Windows 上使用
-`--result-file`，避免旧版 PowerShell 的文本重定向改变 SQL 文件编码：
+## 日常运维
 
-```powershell
-& 'C:\Program Files\MySQL\MySQL Server 8.0\bin\mysqldump.exe' `
-  --host=127.0.0.1 `
-  --port=3306 `
-  --user=<local-user> `
-  --password `
-  --single-transaction `
-  --routines `
-  --triggers `
-  --events `
-  --hex-blob `
-  --default-character-set=utf8mb4 `
-  --no-tablespaces `
-  --result-file=jokester-production.sql `
-  jokester.admin
-```
+在 `/opt/jokester-admin` 下执行（`./jokester.sh help` 查看全部）：
 
-`--password` 会交互式询问密码，不要把密码写进命令历史。通过 SSH 上传：
+| 命令 | 用途 |
+| --- | --- |
+| `./jokester.sh ps` / `logs api` | 状态、日志（容器日志按 `LOG_MAX_SIZE` × `LOG_MAX_FILE` 轮转） |
+| `./jokester.sh seed-admin` | 创建或重置超级管理员（支持邮箱账号；会撤销该账号现有会话） |
+| `./jokester.sh sql docs-migration.sql` | 执行增量迁移 |
+| `./jokester.sh backup` | 导出数据库到 `backups/`（600 权限） |
+| `./jokester.sh legal` | 按 `legal.env` 配置法律文档 |
+| `./jokester.sh cli --migrate-ai-media --dry-run` | 执行 API 维护命令 |
 
-```powershell
-scp -P 22 .\jokester-production.sql root@<server-ip>:/opt/jokester-admin/
-```
-
-在服务器上只向空数据库导入：
-
-```bash
-cd /opt/jokester-admin
-./server-import-database.sh \
-  /opt/jokester-admin \
-  /opt/jokester-admin/jokester-production.sql \
-  --confirm-empty
-```
-
-脚本会启动 MySQL/Redis、等待 MySQL 健康、确认目标库没有表，再导入并输出表数量。目标库非空时
-会拒绝导入。SQL 备份可能包含用户信息和 Provider 密钥，验收完成后应人工安全移除。
-
-## 正式发布和验收
-
-数据库导入完成后重新点击 TeamCity `Run`。成功后检查：
-
-```bash
-docker compose \
-  --project-directory /opt/jokester-admin \
-  --env-file /opt/jokester-admin/.env.production \
-  --file /opt/jokester-admin/docker-compose.production.yml \
-  ps
-
-curl --fail https://johhai.com/api/sites/site_code
-```
-
-容器 `jokester-mysql`、`jokester-redis`、`jokester-api` 应为 healthy，`jokester-caddy` 应为
-running。还应验收登录/刷新令牌、邮件验证码、私有媒体读写和至少一个后台任务。生产 Swagger
-默认关闭。
+也可以直接使用 `docker compose`：`.env` 中的 `COMPOSE_FILE` 已组合生产编排，`API_IMAGE` / `WEB_IMAGE`
+记录当前发布版本。
 
 ## 持久化与备份
 
-以下内容不在 API 镜像内：
+不在镜像内、需要异机备份的内容：
 
-- MySQL volume：`jokester-admin_mysql-data`
-- Redis volume：`jokester-admin_redis-data`
-- Caddy 证书 volume：`jokester-admin_caddy-data`
-- `/opt/jokester-admin/data/private-media`
-- `/opt/jokester-admin/data/blog`
-- `/opt/jokester-admin/data/avatar`
-- `/opt/jokester-admin/data/prompt-images`
-- `/opt/jokester-admin/data/data-protection`
+- MySQL 卷 `jokester-admin_mysql-data`、Redis 卷 `jokester-admin_redis-data`
+- `/opt/jokester-admin/data/`（`private-media`、`prompt-images`、`blog`、`avatar`、`data-protection`）
+- `/opt/jokester-admin/.env`、`api.env`、`certs/`
 
-一键发布不会替代数据库、私有媒体和 DataProtection Keys 的异机备份。正式开放前应单独配置定时
-备份和恢复演练。
+一键发布不替代数据库、私有媒体和 DataProtection Keys 的异机备份；正式开放前应配置定时备份并做恢复演练。

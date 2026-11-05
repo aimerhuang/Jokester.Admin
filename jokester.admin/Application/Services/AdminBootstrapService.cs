@@ -1,30 +1,48 @@
 using jokester.admin.Application.Abstractions;
+using jokester.admin.Application.Security;
 using jokester.admin.Domain.Entities;
 using SqlSugar;
 
 namespace jokester.admin.Application.Services;
 
-public sealed class AdminBootstrapService(ISqlSugarClient db, IPasswordHasher passwordHasher) : IAdminBootstrapService
+public sealed class AdminBootstrapService(
+    ISqlSugarClient db,
+    IPasswordHasher passwordHasher,
+    IRefreshTokenStore refreshTokenStore) : IAdminBootstrapService
 {
     public async Task<long> UpsertSuperAdminAsync(string userName, string password, CancellationToken cancellationToken)
     {
         var hashed = passwordHasher.HashPassword(password);
         long userId = 0;
+        var existingUser = false;
+        // 账号为邮箱时按邮箱定位，新建用户沿用注册规则生成用户名，并保存真实邮箱。
+        var email = userName.Contains('@') ? userName.Trim().ToLowerInvariant() : null;
 
         await db.Ado.UseTranAsync(async () =>
         {
-            var user = await db.Queryable<SysUserEntity>()
-                .FirstAsync(x => x.UserName == userName, cancellationToken);
+            var user = email is null
+                ? await db.Queryable<SysUserEntity>().FirstAsync(x => x.UserName == userName, cancellationToken)
+                : await db.Queryable<SysUserEntity>().FirstAsync(x => x.Email == email, cancellationToken);
 
             if (user is null)
             {
+                var accountName = userName;
+                if (email is not null)
+                {
+                    accountName = RegistrationIdentityFactory.Create(email).UserName;
+                    if (await db.Queryable<SysUserEntity>().AnyAsync(x => x.UserName == accountName, cancellationToken))
+                    {
+                        accountName = RegistrationIdentityFactory.CreateDisambiguatedUserName(email);
+                    }
+                }
+
                 user = new SysUserEntity
                 {
-                    UserName = userName,
+                    UserName = accountName,
                     NickName = "系统管理员",
                     PasswordHash = hashed.Hash,
                     Salt = hashed.Salt,
-                    Email = $"{userName}@local.admin",
+                    Email = email ?? $"{userName}@local.admin",
                     Status = 1,
                     IsSuperAdmin = true,
                     Remark = "开发初始化超级管理员",
@@ -46,6 +64,7 @@ public sealed class AdminBootstrapService(ISqlSugarClient db, IPasswordHasher pa
                 user.UpdatedAt = DateTime.Now;
                 await db.Updateable(user).ExecuteCommandAsync();
                 userId = user.Id;
+                existingUser = true;
             }
 
             var role = await db.Queryable<SysRoleEntity>().FirstAsync(x => x.RoleCode == "super_admin", cancellationToken);
@@ -104,6 +123,12 @@ public sealed class AdminBootstrapService(ISqlSugarClient db, IPasswordHasher pa
                 }).ToList()).ExecuteCommandAsync();
             }
         });
+
+        // 已有账号的密码和超级管理员上下文被重置，撤销其现有 Refresh Token 会话。
+        if (existingUser)
+        {
+            await refreshTokenStore.RevokeUserSessionsAsync(userId, cancellationToken);
+        }
 
         return userId;
     }

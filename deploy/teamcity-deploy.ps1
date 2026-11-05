@@ -73,26 +73,40 @@ if ($archiveName -notmatch '^[a-zA-Z0-9._-]+\.tar$') {
 }
 
 $archivePath = Join-Path $artifactDirectory $archiveName
-$composePath = Join-Path $PSScriptRoot 'docker-compose.production.yml'
-$caddyPath = Join-Path $PSScriptRoot 'Caddyfile'
-$environmentExamplePath = Join-Path $PSScriptRoot '.env.production.example'
-$serverDeployPath = Join-Path $PSScriptRoot 'server-deploy.sh'
-$serverImportPath = Join-Path $PSScriptRoot 'server-import-database.sh'
-$serverPrepareEnvironmentPath = Join-Path $PSScriptRoot 'server-prepare-environment.sh'
-$uploadPaths = @(
-    $archivePath,
-    $composePath,
-    $caddyPath,
-    $environmentExamplePath,
-    $serverDeployPath,
-    $serverImportPath,
-    $serverPrepareEnvironmentPath
+if (-not (Test-Path -LiteralPath $archivePath -PathType Leaf)) {
+    throw "Required deployment file is missing: $archivePath"
+}
+
+# The deploy bundle is the docker/ directory (production files only) plus the schema used
+# to initialize an empty MySQL volume. It is extracted into DEPLOY_ROOT on every release;
+# .env, api.env, certs and data are never part of it.
+$bundleName = 'jokester-docker-bundle.tar'
+$bundleFiles = @(
+    'compose.yaml',
+    'compose.production.yaml',
+    'jokester.sh',
+    '.env.production.example',
+    'api.env.production.example',
+    'legal.env.example',
+    'README.md',
+    'mysql/initdb/10-jokester-init.sh',
+    'mysql/import/README.md'
 )
-foreach ($path in $uploadPaths) {
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-        throw "Required deployment file is missing: $path"
+$dockerDirectory = Join-Path $checkoutDirectory 'docker'
+foreach ($file in $bundleFiles) {
+    if (-not (Test-Path -LiteralPath (Join-Path $dockerDirectory $file) -PathType Leaf)) {
+        throw "Required deployment file is missing: docker/$file"
     }
 }
+Push-Location $checkoutDirectory
+try {
+    # Relative paths only: GNU tar would read a drive letter as a remote host name.
+    Invoke-NativeCommand tar (@('-cf', "artifacts/$bundleName", '-C', 'docker') + $bundleFiles + @('-C', '..', 'jokester.admin.sql'))
+}
+finally {
+    Pop-Location
+}
+$uploadPaths = @($archivePath, (Join-Path $artifactDirectory $bundleName))
 
 $releaseName = ($imageReference -split ':', 2)[1]
 $remoteReleaseDirectory = "$deployRoot/releases/$releaseName"
@@ -119,7 +133,11 @@ $scpArguments = $sshOptions + @('-P', $deployPortText)
 Invoke-NativeCommand ssh ($sshArguments + @($remote, "mkdir -p -- '$remoteReleaseDirectory'"))
 Invoke-NativeCommand scp ($scpArguments + $uploadPaths + @("${remote}:$remoteReleaseDirectory/"))
 
-$remoteCommand = "bash '$remoteReleaseDirectory/server-deploy.sh' '$deployRoot' '$remoteReleaseDirectory/$archiveName' '$imageReference'"
+$remoteCommand = "set -e; install -d -m 0755 '$deployRoot'; " +
+    "tar -xf '$remoteReleaseDirectory/$bundleName' -C '$deployRoot' --no-same-owner; " +
+    "chmod 0755 '$deployRoot/jokester.sh'; " +
+    "bash '$deployRoot/jokester.sh' deploy-api '$remoteReleaseDirectory/$archiveName' '$imageReference'; " +
+    "rm -f -- '$remoteReleaseDirectory/$bundleName'"
 Invoke-NativeCommand ssh ($sshArguments + @($remote, $remoteCommand))
 
 Write-Host "Deployment completed on $remote"
