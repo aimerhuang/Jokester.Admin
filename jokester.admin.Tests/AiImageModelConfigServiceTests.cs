@@ -169,7 +169,9 @@ public sealed class AiImageModelConfigServiceTests
     [Theory]
     [InlineData("gpt-image-2.5-flare", "GPT Image 2.5 Flare")]
     [InlineData("gpt-image-2.5-sunburst", "GPT Image 2.5 Sunburst")]
-    public async Task GetEnabledModelsAsync_ExposesGpt25AsDistinctModel_WithItsOwnRoutesAndPrices(
+    [InlineData("gpt-image-2.6-flare", "GPT Image 2.6 Flare")]
+    [InlineData("gpt-image-2.6-sunburst", "GPT Image 2.6 Sunburst")]
+    public async Task GetEnabledModelsAsync_ExposesVersionedGptModelAsDistinctModel_WithItsOwnRoutesAndPrices(
         string modelCode,
         string modelName)
     {
@@ -307,6 +309,7 @@ public sealed class AiImageModelConfigServiceTests
                     api_key TEXT NOT NULL,
                     text_to_image_path TEXT NOT NULL,
                     image_to_image_path TEXT NOT NULL,
+                    request_format TEXT NOT NULL DEFAULT 'openai-size',
                     sort INTEGER NOT NULL,
                     status INTEGER NOT NULL,
                     created_at TEXT NOT NULL,

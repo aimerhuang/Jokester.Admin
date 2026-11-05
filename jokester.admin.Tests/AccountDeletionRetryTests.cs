@@ -107,6 +107,26 @@ public sealed class AccountDeletionRetryTests
             Status = "active",
             CreatedAt = DateTime.Now
         }).ExecuteCommand();
+        var canvasProjectId = db.Insertable(new AiCanvasProjectEntity
+        {
+            CanvasId = "CNV20261103000000000000000000000001",
+            OwnerUserId = 1,
+            Title = "person canvas",
+            SchemaVersion = 1,
+            Revision = 1,
+            Document = "{\"schemaVersion\":1}",
+            DocumentBytes = 18,
+            CoverAssetId = "AST20261103000000000000000000000001",
+            StorageBytes = 18,
+            CreatedAt = now,
+            UpdatedAt = now
+        }).ExecuteReturnBigIdentity();
+        db.Insertable(new AiCanvasProjectAssetEntity
+        {
+            CanvasProjectId = canvasProjectId,
+            AssetId = "AST20261103000000000000000000000001",
+            OwnerUserId = 1
+        }).ExecuteCommand();
         db.Insertable(new AccountDeletionRequestEntity
         {
             RequestId = "ADR2026081200000000000000000002",
@@ -142,6 +162,11 @@ public sealed class AccountDeletionRetryTests
             Assert.Null(user.Email);
             Assert.True(user.IsDeleted);
             Assert.Empty(db.Queryable<SysUserMembershipEntitlementEntity>().ToList());
+            var canvas = db.Queryable<AiCanvasProjectEntity>().Single();
+            Assert.True(canvas.IsDeleted);
+            Assert.Equal("{}", canvas.Document);
+            Assert.DoesNotContain("person", canvas.Title, StringComparison.OrdinalIgnoreCase);
+            Assert.Empty(db.Queryable<AiCanvasProjectAssetEntity>().ToList());
             Assert.False(Directory.Exists(userDirectory));
             Assert.Equal("completed", db.Queryable<AccountDeletionRequestEntity>().Single().Status);
         }
@@ -311,6 +336,30 @@ public sealed class AccountDeletionRetryTests
                 owner_user_id INTEGER NOT NULL,
                 is_deleted INTEGER NOT NULL DEFAULT 0,
                 deleted_at TEXT NULL
+            );
+            CREATE TABLE ai_canvas_project (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                canvas_id TEXT NOT NULL UNIQUE,
+                owner_user_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                schema_version INTEGER NOT NULL,
+                revision INTEGER NOT NULL,
+                document TEXT NOT NULL,
+                document_bytes INTEGER NOT NULL,
+                node_count INTEGER NOT NULL DEFAULT 0,
+                connection_count INTEGER NOT NULL DEFAULT 0,
+                cover_asset_id TEXT NULL,
+                storage_bytes INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                deleted_at TEXT NULL,
+                is_deleted INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE ai_canvas_project_asset (
+                canvas_project_id INTEGER NOT NULL,
+                asset_id TEXT NOT NULL,
+                owner_user_id INTEGER NOT NULL,
+                PRIMARY KEY (canvas_project_id, asset_id)
             );
             CREATE TABLE user_consent (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL);
             CREATE TABLE sys_user_membership_entitlement (

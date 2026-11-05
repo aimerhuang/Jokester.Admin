@@ -1,0 +1,138 @@
+# Jokester 基础编排：mysql + redis + api + web(nginx)。
+# 本地测试叠加 compose.local.yaml（.env 中的 COMPOSE_FILE 已经组合好），
+# 在本目录执行 `docker compose up -d --build` 即可。
+# 生产叠加 compose.production.yaml，见 README.md。
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: ${LOG_MAX_SIZE:-20m}
+    max-file: "${LOG_MAX_FILE:-5}"
+
+services:
+  mysql:
+    image: ${MYSQL_IMAGE:-mysql:8.4}
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:?MYSQL_DATABASE is required}
+      MYSQL_USER: ${MYSQL_USER:?MYSQL_USER is required}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=${MYSQL_TIME_ZONE:-+08:00}
+      - --skip-name-resolve
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # 仅在数据卷为空时执行：有导入文件则导入，否则用 jokester.admin.sql 建库。
+      - ./mysql/initdb:/docker-entrypoint-initdb.d:ro
+      - ${MYSQL_SCHEMA_FILE:-../jokester.admin.sql}:/jokester/schema/jokester.admin.sql:ro
+      - ${MYSQL_IMPORT_DIR:-./mysql/import}:/jokester/import:ro
+    healthcheck:
+      # 初始化失败标记存在时保持 unhealthy（见 mysql/initdb/10-jokester-init.sh）。
+      test: ["CMD-SHELL", "test ! -f /var/lib/mysql/.jokester-init-failed && mysqladmin ping --host=127.0.0.1 --user=root --password=\"$${MYSQL_ROOT_PASSWORD}\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    networks:
+      - backend
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:7.4-alpine}
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    command:
+      - /bin/sh
+      - -ec
+      - exec redis-server --appendonly yes --appendfsync everysec --requirepass "$${REDIS_PASSWORD}"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$${REDIS_PASSWORD}\" redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks:
+      - backend
+
+  api:
+    image: ${API_IMAGE:-jokester-admin:local}
+    restart: unless-stopped
+    logging: *default-logging
+    # 业务配置（JWT、SMTP、AI、积分等）放 api.env；下面 environment 中的
+    # 连接串、域名和路径由编排统一生成，优先级高于 api.env。
+    env_file:
+      - path: ./api.env
+        required: true
+    environment:
+      ASPNETCORE_URLS: http://+:8080
+      AllowedHosts: ${APP_DOMAIN:?APP_DOMAIN is required}
+      HEALTHCHECK_HOST: ${APP_DOMAIN}
+      Security__AllowedOrigins__0: ${PUBLIC_ORIGIN:?PUBLIC_ORIGIN is required}
+      Security__KnownProxies__0: ${WEB_IPV4:?WEB_IPV4 is required}
+      Database__Provider: MySql
+      Database__ConnectionString: Server=mysql;Port=3306;Database=${MYSQL_DATABASE};User ID=${MYSQL_USER};Password=${MYSQL_PASSWORD};Allow User Variables=True;SslMode=None;AllowPublicKeyRetrieval=True;
+      Redis__ConnectionString: redis:6379,password=${REDIS_PASSWORD},abortConnect=false
+      AiMediaStorage__RootPath: /data/private-media/ai
+      PROMPT_IMAGE_ROOT: /data/prompt-images
+      TZ: ${TZ:-Asia/Shanghai}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - api-data:/data
+      - api-blog:/app/wwwroot/blog
+      - api-avatar:/app/wwwroot/avatar
+      - api-keys:/home/app/.aspnet/DataProtection-Keys
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - backend
+
+  web:
+    image: ${WEB_IMAGE:-jokester-web:local}
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      API_UPSTREAM: api:8080
+      APP_DOMAIN: ${APP_DOMAIN}
+      # on 时需要 compose.production.yaml 挂载证书并开放 443。
+      TLS_MODE: ${TLS_MODE:-off}
+      REAL_IP_MODE: ${REAL_IP_MODE:-none}
+      CLIENT_MAX_BODY_SIZE: ${WEB_CLIENT_MAX_BODY_SIZE:-12m}
+      PROXY_READ_TIMEOUT: ${WEB_PROXY_READ_TIMEOUT:-600s}
+      TZ: ${TZ:-Asia/Shanghai}
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - ${WEB_BIND:-0.0.0.0}:${WEB_PORT:-80}:80
+    networks:
+      backend:
+        # API 只信任这个地址传来的 X-Forwarded-For。
+        ipv4_address: ${WEB_IPV4}
+
+networks:
+  backend:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${DOCKER_SUBNET:?DOCKER_SUBNET is required}
+
+volumes:
+  mysql-data:
+  redis-data:
+  api-data:
+  api-blog:
+  api-avatar:
+  api-keys:

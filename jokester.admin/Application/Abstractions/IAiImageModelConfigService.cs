@@ -46,4 +46,6 @@ public sealed class ResolvedAiImageModelConfig
     public string TextToImagePath { get; init; } = "/images/generations";
 
     public string ImageToImagePath { get; init; } = "/images/edits";
+
+    public string RequestFormat { get; init; } = "openai-size";
 }

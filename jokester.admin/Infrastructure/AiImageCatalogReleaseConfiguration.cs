@@ -516,6 +516,7 @@ public static class AiImageCatalogReleaseConfiguration
         target.ApiKey = source.ApiKey;
         target.TextToImagePath = source.TextToImagePath;
         target.ImageToImagePath = source.ImageToImagePath;
+        target.RequestFormat = source.RequestFormat;
         target.Sort = 2;
         target.Status = 1;
         target.UpdatedAt = now;

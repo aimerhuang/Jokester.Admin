@@ -1,0 +1,19 @@
+# 生产叠加：使用 TeamCity 发布并 docker load 的镜像（API_IMAGE / WEB_IMAGE 由 jokester.sh 写入 .env），
+# nginx 终止 HTTPS 并开放 80/443，上传文件保存在部署目录的 ./data（与旧 Caddy 部署目录结构一致）。
+
+services:
+  api:
+    pull_policy: never
+    volumes:
+      - ./data:/data
+      - ./data/blog:/app/wwwroot/blog
+      - ./data/avatar:/app/wwwroot/avatar
+      - ./data/data-protection:/home/app/.aspnet/DataProtection-Keys
+
+  web:
+    pull_policy: never
+    ports:
+      - ${WEB_HTTPS_BIND:-0.0.0.0}:${WEB_HTTPS_PORT:-443}:443
+    volumes:
+      # 需要 tls.crt / tls.key（推荐 Cloudflare Origin Certificate）。
+      - ${TLS_CERT_DIR:-./certs}:/etc/nginx/certs:ro

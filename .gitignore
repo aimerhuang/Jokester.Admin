@@ -1,7 +1,7 @@
 .env
 .env.*
 !.env.example
-!deploy/.env.production.example
+!docker/.env.production.example
 
 bin/
 obj/
@@ -20,3 +20,8 @@ artifacts/
 *.user
 *.suo
 *.log
+
+/docker/api.env
+/docker/legal.env
+/docker/mysql/import/*.sql
+/docker/backups/

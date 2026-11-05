@@ -361,6 +361,7 @@ public sealed class AiImageSizeModeContractTests
                     provider TEXT NOT NULL, provider_model TEXT NOT NULL, resolution_code TEXT NOT NULL,
                     route_role TEXT NOT NULL, base_url TEXT NOT NULL, api_key TEXT NOT NULL,
                     text_to_image_path TEXT NOT NULL, image_to_image_path TEXT NOT NULL,
+                    request_format TEXT NOT NULL DEFAULT 'openai-size',
                     sort INTEGER NOT NULL, status INTEGER NOT NULL, created_at TEXT NOT NULL,
                     updated_at TEXT NULL, is_deleted INTEGER NOT NULL);
                 CREATE TABLE ai_image_parameter (

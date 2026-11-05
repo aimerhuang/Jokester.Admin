@@ -19,6 +19,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IUserConsentService, UserConsentService>();
         services.AddScoped<IAccountDeletionService, AccountDeletionService>();
         services.AddScoped<IMediaAssetService, MediaAssetService>();
+        services.AddScoped<IAiCanvasService, AiCanvasService>();
         services.AddHostedService<AccountDeletionWorker>();
         services.AddHttpClient<IEmailValidationService, EmailValidationService>();
         services.AddScoped<IUserService, UserService>();

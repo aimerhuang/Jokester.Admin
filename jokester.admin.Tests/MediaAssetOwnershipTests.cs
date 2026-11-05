@@ -174,6 +174,8 @@ public sealed class MediaAssetOwnershipTests : IDisposable
                 size_bytes INTEGER NOT NULL,
                 sha256 TEXT NOT NULL,
                 metadata_stripped INTEGER NOT NULL,
+                source_task_id INTEGER NULL,
+                source_result_ordinal INTEGER NULL,
                 created_at TEXT NOT NULL,
                 deleted_at TEXT NULL,
                 is_deleted INTEGER NOT NULL DEFAULT 0

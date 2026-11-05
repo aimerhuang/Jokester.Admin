@@ -1,4 +1,6 @@
 using jokester.admin.Application.Abstractions;
+using jokester.admin.Application.DTOs.AiCanvases;
+using jokester.admin.Application.DTOs.AiImages;
 using jokester.admin.Common;
 using jokester.admin.Common.Exceptions;
 using Microsoft.AspNetCore.Authorization;
@@ -17,6 +19,27 @@ public sealed class AssetsController(IMediaAssetService mediaAssetService, ICurr
     [HttpGet("{assetId}/thumbnail")]
     public Task<IActionResult> Thumbnail(string assetId, CancellationToken cancellationToken) =>
         Download(assetId, thumbnail: true, cancellationToken);
+
+    /// <summary>
+    /// 将当前用户的生图结果登记为可引用的 Asset（幂等）
+    /// </summary>
+    /// <remarks>
+    /// 同一 taskId + resultOrdinal 始终返回同一 assetId；Asset 复用结果原文件，删除 Asset 不删除生图历史中的原图。
+    /// </remarks>
+    [HttpPost("from-ai-result")]
+    [ProducesResponseType(typeof(ApiResponse<UploadAiImageResponse>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> RegisterAiResult(
+        [FromBody] RegisterAiResultAssetRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!currentUser.UserId.HasValue)
+            throw new AppException(ErrorCodes.Unauthorized, MachineErrorCodes.Unauthorized, "Authentication is required.");
+        return Success(await mediaAssetService.RegisterAiResultAsync(
+            currentUser.UserId.Value,
+            request.TaskId,
+            request.ResultOrdinal,
+            cancellationToken));
+    }
 
     [HttpDelete("{assetId}")]
     [ProducesResponseType(typeof(ApiResponse), StatusCodes.Status200OK)]

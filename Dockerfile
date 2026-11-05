@@ -1,4 +1,7 @@
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+ARG DOTNET_SDK_IMAGE=mcr.microsoft.com/dotnet/sdk:10.0
+ARG DOTNET_ASPNET_IMAGE=mcr.microsoft.com/dotnet/aspnet:10.0
+
+FROM ${DOTNET_SDK_IMAGE} AS build
 WORKDIR /src
 
 COPY jokester.admin/jokester.admin.csproj jokester.admin/
@@ -11,7 +14,7 @@ RUN dotnet publish jokester.admin/jokester.admin.csproj \
     --no-restore \
     /p:UseAppHost=false
 
-FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
+FROM ${DOTNET_ASPNET_IMAGE} AS runtime
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
@@ -37,9 +40,14 @@ RUN mkdir -p \
 ENV ASPNETCORE_ENVIRONMENT=Production \
     ASPNETCORE_URLS=http://+:8080 \
     DOTNET_EnableDiagnostics=0 \
-    TZ=Asia/Shanghai
+    TZ=Asia/Shanghai \
+    HEALTHCHECK_HOST=localhost
 
 EXPOSE 8080
+
+# HEALTHCHECK_HOST 必须在 AllowedHosts 内；该接口同时验证 MySQL 可用。
+HEALTHCHECK --interval=15s --timeout=10s --start-period=45s --retries=20 \
+    CMD curl --fail --silent --show-error --header "Host: ${HEALTHCHECK_HOST}" http://127.0.0.1:8080/api/sites/site_code >/dev/null || exit 1
 
 USER app
 

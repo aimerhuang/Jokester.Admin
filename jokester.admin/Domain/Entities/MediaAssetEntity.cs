@@ -41,6 +41,12 @@ public sealed class MediaAssetEntity
     [SugarColumn(ColumnName = "metadata_stripped")]
     public bool MetadataStripped { get; set; }
 
+    [SugarColumn(ColumnName = "source_task_id")]
+    public long? SourceTaskId { get; set; }
+
+    [SugarColumn(ColumnName = "source_result_ordinal")]
+    public int? SourceResultOrdinal { get; set; }
+
     [SugarColumn(ColumnName = "created_at")]
     public DateTime CreatedAt { get; set; }
 

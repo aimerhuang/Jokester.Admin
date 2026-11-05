@@ -327,7 +327,8 @@ public sealed class AiImageCatalogService(
                 BaseUrl = route.BaseUrl,
                 ApiKey = config.ApiKey,
                 TextToImagePath = route.TextToImagePath,
-                ImageToImagePath = route.ImageToImagePath
+                ImageToImagePath = route.ImageToImagePath,
+                RequestFormat = AiImageModelConfigService.NormalizeRequestFormat(config.RequestFormat, release.ModelCode)
             });
         }
         return resolved;

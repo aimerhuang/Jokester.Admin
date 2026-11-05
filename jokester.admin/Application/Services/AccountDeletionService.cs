@@ -310,6 +310,23 @@ public sealed class AccountDeletionService(
                 .SetColumns(x => new MediaAssetEntity { IsDeleted = true, DeletedAt = now })
                 .Where(x => x.OwnerUserId == request.UserId && !x.IsDeleted)
                 .ExecuteCommandAsync(cancellationToken);
+            await db.Deleteable<AiCanvasProjectAssetEntity>()
+                .Where(x => x.OwnerUserId == request.UserId)
+                .ExecuteCommandAsync(cancellationToken);
+            await db.Updateable<AiCanvasProjectEntity>()
+                .SetColumns(x => new AiCanvasProjectEntity
+                {
+                    Title = "[deleted]",
+                    Document = "{}",
+                    DocumentBytes = 0,
+                    CoverAssetId = null,
+                    StorageBytes = 0,
+                    IsDeleted = true,
+                    DeletedAt = now,
+                    UpdatedAt = now
+                })
+                .Where(x => x.OwnerUserId == request.UserId)
+                .ExecuteCommandAsync(cancellationToken);
             await db.Deleteable<UserConsentEntity>()
                 .Where(x => x.UserId == request.UserId)
                 .ExecuteCommandAsync(cancellationToken);

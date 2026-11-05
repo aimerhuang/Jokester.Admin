@@ -92,6 +92,15 @@ public static class ServiceCollectionExtensions
                     && options.ResultAllowedHosts.All(host => !string.IsNullOrWhiteSpace(host)),
                 "AiImageSizeMode values are outside the supported safety bounds.")
             .ValidateOnStart();
+        services.AddOptions<AiCanvasOptions>()
+            .Bind(configuration.GetSection(AiCanvasOptions.SectionName))
+            .Validate(
+                options => options.MaxProjectsPerUser is >= 1 and <= 1000
+                    && options.MaxNodesPerProject is >= 1 and <= 5000
+                    && options.MaxConnectionsPerProject is >= 0 and <= 10000
+                    && options.MaxDocumentBytes is >= 16_384 and <= 8_388_608,
+                "AiCanvas values are outside the supported safety bounds.")
+            .ValidateOnStart();
         services.AddOptions<MobileConfigurationOptions>()
             .Bind(configuration.GetSection(MobileConfigurationOptions.SectionName))
             .Validate(

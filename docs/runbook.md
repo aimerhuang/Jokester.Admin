@@ -142,6 +142,18 @@ docs/migrations/20260820-add-user-membership-entitlements.sql
 
 充值接口和安全约束见 [point-recharge.md](./point-recharge.md)。
 
+## AI 无限画布上线检查
+
+已有数据库先停 API 写入，再执行：
+
+```text
+docs/migrations/20261103-add-ai-canvas.sql
+```
+
+该迁移给 `media_asset` 增加 `source_task_id`、`source_result_ordinal` 及唯一键，并创建 `ai_canvas_project`、`ai_canvas_project_asset`。新版 API 的实体会读取 `media_asset` 新列，**必须先执行迁移再部署 API**，否则上传、读取和引用 Asset 都会失败。`jokester.admin.sql` 已同步，新库不要重复执行该迁移。
+
+可选配置 `AiCanvas.MaxProjectsPerUser`（默认 50）、`AiCanvas.MaxNodesPerProject`（300）、`AiCanvas.MaxConnectionsPerProject`（600）、`AiCanvas.MaxDocumentBytes`（1048576）；超出安全范围时应用启动失败。接口说明见 [integration-guide.md](./integration-guide.md#ai-无限画布)。
+
 ## iOS API 升级与发布检查
 
 已有数据库在 `20260809-add-point-recharge.sql`、提示词/AI 路由等前置迁移完成后执行：

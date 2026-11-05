@@ -29,5 +29,6 @@ jokester.admin.Tests
 tools
 docs
 deploy
+docker
 *.sql
 *.md

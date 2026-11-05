@@ -7,6 +7,12 @@ public interface IMediaAssetService
 {
     Task<UploadAiImageResponse> UploadAsync(long ownerUserId, IFormFile file, CancellationToken cancellationToken);
 
+    Task<UploadAiImageResponse> RegisterAiResultAsync(
+        long ownerUserId,
+        long taskId,
+        int resultOrdinal,
+        CancellationToken cancellationToken);
+
     Task<IReadOnlyList<string>> ResolveOwnedReferenceUrlsAsync(
         long userId,
         bool isSuperAdmin,

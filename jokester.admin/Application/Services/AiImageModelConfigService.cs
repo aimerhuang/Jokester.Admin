@@ -17,6 +17,12 @@ public sealed class AiImageModelConfigService(ISqlSugarClient db) : IAiImageMode
     public const string OpenAiImageProtocol = "openai-image";
     public const string GeminiImageProtocol = "gemini-image";
 
+    // OpenAI Images 路由的请求格式：中转对尺寸参数的支持各不相同。
+    // openai-size：按 size=WxH 指定尺寸（默认，dawcode 中转）。
+    // prompt-aspect-ratio：中转忽略 size/aspect_ratio，只按提示词决定宽高比，需在发送给供应商的提示词末尾追加宽高比。
+    public const string OpenAiSizeRequestFormat = "openai-size";
+    public const string PromptAspectRatioRequestFormat = "prompt-aspect-ratio";
+
     // 单次请求可生成的最大图片数量，依据各供应商官方限制。
     // OpenAI Images API（gpt-image）：n 取值 1-10。
     // Nano Banana（Gemini Image）：单次请求最多 4 张。
@@ -283,8 +289,19 @@ public sealed class AiImageModelConfigService(ISqlSugarClient db) : IAiImageMode
             BaseUrl = config.BaseUrl.Trim(),
             ApiKey = config.ApiKey.Trim(),
             TextToImagePath = textToImagePath,
-            ImageToImagePath = imageToImagePath
+            ImageToImagePath = imageToImagePath,
+            RequestFormat = NormalizeRequestFormat(config.RequestFormat, config.ModelCode)
         };
+    }
+
+    public static string NormalizeRequestFormat(string? requestFormat, string? modelCode)
+    {
+        var normalized = string.IsNullOrWhiteSpace(requestFormat)
+            ? OpenAiSizeRequestFormat
+            : requestFormat.Trim().ToLowerInvariant();
+        return normalized is OpenAiSizeRequestFormat or PromptAspectRatioRequestFormat
+            ? normalized
+            : throw new AppException(ErrorCodes.BadRequest, $"AI image model {modelCode} request format is invalid");
     }
 
     private static bool IsSupportedRouteRole(string? routeRole)
