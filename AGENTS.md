@@ -212,8 +212,8 @@ POST /api/dev/bootstrap/super-admin
 ## Docker Deployment
 
 - 全部以 Docker 运行：`web`（前端仓库镜像，nginx 托管 dist、反代 API、终止 HTTPS）+ `api` + `mysql` + `redis`；已移除 Caddy，不要再引入。
-- 编排位于 `docker/`：`compose.yaml` 为基础编排，`compose.local.yaml` 为本地源码构建叠加，`compose.production.yaml` 为生产叠加；说明见 `docker/README.md`，生产发布见 `docs/teamcity-docker-deploy.md`。
-- 生产发布由 TeamCity 调用服务器上的 `docker/jokester.sh deploy-api` / `deploy-web`（自动回滚）；`API_IMAGE` / `WEB_IMAGE` 记录在服务器 `.env`。HTTPS 证书放在服务器 `certs/tls.crt`、`tls.key`（Cloudflare Origin Certificate），不进仓库。
+- 编排位于 `docker/`：`compose.yaml` 为基础编排，`compose.local.yaml` 为本地源码构建叠加，`compose.production.yaml` 为生产叠加；说明见 `docker/README.md`，生产发布见 `docs/docker-deploy.md`。
+- 生产发布在开发机构建并 `docker save` 镜像，`scp` 上传后在服务器执行 `docker/jokester.sh deploy-api` / `deploy-web`（自动回滚）；`API_IMAGE` / `WEB_IMAGE` 记录在服务器 `.env`。HTTPS 证书放在服务器 `certs/tls.crt`、`tls.key`（Cloudflare Origin Certificate），不进仓库。
 - 编排变量在 `docker/.env`，API 业务配置在 `docker/api.env`；连接串、`AllowedHosts`、CORS 主来源、`Security.KnownProxies`、媒体目录由 `compose.yaml` 生成，不要写进 `api.env`。
 - MySQL 空数据卷首次启动时由 `docker/mysql/initdb/10-jokester-init.sh` 执行 `jokester.admin.sql`（或导入 `docker/mysql/import/*.sql`），因此表结构变化仍必须同步 `jokester.admin.sql`。
 

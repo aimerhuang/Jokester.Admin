@@ -1,4 +1,4 @@
-# 生产叠加：使用 TeamCity 发布并 docker load 的镜像（API_IMAGE / WEB_IMAGE 由 jokester.sh 写入 .env），
+# 生产叠加：使用手动上传并 docker load 的镜像（API_IMAGE / WEB_IMAGE 由 jokester.sh 写入 .env），
 # nginx 终止 HTTPS 并开放 80/443，上传文件保存在部署目录的 ./data（与旧 Caddy 部署目录结构一致）。
 
 services:

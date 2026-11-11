@@ -1,30 +1,97 @@
-# TeamCity + Docker 单机生产部署
+# Docker 单机生产部署
 
 部署拓扑：
 
-- TeamCity Server/Agent：Windows（需要 Docker、OpenSSH 客户端、`tar`）
+- 开发机：Windows（需要 Docker、OpenSSH 客户端 `ssh`/`scp`、`tar`），负责构建镜像并上传
 - 目标服务器：Ubuntu，SSH 端口 22，需要 Docker Engine + Compose 插件、`bash`、`curl`、`flock`
 - 域名：`johhai.com`，经 Cloudflare 代理
 - 服务器上全部以 Docker 运行：`web`（nginx + 前端）、`api`、`mysql`、`redis`；不使用 Caddy
-- 镜像传输：TeamCity 通过 SSH/SCP 直接发送 `docker save` 镜像包，不依赖镜像仓库
+- 镜像传输：在开发机 `docker build` + `docker save`，通过 `scp` 发送到服务器，再由服务器上的
+  `jokester.sh` 执行 `docker load` 并滚动更新，不依赖镜像仓库
 
 编排文件与服务器管理脚本都在本仓库 `docker/`，说明见 [docker/README.md](../docker/README.md)。
 
 ## 发布链路
 
-| 构建 | 仓库 | 构建脚本 | 发布脚本 | 服务器命令 |
-| --- | --- | --- | --- | --- |
-| API | Jokester.Admin | `deploy/teamcity-build.ps1` → `jokester-admin:<build>-<commit>` | `deploy/teamcity-deploy.ps1` | `jokester.sh deploy-api` |
-| Web | Jokester-Ai-Image | `deploy/teamcity-build.ps1` → `jokester-web:<build>-<commit>` | `deploy/teamcity-deploy.ps1` | `jokester.sh deploy-web` |
+| 组件 | 仓库 | 镜像 | 服务器命令 |
+| --- | --- | --- | --- |
+| API | Jokester.Admin | `jokester-admin:<tag>` | `./jokester.sh deploy-api <tar> <image>` |
+| Web | Jokester-Ai-Image | `jokester-web:<tag>` | `./jokester.sh deploy-web <tar> <image>` |
 
-- API 发布同时上传部署包（`docker/` 生产文件 + `jokester.admin.sql`），解压到 `DEPLOY_ROOT` 覆盖
-  `compose.yaml`、`compose.production.yaml`、`jokester.sh` 等；`.env`、`api.env`、`certs/`、`data/` 永远不在包里。
 - `deploy-api`：`docker load` → 写入 `.env` 的 `API_IMAGE` → `docker compose up --wait mysql redis api`；
   5 分钟内未 healthy 则恢复上一个 `API_IMAGE`。
 - `deploy-web`：检查证书 → 用新镜像离线执行 `nginx -t` → 写入 `WEB_IMAGE` → 启动 web → 通过 443
   冒烟测试首页和 `/api/sites/site_code`；失败则恢复上一个 `WEB_IMAGE`。
-- 两个发布共用 `DEPLOY_ROOT/.deploy.lock`，不会并发执行。首次部署必须先发 API（它负责安装 `jokester.sh`）。
+- 两个命令共用 `DEPLOY_ROOT/.deploy.lock`，不会并发执行；成功后会删除上传的镜像包。
+- 首次部署必须先发 API 并上传部署包（`docker/` 生产文件 + `jokester.admin.sql`），它负责安装 `jokester.sh`。
 - MySQL、Redis、`data/` 不参与镜像回滚。
+- `.env`、`api.env`、`certs/`、`data/` 只存在于服务器，永远不要放进部署包。
+
+## 更新命令
+
+以下命令在开发机 PowerShell 执行。`<server-ip>` 换成服务器 IP 或专用 SSH 域名（不能用经 CDN 代理的
+`johhai.com`），部署目录默认 `/opt/jokester-admin`。服务器为 `aarch64` 时把 `--platform` 改为 `linux/arm64`。
+
+### 只更新前端
+
+```powershell
+cd E:\Project\Jokester-Ai-Image
+$tag = "web-$(git rev-parse --short=12 HEAD)"
+docker build --pull --platform linux/amd64 --provenance=false --build-arg VITE_API_BASE_URL=/api --build-arg VITE_CLIENT_BUILD=$tag -t jokester-web:$tag .
+docker save -o jokester-web-$tag.tar jokester-web:$tag
+scp jokester-web-$tag.tar root@<server-ip>:/opt/jokester-admin/
+ssh root@<server-ip> "cd /opt/jokester-admin && ./jokester.sh deploy-web ./jokester-web-$tag.tar jokester-web:$tag"
+```
+
+### 只更新后端（无编排文件和数据库变更）
+
+```powershell
+cd E:\Project\Jokester.Admin
+$tag = "api-$(git rev-parse --short=12 HEAD)"
+docker build --pull --platform linux/amd64 --provenance=false -t jokester-admin:$tag .
+docker save -o jokester-admin-$tag.tar jokester-admin:$tag
+scp jokester-admin-$tag.tar root@<server-ip>:/opt/jokester-admin/
+ssh root@<server-ip> "cd /opt/jokester-admin && ./jokester.sh deploy-api ./jokester-admin-$tag.tar jokester-admin:$tag"
+```
+
+### 后端有编排文件（`docker/`）或 `jokester.admin.sql` 变更
+
+先打包并上传，服务器解压覆盖后再发布；数据库增量迁移要在 `deploy-api` 之前执行（见下）：
+
+```powershell
+cd E:\Project\Jokester.Admin
+tar -cf jokester-docker-bundle.tar -C docker compose.yaml compose.production.yaml jokester.sh .env.production.example api.env.production.example legal.env.example README.md mysql/initdb/10-jokester-init.sh mysql/import/README.md -C .. jokester.admin.sql
+scp jokester-docker-bundle.tar root@<server-ip>:/opt/jokester-admin/
+ssh root@<server-ip> "cd /opt/jokester-admin && tar -xf jokester-docker-bundle.tar --no-same-owner && chmod 755 jokester.sh && rm jokester-docker-bundle.tar"
+```
+
+随后执行上面的“只更新后端”命令。
+
+### 数据库增量迁移
+
+API 会读取新表和新列，必须先迁移、再发布。已有库不会重新执行 `jokester.admin.sql`：
+
+```bash
+cd /opt/jokester-admin
+./jokester.sh backup
+./jokester.sh sql /path/to/migration.sql
+```
+
+迁移文件在 `docs/migrations/`，先用 `scp` 传到服务器。不要重复执行已经跑过的迁移。
+
+### 验收与回滚
+
+```bash
+cd /opt/jokester-admin
+./jokester.sh ps
+./jokester.sh logs api
+curl --fail https://johhai.com/api/sites/site_code
+```
+
+- 健康检查或冒烟测试失败时，脚本会自动恢复上一个镜像。
+- 需要手动回滚：把 `.env` 中的 `API_IMAGE` / `WEB_IMAGE` 改回旧 tag（旧镜像仍在服务器上），再执行
+  `docker compose up -d --no-deps api`（或 `web`）。
+- 清理不再使用的旧镜像：`docker image prune -a`（先确认当前 `.env` 记录的镜像仍在运行）。
 
 ## 网络、DNS 与 HTTPS
 
@@ -47,43 +114,6 @@
 5. `REAL_IP_MODE=cloudflare` 时 nginx 只信任 Cloudflare 官方网段传来的 `CF-Connecting-IP`，再以
    `X-Forwarded-For` 交给 API；网段列表在前端仓库 `docker/nginx/snippets/realip-cloudflare.conf`。
 
-服务器架构为 `aarch64` 时，在两个 TeamCity 构建的 Parameters 中增加 `env.DOCKER_PLATFORM=linux/arm64`。
-
-## TeamCity 配置
-
-两个构建配置都使用 PowerShell 步骤，Working directory 为 `%teamcity.build.checkoutDir%`：
-
-```powershell
-.\deploy\teamcity-build.ps1
-.\deploy\teamcity-deploy.ps1
-```
-
-Parameters（两个构建相同）：
-
-| 参数 | 示例 | 类型 |
-| --- | --- | --- |
-| `env.DEPLOY_HOST` | `<server-ip>` | Text |
-| `env.DEPLOY_PORT` | `22` | Text |
-| `env.DEPLOY_USER` | `root` | Text |
-| `env.DEPLOY_ROOT` | `/opt/jokester-admin` | Text |
-| `env.DEPLOY_HOST_KEY` | `ssh-keyscan` 输出的完整一行 | Text |
-| `env.NODE_IMAGE` / `env.NGINX_IMAGE` / `env.NPM_REGISTRY` | 镜像加速地址（仅 Web，可选） | Text |
-
-`DEPLOY_HOST` 使用服务器 IP 或专用 SSH 域名，不能用经 CDN 代理的 `johhai.com`。
-
-SSH 身份：为 TeamCity 单独生成 Ed25519 密钥，私钥只保存在 TeamCity 主机，在项目 `SSH Keys` 上传，
-并在构建的 `Build Features` 中添加 `SSH Agent`：
-
-```powershell
-ssh-keygen -t ed25519 -f D:\TeamCityKeys\jokester-deploy -C teamcity-jokester
-Get-Content D:\TeamCityKeys\jokester-deploy.pub |
-  ssh root@<server-ip> "umask 077; mkdir -p ~/.ssh; cat >> ~/.ssh/authorized_keys"
-ssh-keyscan -p 22 -t ed25519 <server-ip>
-```
-
-通过云控制台登录服务器，用 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` 核对指纹后再填入
-`DEPLOY_HOST_KEY`。
-
 ## 从旧 Caddy 部署原地迁移
 
 旧部署（`docker-compose.production.yml` + Caddyfile + `.env.production`）已在本地用 docker-in-docker
@@ -99,8 +129,8 @@ ssh-keyscan -p 22 -t ed25519 <server-ip>
    ```
 
 2. 按上文把 Cloudflare Origin Certificate 放到 `/opt/jokester-admin/certs/`。
-3. 运行 **Jokester.Admin** 的 TeamCity 构建。`deploy-api` 发现只有 `.env.production` 时会自动执行
-   `migrate-from-caddy`：
+3. 按“后端有编排文件变更”上传部署包，再按“只更新后端”发布 API。`deploy-api` 发现只有
+   `.env.production` 时会自动执行 `migrate-from-caddy`：
    - 生成 `.env`：沿用 `APP_DOMAIN`、MySQL/Redis 账号密码、当前 API 镜像，项目名 `jokester-admin`、
      子网 `172.29.0.0/24`、web 地址 `172.29.0.10` 与旧部署一致，因此原 `jokester-admin_mysql-data`、
      `jokester-admin_redis-data` 卷被直接复用；
@@ -108,8 +138,8 @@ ssh-keyscan -p 22 -t ed25519 <server-ip>
    - 旧 `.env.production` 保留不动。
 
    随后 MySQL / Redis / API 以新编排重建，`jokester-caddy` 继续运行并转发到新 API。
-4. 运行 **Jokester-Ai-Image** 的 TeamCity 构建。`deploy-web` 停止 `jokester-caddy`，由 nginx 接管
-   80/443；冒烟测试通过后删除 Caddy 容器，失败则重新启动 Caddy。
+4. 按“只更新前端”发布 Web。`deploy-web` 停止 `jokester-caddy`，由 nginx 接管 80/443；冒烟测试通过后
+   删除 Caddy 容器，失败则重新启动 Caddy。
 5. 验收：
 
    ```bash
@@ -129,7 +159,7 @@ ssh-keyscan -p 22 -t ed25519 <server-ip>
 mkdir -p /opt/jokester-admin
 ```
 
-1. 先运行一次 Jokester.Admin 构建：部署包会被解压，随后因缺少 `.env` 失败并提示。
+1. 在开发机按“后端有编排文件变更”上传并解压部署包（`jokester.sh` 由它安装）。
 2. 在服务器上生成配置并填写：
 
    ```bash
@@ -141,7 +171,7 @@ mkdir -p /opt/jokester-admin
 
 3. 放置 HTTPS 证书（见上文）。需要迁入已有数据时，把 `mysqldump` 导出的 `*.sql` 放进
    `mysql/import/`，首次启动会导入它而不是执行 `jokester.admin.sql`。
-4. 依次运行 Jokester.Admin、Jokester-Ai-Image 构建，然后创建管理员：
+4. 依次按“只更新后端”“只更新前端”发布 API 和 Web，然后创建管理员：
 
    ```bash
    ./jokester.sh seed-admin
@@ -171,4 +201,4 @@ mkdir -p /opt/jokester-admin
 - `/opt/jokester-admin/data/`（`private-media`、`prompt-images`、`blog`、`avatar`、`data-protection`）
 - `/opt/jokester-admin/.env`、`api.env`、`certs/`
 
-一键发布不替代数据库、私有媒体和 DataProtection Keys 的异机备份；正式开放前应配置定时备份并做恢复演练。
+更新命令不替代数据库、私有媒体和 DataProtection Keys 的异机备份；正式开放前应配置定时备份并做恢复演练。

@@ -18,7 +18,7 @@ MySQL / Redis / Node / .NET：
 | `redis` | `redis:7.4-alpine` | 带密码、AOF 持久化 |
 | `mailpit` | `axllent/mailpit` | 仅本地，接收注册验证码邮件 |
 
-生产服务器的发布与迁移流程见 [docs/teamcity-docker-deploy.md](../docs/teamcity-docker-deploy.md)，
+生产服务器的发布与迁移流程见 [docs/docker-deploy.md](../docs/docker-deploy.md)，
 下文“生产服务器”一节是摘要。
 
 ## 前提
@@ -75,7 +75,7 @@ MySQL / Redis / Node / .NET：
   ```
 
 - 导出备份：`.\jokester.ps1 backup`（默认写入 `docker/backups/`）。
-- 迁移本机现有数据：先用 `mysqldump` 导出（参考 `docs/teamcity-docker-deploy.md`），把文件放入
+- 迁移本机现有数据：先用 `mysqldump` 导出（参考 `docs/docker-deploy.md`），把文件放入
   `mysql/import/`，再 `.\jokester.ps1 reset` 后 `up`。
 
 ## 持久化
@@ -105,14 +105,14 @@ MySQL / Redis / Node / .NET：
 
 ## 生产服务器
 
-部署目录 `/opt/jokester-admin` 的内容由 TeamCity 上传的部署包维护，`.env`、`api.env`、`certs/`、`data/`
+部署目录 `/opt/jokester-admin` 的 `compose*.yaml`、`jokester.sh` 等文件由手动上传的部署包维护，`.env`、`api.env`、`certs/`、`data/`
 只存在于服务器：
 
 ```bash
 ./jokester.sh init production   # 全新服务器：生成 .env / api.env（600 权限，随机密钥）
 ./jokester.sh migrate-from-caddy # 旧 Caddy 部署：由 .env.production 生成 .env / api.env（deploy-api 会自动执行）
-./jokester.sh deploy-api <tar> <image>   # TeamCity 调用：发布 API，失败自动回滚
-./jokester.sh deploy-web <tar> <image>   # TeamCity 调用：发布前端/nginx，替换旧 Caddy，失败自动回滚
+./jokester.sh deploy-api <tar> <image>   # 发布 API（docker load 上传的镜像包），失败自动回滚
+./jokester.sh deploy-web <tar> <image>   # 发布前端/nginx，替换旧 Caddy，失败自动回滚
 ./jokester.sh seed-admin | backup | sql <file> | logs api | ps
 ```
 
