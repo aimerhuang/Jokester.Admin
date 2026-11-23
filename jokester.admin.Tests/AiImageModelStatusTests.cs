@@ -6,8 +6,12 @@ using jokester.admin.Common;
 using jokester.admin.Common.Exceptions;
 using jokester.admin.Domain.Entities;
 using jokester.admin.Infrastructure;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Moq;
 using SqlSugar;
+using StackExchange.Redis;
 
 namespace jokester.admin.Tests;
 
@@ -135,6 +139,42 @@ public sealed class AiImageModelStatusTests
         var nano = response.Items[1];
         Assert.Equal(1, nano.SampleCount);
         Assert.Equal(AiImageModelStatusStates.Unknown, nano.State);
+    }
+
+    [Theory]
+    [InlineData(5, false)]
+    [InlineData(29.9, true)]
+    public async Task RefreshAsync_AdoptsSharedSnapshotOnlyWhileYoungerThanHalfTheInterval(double ageSeconds, bool expectRecompute)
+    {
+        var shared = new AiImageModelStatusResponse
+        {
+            GeneratedAt = DateTime.UtcNow.AddSeconds(-ageSeconds),
+            WindowHours = 24,
+            SampleLimit = 60,
+            Items = []
+        };
+        var database = new Mock<IDatabase>();
+        database
+            .Setup(x => x.StringGetAsync(It.IsAny<RedisKey>(), It.IsAny<CommandFlags>()))
+            .ReturnsAsync(new RedisValue(System.Text.Json.JsonSerializer.Serialize(shared, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web))));
+        var redis = new Mock<IConnectionMultiplexer>();
+        redis.Setup(x => x.GetDatabase(It.IsAny<int>(), It.IsAny<object?>())).Returns(database.Object);
+        var configService = new Mock<IAiImageModelConfigService>();
+        configService.Setup(x => x.GetEnabledModelsAsync(It.IsAny<CancellationToken>())).ReturnsAsync([]);
+        var services = new ServiceCollection()
+            .AddScoped(_ => Mock.Of<ISqlSugarClient>())
+            .AddScoped(_ => configService.Object)
+            .BuildServiceProvider();
+        var service = new AiImageModelStatusService(
+            services.GetRequiredService<IServiceScopeFactory>(),
+            redis.Object,
+            Options.Create(new RedisOptions()),
+            Options.Create(new AiImageModelStatusOptions { RefreshSeconds = 30 }),
+            NullLogger<AiImageModelStatusService>.Instance);
+
+        await service.RefreshAsync(default);
+
+        configService.Verify(x => x.GetEnabledModelsAsync(It.IsAny<CancellationToken>()), expectRecompute ? Times.Once() : Times.Never());
     }
 
     [Fact]

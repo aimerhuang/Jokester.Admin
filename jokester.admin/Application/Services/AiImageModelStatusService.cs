@@ -48,7 +48,10 @@ public sealed class AiImageModelStatusService(
         {
             var now = DateTime.UtcNow;
             var shared = await TryReadSharedAsync();
-            if (shared is not null && now - shared.GeneratedAt < TimeSpan.FromSeconds(options.Value.RefreshSeconds))
+            // Adopt another instance's snapshot only while it is younger than half the refresh interval.
+            // Comparing against the full interval makes the timer tick land a few milliseconds early and
+            // skip every other refresh, so the effective period silently doubles.
+            if (shared is not null && now - shared.GeneratedAt < SharedSnapshotFreshness(options.Value))
             {
                 Volatile.Write(ref _snapshot, shared);
                 return;
@@ -193,6 +196,9 @@ public sealed class AiImageModelStatusService(
             logger.LogWarning("AI model status snapshot could not be written to Redis. FailureType={FailureType}", ex.GetType().Name);
         }
     }
+
+    public static TimeSpan SharedSnapshotFreshness(AiImageModelStatusOptions options) =>
+        TimeSpan.FromSeconds(options.RefreshSeconds / 2d);
 
     private AiImageModelStatusResponse Empty(DateTime utcNow) => new()
     {
