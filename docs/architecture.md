@@ -234,9 +234,10 @@ Provider 租约前按最新快照复检。MySQL 保存权威规则，进程内�
 
 ### 后台接口
 
-- `GET/POST/PUT/DELETE /api/users`
-- `GET /api/users/{id}/menus/tree`
-- `PUT /api/users/{id}/menus`
+- `GET/POST/PUT/DELETE /api/users`（仅超级管理员）
+- `GET /api/users/{id}/menus/tree`（仅超级管理员）
+- `PUT /api/users/{id}/menus`（仅超级管理员）
+- `GET /api/users/{id}/point-details`、`PUT /api/users/{id}/nickname`、`PUT /api/users/{id}/password`、`POST /api/users/{id}/avatar`、`PUT /api/users/{id}/signature`（本人或超级管理员，其他用户 404）
 - `GET/POST/PUT/DELETE /api/roles`
 - `GET/POST/PUT/DELETE /api/sites`
 - `GET/POST/PUT/DELETE /api/menus`

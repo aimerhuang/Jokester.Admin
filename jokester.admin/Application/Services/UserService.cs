@@ -18,11 +18,14 @@ public sealed class UserService(
     IMapper mapper,
     IPermissionCacheInvalidator permissionCacheInvalidator,
     IRefreshTokenStore refreshTokenStore,
-    IWebHostEnvironment environment) : IUserService
+    IWebHostEnvironment environment,
+    ICurrentUser currentUser) : IUserService
 {
     private const long MaxAvatarFileSizeBytes = 10 * 1024 * 1024;
     public async Task<PagedResult<UserListItemDto>> GetPageAsync(PageQuery query, CancellationToken cancellationToken)
     {
+        await EnsureSuperAdminAsync(cancellationToken);
+
         var total = await db.Queryable<SysUserEntity>().Where(x => !x.IsDeleted).CountAsync();
         var users = await db.Queryable<SysUserEntity>()
             .Where(x => !x.IsDeleted)
@@ -77,6 +80,8 @@ public sealed class UserService(
 
     public async Task<PagedResult<UserPointDetailDto>> GetPointDetailsAsync(long id, PageQuery query, CancellationToken cancellationToken)
     {
+        await EnsureSelfOrSuperAdminAsync(id, cancellationToken);
+
         var exists = await db.Queryable<SysUserEntity>().AnyAsync(x => x.Id == id && !x.IsDeleted, cancellationToken);
         if (!exists)
         {
@@ -112,6 +117,8 @@ public sealed class UserService(
 
     public async Task<UserPermissionTreeDto> GetPermissionTreeAsync(long id, long? siteId, CancellationToken cancellationToken)
     {
+        await EnsureSuperAdminAsync(cancellationToken);
+
         await EnsureUserExistsAsync(id, cancellationToken);
 
         var roleIds = await db.Queryable<SysUserRoleEntity>()
@@ -148,6 +155,8 @@ public sealed class UserService(
 
     public async Task<long> CreateAsync(SaveUserRequest request, CancellationToken cancellationToken)
     {
+        await EnsureSuperAdminAsync(cancellationToken);
+
         await EnsureUserNameAvailableAsync(request.UserName, null);
 
         var hashed = passwordHasher.HashPassword(request.Password);
@@ -188,6 +197,8 @@ public sealed class UserService(
 
     public async Task UpdateAsync(long id, UpdateUserInfoRequest request, CancellationToken cancellationToken)
     {
+        await EnsureSuperAdminAsync(cancellationToken);
+
         var entity = await db.Queryable<SysUserEntity>().FirstAsync(x => x.Id == id && !x.IsDeleted);
         if (entity is null)
         {
@@ -237,6 +248,8 @@ public sealed class UserService(
 
     public async Task AssignMenusAsync(long id, AssignUserMenusRequest request, CancellationToken cancellationToken)
     {
+        await EnsureSuperAdminAsync(cancellationToken);
+
         var user = await EnsureUserExistsAsync(id, cancellationToken);
         var menuIds = request.MenuIds.Distinct().ToArray();
 
@@ -292,6 +305,8 @@ public sealed class UserService(
 
     public async Task UpdateNickNameAsync(long id, UpdateUserNickNameRequest request, CancellationToken cancellationToken)
     {
+        await EnsureSelfOrSuperAdminAsync(id, cancellationToken);
+
         var userName = request.UserName.Trim();
         var nickName = request.NickName.Trim();
         if (string.IsNullOrWhiteSpace(userName))
@@ -322,6 +337,8 @@ public sealed class UserService(
 
     public async Task UpdatePasswordAsync(long id, UpdateUserPasswordRequest request, CancellationToken cancellationToken)
     {
+        await EnsureSelfOrSuperAdminAsync(id, cancellationToken);
+
         var hashed = passwordHasher.HashPassword(request.Password);
         var affected = await db.Updateable<SysUserEntity>()
             .SetColumns(x => new SysUserEntity
@@ -344,6 +361,8 @@ public sealed class UserService(
 
     public async Task<string> UploadAvatarAsync(long id, IFormFile file, CancellationToken cancellationToken)
     {
+        await EnsureSelfOrSuperAdminAsync(id, cancellationToken);
+
         if (file.Length == 0)
         {
             throw new AppException(ErrorCodes.BadRequest, "文件不能为空");
@@ -382,6 +401,8 @@ public sealed class UserService(
 
     public async Task UpdateSignatureAsync(long id, UpdateUserSignatureRequest request, CancellationToken cancellationToken)
     {
+        await EnsureSelfOrSuperAdminAsync(id, cancellationToken);
+
         var affected = await db.Updateable<SysUserEntity>()
             .SetColumns(x => new SysUserEntity { Signature = request.Signature, UpdatedAt = DateTime.Now })
             .Where(x => x.Id == id && !x.IsDeleted)
@@ -397,6 +418,8 @@ public sealed class UserService(
 
     public async Task UpdateStatusAsync(long id, UpdateUserStatusRequest request, CancellationToken cancellationToken)
     {
+        await EnsureSuperAdminAsync(cancellationToken);
+
         var affected = await db.Updateable<SysUserEntity>()
             .SetColumns(x => new SysUserEntity { Status = request.Status, UpdatedAt = DateTime.Now })
             .Where(x => x.Id == id && !x.IsDeleted)
@@ -413,6 +436,8 @@ public sealed class UserService(
 
     public async Task DeleteAsync(long id, CancellationToken cancellationToken)
     {
+        await EnsureSuperAdminAsync(cancellationToken);
+
         var exists = await db.Queryable<SysUserEntity>().AnyAsync(x => x.Id == id && !x.IsDeleted);
         if (!exists)
         {
@@ -457,6 +482,57 @@ public sealed class UserService(
             await db.Ado.RollbackTranAsync();
             throw;
         }
+    }
+
+    /// <summary>
+    /// 用户本人可以操作自己的资料；操作其他用户必须是超级管理员。
+    /// 跨用户访问与用户不存在返回相同的 404，不暴露用户 ID 是否存在。
+    /// </summary>
+    private async Task EnsureSelfOrSuperAdminAsync(long id, CancellationToken cancellationToken)
+    {
+        var currentUserId = RequireCurrentUserId();
+        if (currentUserId == id)
+        {
+            return;
+        }
+
+        if (currentUser.IsSuperAdmin && await IsActiveSuperAdminAsync(currentUserId, cancellationToken))
+        {
+            return;
+        }
+
+        throw new NotFoundException($"用户不存在: {id}");
+    }
+
+    /// <summary>
+    /// 用户管理类操作只允许超级管理员。除 Access Token 声明外还要复核数据库，
+    /// 避免已降权或已禁用的管理员在令牌过期前继续操作。
+    /// </summary>
+    private async Task EnsureSuperAdminAsync(CancellationToken cancellationToken)
+    {
+        var currentUserId = RequireCurrentUserId();
+        if (!currentUser.IsSuperAdmin || !await IsActiveSuperAdminAsync(currentUserId, cancellationToken))
+        {
+            throw new AppException(
+                ErrorCodes.Forbidden,
+                MachineErrorCodes.ResourceForbidden,
+                "Only super administrators can manage users.");
+        }
+    }
+
+    private long RequireCurrentUserId()
+    {
+        return currentUser.UserId
+            ?? throw new AppException(
+                ErrorCodes.Unauthorized,
+                MachineErrorCodes.Unauthorized,
+                "Authentication is required.");
+    }
+
+    private async Task<bool> IsActiveSuperAdminAsync(long userId, CancellationToken cancellationToken)
+    {
+        return await db.Queryable<SysUserEntity>()
+            .AnyAsync(x => x.Id == userId && !x.IsDeleted && x.Status == 1 && x.IsSuperAdmin, cancellationToken);
     }
 
     private async Task EnsureUserNameAvailableAsync(string userName, long? excludeId)

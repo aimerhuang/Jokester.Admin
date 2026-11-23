@@ -1242,7 +1242,7 @@ WHERE r.`role_code` = 'blog_admin';
 INSERT INTO `sys_role_menu` (`role_id`, `menu_id`)
 SELECT r.`id`, m.`id`
 FROM `sys_role` r
-JOIN `sys_menu` m
+JOIN `sys_menu` m ON m.`site_id` = @ai_site_id
 WHERE r.`role_code` = 'ai_operator'
   AND m.`menu_code` <> 'ai_prompt_sensitive_word_manage';
 

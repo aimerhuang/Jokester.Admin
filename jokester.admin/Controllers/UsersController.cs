@@ -9,6 +9,10 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace jokester.admin.Controllers;
 
+/// <summary>
+/// 用户接口。资料类接口（积分明细、昵称、密码、头像、签名）只做登录校验，由 <see cref="IUserService"/>
+/// 限定为本人或超级管理员；其余管理类接口在权限码之外，服务层还要求超级管理员。
+/// </summary>
 [Authorize]
 public sealed class UsersController(IUserService userService) : BaseApiController
 {
@@ -26,7 +30,9 @@ public sealed class UsersController(IUserService userService) : BaseApiControlle
     /// <summary>
     /// 分页查询用户积分明细。
     /// </summary>
-
+    /// <remarks>
+    /// 仅本人或超级管理员；其他用户返回 404。
+    /// </remarks>
     [HttpGet("{id:long}/point-details")]
     [ProducesResponseType(typeof(ApiResponse<PagedResult<UserPointDetailDto>>), StatusCodes.Status200OK)]
     public async Task<IActionResult> GetPointDetails(long id, [FromQuery] PageQuery query, CancellationToken cancellationToken)
@@ -88,7 +94,9 @@ public sealed class UsersController(IUserService userService) : BaseApiControlle
     /// <summary>
     /// 修改用户昵称。
     /// </summary>
-    
+    /// <remarks>
+    /// 仅本人或超级管理员；其他用户返回 404。
+    /// </remarks>
     [HttpPut("{id:long}/nickname")]
     [ProducesResponseType(typeof(ApiResponse), StatusCodes.Status200OK)]
     public async Task<IActionResult> UpdateNickName(long id, [FromBody] UpdateUserNickNameRequest request, CancellationToken cancellationToken)
@@ -100,7 +108,9 @@ public sealed class UsersController(IUserService userService) : BaseApiControlle
     /// <summary>
     /// 修改用户密码。
     /// </summary>
-    [Permission("System.User.Update")]
+    /// <remarks>
+    /// 仅本人或超级管理员；其他用户返回 404。
+    /// </remarks>
     [HttpPut("{id:long}/password")]
     [ProducesResponseType(typeof(ApiResponse), StatusCodes.Status200OK)]
     public async Task<IActionResult> UpdatePassword(long id, [FromBody] UpdateUserPasswordRequest request, CancellationToken cancellationToken)
@@ -113,9 +123,8 @@ public sealed class UsersController(IUserService userService) : BaseApiControlle
     /// 上传用户头像。
     /// </summary>
     /// <remarks>
-    /// 使用 multipart/form-data 上传头像文件，返回头像访问地址。
+    /// 使用 multipart/form-data 上传头像文件，返回头像访问地址。仅本人或超级管理员；其他用户返回 404。
     /// </remarks>
-    [Permission("System.User.Update")]
     [HttpPost("{id:long}/avatar")]
     [Consumes("multipart/form-data")]
     [ProducesResponseType(typeof(ApiResponse<UploadUserAvatarResponse>), StatusCodes.Status200OK)]
@@ -133,7 +142,9 @@ public sealed class UsersController(IUserService userService) : BaseApiControlle
     /// <summary>
     /// 修改用户个性签名。
     /// </summary>
-    [Permission("System.User.Update")]
+    /// <remarks>
+    /// 仅本人或超级管理员；其他用户返回 404。
+    /// </remarks>
     [HttpPut("{id:long}/signature")]
     public async Task<IActionResult> UpdateSignature(long id, [FromBody] UpdateUserSignatureRequest request, CancellationToken cancellationToken)
     {

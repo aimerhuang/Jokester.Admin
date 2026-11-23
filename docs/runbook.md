@@ -169,6 +169,31 @@ Key 轮换与切换中转站优先在后台“模型配置”操作，不再手�
 - 快照由 `AiImageModelStatusWorker` 约 30 秒刷新一次并写入 Redis 键 `<InstanceName>ai-model-status:snapshot`（TTL 120 秒），多实例共享；Redis 不可用时各实例用进程内快照。
 - 迁移回填的历史失败无法区分模型侧与用户侧，首日状态可能偏低，24 小时后自然滑出时间窗。
 
+## 用户接口鉴权收紧上线检查
+
+`/api/users` 的鉴权已收紧（见 `docs/user-admin-prd.md` 第 9 节）：积分明细、昵称、密码、头像、签名只允许本人或超级管理员，其余用户管理接口只允许超级管理员。配套迁移回收注册用户默认角色 `ai_operator` 误持有的非 AI 站点权限：
+
+```text
+docs/migrations/20261123-restrict-ai-operator-menus.sql
+```
+
+顺序：**先部署 API，再执行迁移**（与其他迁移相反）。旧版 API 的改密、头像、签名接口要求 `System.User.Update`，先回收权限会让用户改不了自己的密码。
+
+执行迁移前：
+
+- 运行脚本里的第 1 条查询，确认将被回收的权限码；无返回行说明该库不受影响。
+- 运行第 2 条查询，找出绑定了非 `ai_image` 站点的 `ai_operator` 非超管账号。这些账号可能有意依赖博客或系统权限，先给它们分配专用角色（如 `blog_admin`）再回收。
+
+执行迁移后清理权限缓存，否则旧权限最长保留 2 小时：
+
+```bash
+redis-cli --scan --pattern '<Redis.InstanceName>perm:*' | xargs -r redis-cli del
+```
+
+验收：用普通账号登录，修改自己的昵称、密码、头像成功；对其他用户 ID 调用 `GET /api/users/{id}/point-details` 返回 404；调用 `GET /api/users` 返回 403。
+
+`jokester.admin.sql` 已同步修正，新库不需要执行该迁移。
+
 ## AI 无限画布上线检查
 
 已有数据库先停 API 写入，再执行：

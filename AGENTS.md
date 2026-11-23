@@ -5,7 +5,7 @@
 - 项目根目录：`D:\Project\jokester.admin`
 - 实际 Web API 项目目录：`D:\Project\jokester.admin\jokester.admin`
 - 根目录设计文档：`后台管理系统设计书.md`
-- 项目 docs：`docs/integration-guide.md`、`docs/architecture.md`、`docs/runbook.md`、`docs/point-recharge.md`、`docs/ai-prompt-filter.md`、`docs/ai-image-size-mode-prd.md`、`docs/ai-infinite-canvas-prd.md`、`docs/ai-model-config-status-prd.md`
+- 项目 docs：`docs/integration-guide.md`、`docs/architecture.md`、`docs/runbook.md`、`docs/point-recharge.md`、`docs/ai-prompt-filter.md`、`docs/ai-image-size-mode-prd.md`、`docs/ai-infinite-canvas-prd.md`、`docs/ai-model-config-status-prd.md`、`docs/user-admin-prd.md`
 - 根目录数据库脚本：`jokester.admin.sql`
 
 ## Current Stack
@@ -65,6 +65,14 @@ POST /api/dev/bootstrap/super-admin
 - 编辑留空表示不修改密码
 
 不要再要求前端传 `passwordHash` / `salt`。
+
+## User API Authorization
+
+- `/api/users` 的鉴权在 `UserService` 内按当前主体校验，不能只靠 Controller 上的权限码：注册用户默认角色是 `ai_operator`，权限码误配就会变成全员可用。
+- 资料类接口（`point-details`、`nickname`、`password`、`avatar`、`signature`）只允许本人或超级管理员，跨用户与用户不存在统一返回 404；这些 Action 不挂 `[Permission]`，因为普通用户不持有 `System.User.*`。
+- 列表、新增、编辑、状态、删除、菜单授权只允许超级管理员，除 Token 声明外还要复核数据库中仍是启用、未删除的超级管理员，否则返回 403 `RESOURCE_FORBIDDEN`。
+- `ai_operator` 只能关联 `ai_image` 站点的菜单；不要再把 `System.*`、`Blog.*` 权限码授给它。迁移为 `docs/migrations/20261123-restrict-ai-operator-menus.sql`（先部署 API 再执行），已同步 `jokester.admin.sql`。
+- 新增 `/api/users/{id}/...` 接口时必须在服务层调用本人或超管校验；用户管理后台的完整设计见 `docs/user-admin-prd.md`。
 
 ## Registration Email Contract
 
