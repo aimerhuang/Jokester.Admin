@@ -74,6 +74,12 @@ POST /api/dev/bootstrap/super-admin
 - `ai_operator` 只能关联 `ai_image` 站点的菜单；不要再把 `System.*`、`Blog.*` 权限码授给它。迁移为 `docs/migrations/20261123-restrict-ai-operator-menus.sql`（先部署 API 再执行），已同步 `jokester.admin.sql`。
 - 新增 `/api/users/{id}/...` 接口时必须在服务层调用本人或超管校验；用户管理后台的完整设计见 `docs/user-admin-prd.md`。
 
+## User Administration
+
+- `/api/admin/users` 列表、详情、积分汇总、积分流水和状态记录要求超级管理员声明。写操作还需在事务内锁定并复核操作者。
+- 新旧管理接口的状态变更共用 `UserStatusTransition`，与审计写入同事务；旧版 `PUT /api/users/{id}` 不得取消其他超管的超管标记（409 `USER_STATUS_PROTECTED`），否则可先降级再禁用。详情的积分快照由 `IPointService` 结算，包括禁用账号。
+- 用户管理版本先执行 `docs/migrations/20261123-add-user-admin.sql`，再部署 API 和 Web。权限回收使用上节的独立迁移和发布顺序。
+
 ## Registration Email Contract
 
 - 注册邮箱验证码分两步：

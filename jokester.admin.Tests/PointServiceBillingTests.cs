@@ -3,6 +3,11 @@ using jokester.admin.Application.DTOs.Points;
 using jokester.admin.Application.Services;
 using jokester.admin.Common;
 using jokester.admin.Domain.Entities;
+using jokester.admin.Application.DTOs.AiImages;
+using jokester.admin.Infrastructure;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Moq;
 using SqlSugar;
 
@@ -827,6 +832,48 @@ public sealed class PointServiceBillingTests
         var settled = context.Db.Queryable<AiImageTaskEntity>().Single(x => x.Id == reservation.TaskId);
         Assert.Equal(expectedSample, settled.HealthSample);
         Assert.Equal(expectedSample is null ? null : "gpt-image-2.6-flare", settled.HealthModelCode);
+    }
+
+    [Theory]
+    [InlineData(true, false, false)] // versioned queue: fail during account preflight
+    [InlineData(false, false, false)] // legacy queue: provider succeeds after disable
+    [InlineData(false, true, false)] // legacy queue: failed provider call is refunded
+    [InlineData(false, false, true)] // disable after provider admission
+    public async Task DisabledAccount_QueuedAndInFlightWorkSettlesOnce(bool versioned, bool providerFails, bool disableInFlight)
+    {
+        using var context = new TestContext(pointBalance: 1000);
+        var reservation = await context.Service.ReserveImageTaskAsync(CreateTask(100, "disable"), "gpt-image-2", "1k", "med", default);
+        if (versioned) context.Db.Ado.ExecuteCommand("UPDATE ai_image_task SET size_contract_version='size-mode-v1'");
+        void Disable() => context.Db.Ado.ExecuteCommand("UPDATE sys_user SET status=0 WHERE id=1");
+        if (!disableInFlight) Disable();
+        var imageService = new Mock<IAiImageService>();
+        imageService.Setup(x => x.GenerateFromResolvedAsync(It.IsAny<string>(), It.IsAny<string>(),
+            It.IsAny<ResolveAiImageParametersResponse>(), It.IsAny<IReadOnlyList<string>>(), null, UserId, It.IsAny<CancellationToken>()))
+            .Returns(() => {
+                if (disableInFlight) Disable();
+                if (providerFails) throw new HttpRequestException("test failure");
+                return Task.FromResult(new GenerateAiImageResponse { Url = "/api/media/ai/1/result.png" });
+            });
+        using var services = new ServiceCollection().AddSingleton(imageService.Object).BuildServiceProvider();
+        var gate = new Mock<IAiImageProviderGate>();
+        gate.Setup(x => x.AcquireAsync(It.IsAny<CancellationToken>())).ReturnsAsync(Mock.Of<IAiImageProviderLease>());
+        var models = new Mock<IAiImageModelConfigService>();
+        models.Setup(x => x.ResolveAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new ResolvedAiImageModelConfig { ProviderProtocol = "openai-image", ConsentProviderCode = "openai" });
+        var worker = new AiImageTaskProcessor(context.Db, services.GetRequiredService<IServiceScopeFactory>(), context.Service,
+            Mock.Of<IAiImageAdmissionService>(), gate.Object, Mock.Of<IAiPromptFilter>(), models.Object,
+            Mock.Of<IAiImageCatalogService>(), Mock.Of<IUserConsentService>(), Options.Create(new AiImageSizeModeOptions()),
+            NullLogger<AiImageTaskProcessor>.Instance);
+        await worker.ProcessAsync(reservation.TaskId, default);
+        await worker.ProcessAsync(reservation.TaskId, default);
+        var task = context.Db.Queryable<AiImageTaskEntity>().Single();
+        var failed = versioned || providerFails;
+        Assert.Equal(failed ? 2 : 1, task.Status);
+        Assert.Equal(failed ? 1000 : 900, context.GetUser().PointBalance);
+        Assert.Equal(failed ? 1 : 0, context.GetDetails().Count(x => x.Source == "image_refund"));
+        Assert.Equal(versioned ? MachineErrorCodes.AccountUnavailable : null, task.FailureCode);
+        Assert.Equal(versioned ? null : failed ? 2 : 1, task.HealthSample);
+        gate.Verify(x => x.AcquireAsync(It.IsAny<CancellationToken>()), versioned ? Times.Never() : Times.Once());
     }
 
     private static AiImageTaskEntity CreateTask(int pointCost, string key) => new()

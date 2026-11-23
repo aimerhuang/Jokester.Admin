@@ -107,6 +107,7 @@ public sealed class AccountDeletionRetryTests
             Status = "active",
             CreatedAt = DateTime.Now
         }).ExecuteCommand();
+        db.Ado.ExecuteCommand("INSERT INTO sys_user_status_audit VALUES (1, 'private reason')");
         var canvasProjectId = db.Insertable(new AiCanvasProjectEntity
         {
             CanvasId = "CNV20261103000000000000000000000001",
@@ -155,6 +156,7 @@ public sealed class AccountDeletionRetryTests
             var service = CreateService(db, Mock.Of<IEmailSender>(), mediaPathResolver.Object);
             await service.ProcessDueRequestsAsync(default);
 
+            Assert.Equal(0, db.Ado.GetInt("SELECT COUNT(*) FROM sys_user_status_audit WHERE reason IS NOT NULL"));
             var detail = db.Queryable<UserPointDetailEntity>().Single();
             Assert.DoesNotContain("person@example.test", detail.BusinessKey, StringComparison.OrdinalIgnoreCase);
             Assert.Null(detail.Remark);
@@ -311,6 +313,7 @@ public sealed class AccountDeletionRetryTests
                 updated_at TEXT NULL,
                 is_deleted INTEGER NOT NULL DEFAULT 0
             );
+            CREATE TABLE sys_user_status_audit (user_id INTEGER, reason TEXT);
             CREATE TABLE ai_image_favorite (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,

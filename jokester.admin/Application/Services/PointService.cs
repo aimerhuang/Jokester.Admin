@@ -16,17 +16,30 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
     private const string ImageRefundSource = "image_refund";
     private readonly PointBucketLedger _pointBuckets = new(db);
 
-    public async Task<PointBalanceDto> GetBalanceAsync(CancellationToken cancellationToken)
+    public Task<PointBalanceDto> GetBalanceAsync(CancellationToken cancellationToken)
     {
         var userId = currentUser.UserId ?? throw new AppException(ErrorCodes.Unauthorized, "User is not authenticated");
+        return SettleBalanceAsync(userId, false, cancellationToken);
+    }
+
+    public Task<PointBalanceDto> GetAdminBalanceAsync(long id, CancellationToken cancellationToken)
+    {
+        if (!currentUser.IsSuperAdmin || currentUser.UserId is null)
+            throw new AppException(ErrorCodes.Forbidden, "仅超级管理员可查看用户积分");
+        return SettleBalanceAsync(id, true, cancellationToken);
+    }
+
+    private async Task<PointBalanceDto> SettleBalanceAsync(long userId, bool includeDisabled, CancellationToken cancellationToken)
+    {
         await db.Ado.BeginTranAsync();
         try
         {
             var user = await db.Queryable<SysUserEntity>()
                 .TranLock(DbLockType.Wait)
-                .FirstAsync(x => x.Id == userId && !x.IsDeleted && x.Status == 1, cancellationToken);
+                .FirstAsync(x => x.Id == userId && !x.IsDeleted && (includeDisabled || x.Status == 1), cancellationToken);
             if (user is null)
             {
+                if (includeDisabled) throw new NotFoundException("用户不存在");
                 throw new AppException(ErrorCodes.Unauthorized, "User is not authenticated");
             }
 

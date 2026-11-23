@@ -7,6 +7,8 @@ namespace jokester.admin.Application.Abstractions;
 
 public interface IPointService
 {
+    Task<PointBalanceDto> GetAdminBalanceAsync(long id, CancellationToken cancellationToken);
+
     Task<PointBalanceDto> GetBalanceAsync(CancellationToken cancellationToken);
 
     Task<PagedResult<PointDetailDto>> GetDetailsAsync(PageQuery query, CancellationToken cancellationToken);

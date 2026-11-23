@@ -630,3 +630,15 @@ Authorization: Bearer <accessToken>
 - `baseUrl` 必须是不带凭据、查询串和片段的 https 绝对地址，且解析结果不能是回环、私网、链路本地等地址；违反返回 400 `VALIDATION_ERROR`。部署可配置 `AiImageModelAdmin.AllowedHosts`（白名单）和 `AllowPrivateNetworkHosts`（允许 http 与内网的主机）。路径必须以 `/` 开头，不得含 `..`、`//`、`?`、`#`。
 - 测试连接 `POST /{id}/test` 请求 `GET {baseUrl}/models`（Bearer Key，10 秒超时，不跟随重定向），返回 `{ result, httpStatus, elapsedMilliseconds }`，`result` 为 `passed` / `auth_failed` / `unreachable`。不出图、不扣积分、不计入模型状态；部分中转站不实现该端点，`unreachable` 不等于不可用。
 - 限流：写接口每用户、每 IP 各 20 次/分钟；测试连接各 10 次/分钟。
+
+## 用户管理（超级管理员）
+
+用户管理使用独立的 `/api/admin/users` 前缀，所有接口要求当前 Access Token 声明为超级管理员，状态写入还会在事务内锁定操作者并复核其启用、未注销和超级管理员身份。普通用户返回 `403 RESOURCE_FORBIDDEN`。
+
+- `GET /api/admin/users` 支持 `pageIndex`、`pageSize`、`keyword`、`status`、`isSuperAdmin`、`sortBy=createdAt|lastLoginTime|pointBalance`、`sortOrder=asc|desc`。关键字按用户名、昵称、邮箱包含匹配，纯数字同时精确匹配用户 ID，已注销用户不返回。
+- `GET /api/admin/users/{id}` 返回基础信息、当前有效月卡和经过过期结算的积分概览。禁用用户仍可查询，响应不包含密码、盐或内部幂等键。
+- `GET /api/admin/users/{id}/point-summary` 和 `GET /api/admin/users/{id}/point-details` 使用带时区的 ISO 8601 `from`/`to`，时间范围为左闭右开。流水支持分页、重复的 `source` 参数与 `direction=in|out`。汇总按 `source` 计算，并保留未知来源。
+- `PUT /api/admin/users/{id}/status` 请求体为 `{ "status": 0|1, "reason": "..." }`。禁用必须填写 1–200 字符原因，不能禁用自己或其他超级管理员。启用正在注销的账号返回 `409 USER_DELETION_IN_PROGRESS`。状态变化会撤销会话、清理权限缓存并写入审计表。
+- `GET /api/admin/users/{id}/status-audits` 返回状态变更记录。账户注销完成时会清空该用户审计原因和积分流水备注中的个人信息。
+
+生图任务的禁用结算差异如下。`size-mode-v1` 任务在 Worker 预检阶段以 `ACCOUNT_UNAVAILABLE` 失败并退款，不计入模型状态样本。legacy 任务保持现有 Worker 流程，已进入 Provider 的任务按 Provider 结果结算，失败时退款。

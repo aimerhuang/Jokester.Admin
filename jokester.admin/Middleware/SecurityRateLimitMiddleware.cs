@@ -177,6 +177,11 @@ public sealed class SecurityRateLimitMiddleware(RequestDelegate next, ILogger<Se
                 new("blog-upload-user-bytes-1d", RateLimitPartition.User, MaxBlogUploadBytesPerDay, 86400, Weight: uploadWeight)
             ];
         }
+        if (HttpMethods.IsPut(method) && path.StartsWithSegments("/api/admin/users"))
+        {
+            return [new("admin-user-write-user-1m", RateLimitPartition.User, 20, 60),
+                    new("admin-user-write-ip-1m", RateLimitPartition.Ip, 20, 60)];
+        }
         if (HttpMethods.IsPost(method) && IsModelRouteProbePath(path))
         {
             return

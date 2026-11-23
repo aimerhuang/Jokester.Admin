@@ -565,3 +565,10 @@ WHERE model_code IN ('nano-banana-2', 'nano-banana-pro')
 ```
 
 `base_url`、`api_key`、`provider_model` 和两个请求路径都由该表提供。生产密钥由部署时写入数据库，不要写入 `appsettings.json`、`.env.example` 或 SQL 初始化脚本。
+
+## 用户管理上线检查
+
+1. 执行 `docs/migrations/20261123-add-user-admin.sql`，确认 `sys_user_status_audit` 和 `idx_sys_user_created_at` 已创建。
+2. 部署 API，然后部署 Web。`ai_operator` 权限回收按上文“用户接口鉴权收紧上线检查”单独执行。
+3. 用普通用户调用 `/api/admin/users` 确认返回 `403 RESOURCE_FORBIDDEN`，用超级管理员验证列表、状态审计和积分详情。
+4. 禁用测试账号后确认 Refresh Token 立即撤销，`size-mode-v1` 排队任务以 `ACCOUNT_UNAVAILABLE` 失败并退款，legacy 任务按 Provider 结果结算。

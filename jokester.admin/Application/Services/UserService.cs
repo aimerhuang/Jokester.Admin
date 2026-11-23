@@ -19,7 +19,9 @@ public sealed class UserService(
     IPermissionCacheInvalidator permissionCacheInvalidator,
     IRefreshTokenStore refreshTokenStore,
     IWebHostEnvironment environment,
-    ICurrentUser currentUser) : IUserService
+    ICurrentUser currentUser,
+    IUserAdminService adminUsers,
+    UserStatusTransition transitions) : IUserService
 {
     private const long MaxAvatarFileSizeBytes = 10 * 1024 * 1024;
     public async Task<PagedResult<UserListItemDto>> GetPageAsync(PageQuery query, CancellationToken cancellationToken)
@@ -199,51 +201,48 @@ public sealed class UserService(
     {
         await EnsureSuperAdminAsync(cancellationToken);
 
-        var entity = await db.Queryable<SysUserEntity>().FirstAsync(x => x.Id == id && !x.IsDeleted);
-        if (entity is null)
-        {
-            throw new NotFoundException($"用户不存在: {id}");
-        }
-
-        var existingRoleIds = await db.Queryable<SysUserRoleEntity>()
-            .Where(x => x.UserId == id)
-            .Select(x => x.RoleId)
-            .ToListAsync(cancellationToken);
-        var existingSiteIds = await db.Queryable<SysUserSiteEntity>()
-            .Where(x => x.UserId == id)
-            .Select(x => x.SiteId)
-            .ToListAsync(cancellationToken);
-        var securityContextChanged = entity.Status != request.Status
-            || entity.IsSuperAdmin != request.IsSuperAdmin
-            || !existingRoleIds.ToHashSet().SetEquals(request.RoleIds)
-            || !existingSiteIds.ToHashSet().SetEquals(request.SiteIds);
-
-        entity.NickName = request.NickName;
-        entity.Email = request.Email;
-        entity.Phone = request.Phone;
-        entity.Status = request.Status;
-        entity.IsSuperAdmin = request.IsSuperAdmin;
-        entity.Remark = request.Remark;
-        entity.UpdatedAt = DateTime.Now;
-
+        var operatorId = currentUser.UserId!.Value;
+        bool securityContextChanged;
         await db.Ado.BeginTranAsync();
         try
         {
+            var entity = await transitions.LockTargetAsync(operatorId, id, cancellationToken);
+            UserStatusTransition.EnsureSuperAdminFlagChangeAllowed(operatorId, entity, request.IsSuperAdmin);
+            var existingRoleIds = await db.Queryable<SysUserRoleEntity>()
+                .Where(x => x.UserId == id)
+                .Select(x => x.RoleId)
+                .ToListAsync(cancellationToken);
+            var existingSiteIds = await db.Queryable<SysUserSiteEntity>()
+                .Where(x => x.UserId == id)
+                .Select(x => x.SiteId)
+                .ToListAsync(cancellationToken);
+            securityContextChanged = entity.Status != request.Status
+                || entity.IsSuperAdmin != request.IsSuperAdmin
+                || !existingRoleIds.ToHashSet().SetEquals(request.RoleIds)
+                || !existingSiteIds.ToHashSet().SetEquals(request.SiteIds);
+
+            entity.NickName = request.NickName;
+            entity.Email = request.Email;
+            entity.Phone = request.Phone;
+            if (entity.Status != request.Status)
+                await transitions.RecordAsync(operatorId, entity, request.Status, null, cancellationToken);
+            entity.Status = request.Status;
+            entity.IsSuperAdmin = request.IsSuperAdmin;
+            entity.Remark = request.Remark;
+            entity.UpdatedAt = DateTime.Now;
+
             await db.Updateable(entity).ExecuteCommandAsync();
             await SyncUserRolesAsync(id, request.RoleIds);
             await SyncUserSitesAsync(id, request.SiteIds);
             await db.Ado.CommitTranAsync();
-            await permissionCacheInvalidator.RemoveUserAsync(id, cancellationToken);
-            if (securityContextChanged)
-            {
-                await refreshTokenStore.RevokeUserSessionsAsync(id, cancellationToken);
-            }
         }
         catch
         {
             await db.Ado.RollbackTranAsync();
             throw;
         }
+        await permissionCacheInvalidator.RemoveUserAsync(id, CancellationToken.None);
+        if (securityContextChanged) await refreshTokenStore.RevokeUserSessionsAsync(id, CancellationToken.None);
     }
 
     public async Task AssignMenusAsync(long id, AssignUserMenusRequest request, CancellationToken cancellationToken)
@@ -416,23 +415,8 @@ public sealed class UserService(
         await permissionCacheInvalidator.RemoveUserAsync(id, cancellationToken);
     }
 
-    public async Task UpdateStatusAsync(long id, UpdateUserStatusRequest request, CancellationToken cancellationToken)
-    {
-        await EnsureSuperAdminAsync(cancellationToken);
-
-        var affected = await db.Updateable<SysUserEntity>()
-            .SetColumns(x => new SysUserEntity { Status = request.Status, UpdatedAt = DateTime.Now })
-            .Where(x => x.Id == id && !x.IsDeleted)
-            .ExecuteCommandAsync();
-
-        if (affected == 0)
-        {
-            throw new NotFoundException($"用户不存在: {id}");
-        }
-
-        await permissionCacheInvalidator.RemoveUserAsync(id, cancellationToken);
-        await refreshTokenStore.RevokeUserSessionsAsync(id, cancellationToken);
-    }
+    public Task UpdateStatusAsync(long id, UpdateUserStatusRequest request, CancellationToken cancellationToken) =>
+        adminUsers.ChangeStatusAsync(id, new AdminStatusRequest(request.Status, null), cancellationToken, legacy: true);
 
     public async Task DeleteAsync(long id, CancellationToken cancellationToken)
     {

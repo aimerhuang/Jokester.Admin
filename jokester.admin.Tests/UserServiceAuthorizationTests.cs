@@ -18,7 +18,7 @@ namespace jokester.admin.Tests;
 /// <summary>
 /// /api/users 的服务层鉴权：资料类接口只允许本人或超级管理员，管理类接口只允许超级管理员。
 /// </summary>
-public sealed class UserServiceAuthorizationTests
+public sealed partial class UserServiceAuthorizationTests
 {
     private const long AliceId = 1;
     private const long BobId = 2;
@@ -277,6 +277,32 @@ public sealed class UserServiceAuthorizationTests
                 site_id INTEGER NOT NULL,
                 created_at TEXT NOT NULL
             );
+                CREATE TABLE sys_user_point_bucket (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    source TEXT NOT NULL,
+                    business_key TEXT NOT NULL,
+                    granted_points INTEGER NOT NULL,
+                    remaining_points INTEGER NOT NULL,
+                    expired_points INTEGER NOT NULL DEFAULT 0,
+                    expires_at TEXT NULL,
+                    spend_priority INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NULL,
+                    UNIQUE (user_id, business_key)
+                );
+
+            CREATE TABLE account_deletion_request (user_id INTEGER, status TEXT);
+            CREATE TABLE sys_user_membership_entitlement (user_id INTEGER, tier_code TEXT, status TEXT, revoked_at TEXT, starts_at TEXT, expires_at TEXT);
+            CREATE TABLE sys_user_status_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                reason TEXT NULL,
+                operator_user_id INTEGER NOT NULL,
+                operator_ip TEXT NULL,
+                created_at TEXT NOT NULL
+            );
             """);
         var now = DateTime.Now;
         db.Insertable(new[]
@@ -301,6 +327,9 @@ public sealed class UserServiceAuthorizationTests
             .Setup(x => x.HashPassword(It.IsAny<string>()))
             .Returns((string password) => ($"hashed:{password}", "salt"));
         var refreshTokenStore = new Mock<IRefreshTokenStore>();
+        var transition = new UserStatusTransition(db, new HttpContextAccessor());
+        var adminService = new UserAdminService(db, currentUser.Object, new PointService(db, currentUser.Object),
+            Mock.Of<IPermissionCacheInvalidator>(), refreshTokenStore.Object, transition);
         var service = new UserService(
             db,
             passwordHasher.Object,
@@ -308,8 +337,8 @@ public sealed class UserServiceAuthorizationTests
             Mock.Of<IPermissionCacheInvalidator>(),
             refreshTokenStore.Object,
             Mock.Of<IWebHostEnvironment>(),
-            currentUser.Object);
-        return new UserContext(db, service, refreshTokenStore);
+            currentUser.Object, adminService, transition);
+        return new UserContext(db, service, adminService, refreshTokenStore);
     }
 
     private static SysUserEntity User(string userName, string passwordHash, int status, bool isSuperAdmin, DateTime now)
@@ -342,8 +371,11 @@ public sealed class UserServiceAuthorizationTests
     private sealed class UserContext(
         SqlSugarClient db,
         UserService service,
+        UserAdminService adminService,
         Mock<IRefreshTokenStore> refreshTokenStore) : IDisposable
     {
+        public UserAdminService Admin { get; } = adminService;
+        public SqlSugarClient Db => db;
         public UserService Service { get; } = service;
 
         public Mock<IRefreshTokenStore> RefreshTokenStore { get; } = refreshTokenStore;

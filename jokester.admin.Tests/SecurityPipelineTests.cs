@@ -21,6 +21,20 @@ public sealed class SecurityPipelineTests
         });
     }
 
+    [Theory]
+    [InlineData("GET", "/api/admin/users")]
+    [InlineData("GET", "/api/admin/users/1")]
+    [InlineData("GET", "/api/admin/users/1/point-summary")]
+    [InlineData("GET", "/api/admin/users/1/point-details")]
+    [InlineData("GET", "/api/admin/users/1/status-audits")]
+    [InlineData("PUT", "/api/admin/users/1/status")]
+    public async Task AdminUsers_AnonymousRequestsRequireAuthentication(string method, string path)
+    {
+        using var request = new HttpRequestMessage(new HttpMethod(method), path);
+        using var response = await _client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
     [Fact]
     public async Task ProtectedEndpoints_DefaultToUnauthorized_AndIncludeSecurityHeaders()
     {

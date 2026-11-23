@@ -4,9 +4,9 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 文档版本 | v0.2 |
+| 文档版本 | v0.3 |
 | 日期 | 2026-11-23 |
-| 需求状态 | 第 9 节（现有接口收紧与权限回收）已在当前工作树实现并通过单元测试，未提交、未部署，迁移未在任何数据库执行；其余为设计稿，第 13 节待决策项按建议值书写 |
+| 需求状态 | P0 已在 Jokester.Admin 和 Jokester-Ai-Image 本地实现。生产发布和实际账号验收待执行；P1、P2 为后续规划 |
 | 适用端 | 用户 Web（`Jokester-Ai-Image`）、Jokester Admin API；Android / iOS 不接入 |
 | 后端基线 | `sys_user`、`sys_user_point_detail`、`sys_user_point_bucket`、`sys_user_membership_entitlement`、`UsersController`、`IUserService`、`IPointService` |
 | 关联契约 | [integration-guide.md](./integration-guide.md)、[point-recharge.md](./point-recharge.md)、[security-hardening-prd.md](./security-hardening-prd.md)、[ai-model-config-status-prd.md](./ai-model-config-status-prd.md) |
@@ -123,17 +123,17 @@ WHERE r.role_code = 'ai_operator' AND m.permission_code LIKE 'System.%';
 | 规则 | 处理 |
 | --- | --- |
 | 不能禁用自己 | 409 `USER_STATUS_PROTECTED` |
-| 不能禁用其他超级管理员 | 409 `USER_STATUS_PROTECTED`；超级管理员账号通过 `--seed-admin` 或数据库维护，避免误操作或被盗号后互相锁死 |
+| 不能禁用其他超级管理员 | 409 `USER_STATUS_PROTECTED`；超级管理员账号通过 `--seed-admin` 或数据库维护，避免误操作或被盗号后互相锁死。旧版 `PUT /api/users/{id}` 也不能取消其他超管的超管标记（同样返回该错误码），防止“先降级再禁用”的旁路 |
 | 目标用户已注销 / 不存在 | 404 |
 | 目标用户有进行中的账户删除请求时启用 | 409 `USER_DELETION_IN_PROGRESS`；账户删除流程会把用户置为禁用，后台不得把它改回来（具体状态集合实现时对照 `AccountDeletionService` 状态机） |
-| 目标状态与当前状态相同 | 返回成功，不写审计、不撤销会话 |
+| 目标状态与当前状态相同 | 返回成功，不写审计、不撤销会话；重复禁用不要求再填原因 |
 | `status` 不是 `0` / `1` | 400 |
 
 禁用生效范围（均为现有行为，本需求不改）：
 
 - 登录、刷新令牌被拒绝（登录提示文案见第 13 节第 4 项）；状态变更后立即撤销该用户全部 Refresh Token 会话并清理权限缓存。
 - 已签发 Access Token 最长 15 分钟后失效；这期间积分查询、签到、生图创建等路径各自校验 `status=1`，会被拒绝。
-- `size-mode-v1` 排队中的任务在 Worker 预检时以 `ACCOUNT_UNAVAILABLE` 失败并退款。legacy 排队任务与已在 Provider 侧执行的任务的处理，实现时需要核对并写进验收用例（见 14.1 第 8 条）。
+- `size-mode-v1` 排队中的任务在 Worker 预检时以 `ACCOUNT_UNAVAILABLE` 失败并退款。legacy 已排队任务继续执行原有提示词、路由及授权检查。禁用不主动取消已经外发的请求。成功的图片按原预留结算，失败的图片按原批次退还。
 - 不冻结、不清零积分；不撤销会员权益；会员有效期在禁用期间照常流逝。
 
 ### 6.5 状态变更记录
@@ -357,7 +357,7 @@ WHERE r.role_code = 'ai_operator' AND m.permission_code LIKE 'System.%';
 
 ## 9. 现有 `/api/users` 接口收紧（P0，先于本功能上线）
 
-实现状态：9.1 与 9.3 已实现（`UserService`、`UsersController`、`docs/migrations/20261123-restrict-ai-operator-menus.sql`、`jokester.admin.sql`，测试 `UserServiceAuthorizationTests`）；9.2 随用户管理功能一起做。
+实现状态：9.1 与 9.3 已进入后端基线。9.2 已接入共用状态事务；旧版完整资料编辑发生状态变化时也执行相同保护与审计。
 
 ### 9.1 规则
 
@@ -426,7 +426,7 @@ WHERE r.role_code = 'ai_operator' AND m.permission_code LIKE 'System.%';
 | 1 | “所有用户”是否包含已注销用户？ | 不包含。注销后用户名和邮箱已匿名化 |
 | 2 | 能否禁用其他超级管理员？ | 首期不能。超管只有少数几个，走 `--seed-admin` 或数据库维护更安全 |
 | 3 | 禁用是否必须填原因？ | 必填。以后用户申诉时需要知道当初为什么禁用 |
-| 4 | 被禁用的用户登录时看到什么？ | 现状是密码正确也返回“用户名或密码错误”（`AuthService` 对禁用账号抛 `InvalidCredentials`，`ACCOUNT_DISABLED` 已定义但未使用），用户会以为忘了密码。建议改为密码校验通过后返回 `ACCOUNT_DISABLED`“账号已被禁用，请联系客服”；密码错误时仍返回通用错误，不泄露账号状态。首期不发邮件通知 |
+| 4 | 被禁用的用户登录时看到什么？ | P0 已采用建议：密码校验通过后返回 `ACCOUNT_DISABLED`“账号已被禁用，请联系客服”；密码错误时仍返回通用错误，不泄露账号状态。首期不发邮件通知 |
 | 5 | 邮箱在列表中是否脱敏？ | 不脱敏。客服按邮箱定位用户是主要场景，且只对超管可见 |
 | 6 | 管理员查看详情时是否执行过期结算（会写过期流水）？ | 执行。否则余额可能包含已过期的签到积分，与用户看到的不一致 |
 | 7 | 详情页是否显示生图任务列表？ | 首期不显示，只看积分维度；按模型汇总放 P1 |
@@ -458,6 +458,16 @@ WHERE r.role_code = 'ai_operator' AND m.permission_code LIKE 'System.%';
 4. 自己和其他超级管理员的行不显示“禁用”按钮。
 5. 切换时间范围后汇总与流水同时刷新；从详情返回列表时保留搜索条件和页码。
 
+### 本地验证记录（2026-11-23）
+
+| 工作目录 | 命令 | 结果 |
+| --- | --- | --- |
+| `Jokester.Admin` | `dotnet test jokester.admin.Tests --no-restore --filter 'FullyQualifiedName~UserServiceAuthorizationTests\|FullyQualifiedName~AccountDeletionRetryTests\|FullyQualifiedName~AuthMembershipProfileTests.DisabledAccount\|FullyQualifiedName~PointServiceBillingTests\|FullyQualifiedName~SecurityRateLimitMiddlewareTests.AdminUserStatusWrites\|FullyQualifiedName~SecurityPipelineTests.AdminUsers'` | 75 项通过。包括匿名 HTTP 请求、状态审计回滚、积分结算与禁用时的 Worker 行为。 |
+| `Jokester-Ai-Image` | `npm run build` | 类型检查和生产构建通过。 |
+| `Jokester-Ai-Image` | `E2E_BASE_URL=http://127.0.0.1:5189 npx playwright test user-admin.e2e.spec.ts` | 3 项通过。浏览器连接本地 Web，API 响应由 Playwright 提供。 |
+
+本次验证使用隔离测试数据。MySQL 迁移执行和真实账号端到端验收留在发布阶段。
+
 ### 14.3 产品验收
 
 1. 客服拿到用户邮箱后，不接触数据库，在 1 分钟内查到该用户当前余额、近 30 天生图消耗和最近一笔充值流水。
@@ -469,7 +479,7 @@ WHERE r.role_code = 'ai_operator' AND m.permission_code LIKE 'System.%';
 
 - 新增：`AdminUsersController`、`IUserAdminService`、`SysUserStatusAuditEntity`、对应 DTO、两个 `MachineErrorCodes`、限流规则、迁移脚本。
 - 修改：`IPointService` 增加按用户查询余额概览的方法；`UserService` 增加本人 / 超管校验；`UsersController` 调整权限特性；`AccountDeletionService` 清理审计原因；`jokester.admin.sql` 修正 `ai_operator` 授权并加新表。
-- 不改：积分扣减、退款、过期、会员、生图任务流程；登录与令牌流程。
+- 不改：积分扣减、退款、过期、会员、生图任务流程；令牌签发与刷新流程。登录时密码校验通过的禁用账号返回 `ACCOUNT_DISABLED`。
 - 文档：实现后更新 `docs/integration-guide.md`、`docs/architecture.md`，`AGENTS.md` 增加本契约小节。
 
 ### 15.2 前端（`Jokester-Ai-Image`）

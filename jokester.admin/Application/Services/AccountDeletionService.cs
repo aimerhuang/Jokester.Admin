@@ -327,6 +327,10 @@ public sealed class AccountDeletionService(
                 })
                 .Where(x => x.OwnerUserId == request.UserId)
                 .ExecuteCommandAsync(cancellationToken);
+            await db.Updateable<SysUserStatusAuditEntity>()
+                .SetColumns(x => new SysUserStatusAuditEntity { Reason = null })
+                .Where(x => x.UserId == request.UserId)
+                .ExecuteCommandAsync(cancellationToken);
             await db.Deleteable<UserConsentEntity>()
                 .Where(x => x.UserId == request.UserId)
                 .ExecuteCommandAsync(cancellationToken);

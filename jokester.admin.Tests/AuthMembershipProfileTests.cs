@@ -2,6 +2,7 @@ using jokester.admin.Application.Abstractions;
 using jokester.admin.Application.DTOs.Auth;
 using jokester.admin.Application.Services;
 using jokester.admin.Common;
+using jokester.admin.Common.Exceptions;
 using jokester.admin.Domain.Entities;
 using jokester.admin.Infrastructure;
 using Microsoft.AspNetCore.Http;
@@ -124,6 +125,22 @@ public sealed class AuthMembershipProfileTests
         Assert.Equal("monthly_vip", login.User.Membership?.TierCode);
         Assert.Equal("monthly_vip", refreshed.User.Membership?.TierCode);
         Assert.Equal("monthly_vip", concurrent.User.Membership?.TierCode);
+    }
+
+    [Theory]
+    [InlineData("password", MachineErrorCodes.AccountDisabled)]
+    [InlineData("wrong", MachineErrorCodes.InvalidCredentials)]
+    public async Task DisabledAccount_LoginChecksPasswordBeforeReportingStatus(string password, string expected)
+    {
+        using var context = new TestContext(pointBalance: 50);
+        context.Db.Ado.ExecuteCommand("UPDATE sys_user SET status=0 WHERE id=1");
+        var error = await Assert.ThrowsAsync<AppException>(() => context.Service.LoginAsync(
+            new LoginRequest { UserName = "member", Password = password }, default));
+        Assert.Equal(expected, error.MachineCode);
+        context.RefreshTokenStore.Setup(x => x.ConsumeAsync("old", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new RefreshTokenConsumeResult(RefreshTokenConsumeStatus.Succeeded, 1, "session"));
+        var refresh = await Assert.ThrowsAsync<AppException>(() => context.Service.RefreshAsync(new(){RefreshToken="old"},default));
+        Assert.Equal(MachineErrorCodes.SessionRevoked, refresh.MachineCode);
     }
 
     private sealed class TestContext : IDisposable

@@ -68,6 +68,7 @@ DROP TABLE IF EXISTS `sys_user_site`;
 DROP TABLE IF EXISTS `sys_role_menu`;
 DROP TABLE IF EXISTS `sys_user_role`;
 DROP TABLE IF EXISTS `sys_menu`;
+DROP TABLE IF EXISTS `sys_user_status_audit`;
 DROP TABLE IF EXISTS `sys_user`;
 DROP TABLE IF EXISTS `sys_role`;
 DROP TABLE IF EXISTS `sys_site`;
@@ -96,10 +97,24 @@ CREATE TABLE `sys_user` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_sys_user_user_name` (`user_name`),
   UNIQUE KEY `uk_sys_user_email` (`email`),
+  KEY `idx_sys_user_created_at` (`created_at`),
   KEY `idx_sys_user_status` (`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='系统用户表';
 
 -- =====================================================
+CREATE TABLE IF NOT EXISTS `sys_user_status_audit` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `user_id` BIGINT NOT NULL,
+  `action` VARCHAR(16) NOT NULL,
+  `reason` VARCHAR(200) DEFAULT NULL,
+  `operator_user_id` BIGINT NOT NULL,
+  `operator_ip` VARCHAR(50) DEFAULT NULL,
+  `created_at` DATETIME NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_sys_user_status_audit_user` (`user_id`, `id`),
+  CONSTRAINT `fk_sys_user_status_audit_user` FOREIGN KEY (`user_id`) REFERENCES `sys_user` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- 2. 角色表
 -- =====================================================
 CREATE TABLE `sys_role` (
