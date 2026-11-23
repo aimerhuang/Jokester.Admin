@@ -5,7 +5,7 @@
 - 项目根目录：`D:\Project\jokester.admin`
 - 实际 Web API 项目目录：`D:\Project\jokester.admin\jokester.admin`
 - 根目录设计文档：`后台管理系统设计书.md`
-- 项目 docs：`docs/integration-guide.md`、`docs/architecture.md`、`docs/runbook.md`、`docs/point-recharge.md`、`docs/ai-prompt-filter.md`、`docs/ai-image-size-mode-prd.md`、`docs/ai-infinite-canvas-prd.md`
+- 项目 docs：`docs/integration-guide.md`、`docs/architecture.md`、`docs/runbook.md`、`docs/point-recharge.md`、`docs/ai-prompt-filter.md`、`docs/ai-image-size-mode-prd.md`、`docs/ai-infinite-canvas-prd.md`、`docs/ai-model-config-status-prd.md`、`docs/user-admin-prd.md`
 - 根目录数据库脚本：`jokester.admin.sql`
 
 ## Current Stack
@@ -65,6 +65,20 @@ POST /api/dev/bootstrap/super-admin
 - 编辑留空表示不修改密码
 
 不要再要求前端传 `passwordHash` / `salt`。
+
+## User API Authorization
+
+- `/api/users` 的鉴权在 `UserService` 内按当前主体校验，不能只靠 Controller 上的权限码：注册用户默认角色是 `ai_operator`，权限码误配就会变成全员可用。
+- 资料类接口（`point-details`、`nickname`、`password`、`avatar`、`signature`）只允许本人或超级管理员，跨用户与用户不存在统一返回 404；这些 Action 不挂 `[Permission]`，因为普通用户不持有 `System.User.*`。
+- 列表、新增、编辑、状态、删除、菜单授权只允许超级管理员，除 Token 声明外还要复核数据库中仍是启用、未删除的超级管理员，否则返回 403 `RESOURCE_FORBIDDEN`。
+- `ai_operator` 只能关联 `ai_image` 站点的菜单；不要再把 `System.*`、`Blog.*` 权限码授给它。迁移为 `docs/migrations/20261123-restrict-ai-operator-menus.sql`（先部署 API 再执行），已同步 `jokester.admin.sql`。
+- 新增 `/api/users/{id}/...` 接口时必须在服务层调用本人或超管校验；用户管理后台的完整设计见 `docs/user-admin-prd.md`。
+
+## User Administration
+
+- `/api/admin/users` 列表、详情、积分汇总、积分流水和状态记录要求超级管理员声明。写操作还需在事务内锁定并复核操作者。
+- 新旧管理接口的状态变更共用 `UserStatusTransition`，与审计写入同事务；旧版 `PUT /api/users/{id}` 不得取消其他超管的超管标记（409 `USER_STATUS_PROTECTED`），否则可先降级再禁用。详情的积分快照由 `IPointService` 结算，包括禁用账号。
+- 用户管理版本先执行 `docs/migrations/20261123-add-user-admin.sql`，再部署 API 和 Web。权限回收使用上节的独立迁移和发布顺序。
 
 ## Registration Email Contract
 
@@ -182,6 +196,17 @@ POST /api/dev/bootstrap/super-admin
 - `POST /api/assets/from-ai-result` 把生图结果登记为 `asset_type=generated` 的 Asset（`source_task_id + source_result_ordinal` 唯一），复用结果原文件；删除生成型 Asset 只删缩略图，不得删除生图历史原图。
 - 账户删除会清空并软删除用户画布与引用索引。
 - 迁移为 `docs/migrations/20261103-add-ai-canvas.sql`，已同步 `jokester.admin.sql`；API 读取 `media_asset` 新列，必须先迁移再部署。
+
+## AI Model Route Admin And Model Status Contract
+
+- `GET /api/ai/images/model-status` 只要求登录，不新增菜单权限；只返回模型展示名、`state`（`normal`/`degraded`/`down`/`unknown`）、可用性、最快/最慢成功秒数和近期成败序列，不得暴露地址、Key、供应商模型、路由角色、错误信息、用户或任务标识。完整说明见 `docs/ai-model-config-status-prd.md`。
+- 状态样本只来自任务结算时写入的 `ai_image_task.health_model_code` / `health_sample`，取近 24 小时最近 60 条，包含用户软删除任务。新增结算路径必须正确归类：准入失败、未开始即过期、提示词拦截、授权缺失、素材无效不计入；versioned 只有 `failure_stage=provider/output` 计入。`IPointService.SettleImageTaskAsync` 的 `modelSideFailure` 默认 `true`，用户侧或平台侧失败要显式传 `false`。
+- 状态接口只读 `IAiImageModelStatusService` 单例快照（Worker 约 30 秒刷新，Redis 共享），fail-open；不要在请求路径上直接查询 `ai_image_task`。
+- `/api/ai/model-routes` 只允许超级管理员，写操作在事务内锁定并复核当前用户；直接读写 `ai_image_model_config`，不另建配置表。不要把该前缀挪到 `/api/ai/images` 下（POST 会命中生图创建限流）。
+- API Key 只写不读：任何响应、日志、审计都不得包含明文，只返回 `apiKeySet` / `apiKeyMask`；编辑时空 Key 表示不修改。所有写操作同事务写 `ai_image_model_config_audit`，并用 `revision` 乐观并发。
+- 被已发布未撤销 `size-mode-v1` 发布引用的路由：更换 Key 必须同事务同步 `ai_image_model_release_route.secret_version_hash`；地址、路径、供应商模型和禁用返回 409 `MODEL_ROUTE_LOCKED_BY_RELEASE`。
+- 路由地址经 `AiImageRouteEndpointPolicy` 校验：https、无凭据/查询/片段、不解析到私网/回环/链路本地；例外只能通过部署配置 `AiImageModelAdmin.AllowPrivateNetworkHosts`。测试连接 HttpClient 在连接时复检地址且不跟随重定向；生图调用 HttpClient 尚未接入连接时复检。
+- 迁移为 `docs/migrations/20261122-add-ai-model-admin.sql`，已同步 `jokester.admin.sql`；必须先迁移再部署。
 
 ## Nano Banana2 Image API Contract
 

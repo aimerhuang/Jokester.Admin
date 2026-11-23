@@ -279,7 +279,8 @@ public sealed class NanoBananaImageService(
                     null,
                     ex is AppException ? ex.Message : "Nano Banana2 task admission failed",
                     0,
-                    CancellationToken.None);
+                    CancellationToken.None,
+                    modelSideFailure: false);
                 if (settlement.Transitioned)
                 {
                     await admissionService.CompleteAsync(entity, 0, settlement.RefundedPoints);

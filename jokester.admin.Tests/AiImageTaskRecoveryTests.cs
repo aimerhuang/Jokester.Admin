@@ -286,6 +286,8 @@ public sealed class AiImageTaskRecoveryTests
                     failure_code TEXT NULL,
                     failure_stage TEXT NULL,
                     retryable INTEGER NULL,
+                    health_model_code TEXT NULL,
+                    health_sample INTEGER NULL,
                     claim_epoch INTEGER NOT NULL DEFAULT 0,
                     claim_token_hash TEXT NULL,
                     lease_expires_at TEXT NULL,

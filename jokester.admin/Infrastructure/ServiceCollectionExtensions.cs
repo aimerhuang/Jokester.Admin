@@ -101,6 +101,27 @@ public static class ServiceCollectionExtensions
                     && options.MaxDocumentBytes is >= 16_384 and <= 8_388_608,
                 "AiCanvas values are outside the supported safety bounds.")
             .ValidateOnStart();
+        services.AddOptions<AiImageModelStatusOptions>()
+            .Bind(configuration.GetSection(AiImageModelStatusOptions.SectionName))
+            .Validate(
+                options => options.SampleLimit is >= 1 and <= 500
+                    && options.WindowHours is >= 1 and <= 720
+                    && options.MinSampleCount >= 1
+                    && options.MinSampleCount <= options.SampleLimit
+                    && options.DegradedThresholdPercent is >= 0 and <= 100
+                    && options.NormalThresholdPercent is >= 0 and <= 100
+                    && options.DegradedThresholdPercent <= options.NormalThresholdPercent
+                    && options.RefreshSeconds is >= 5 and <= 3600,
+                "AiImageModelStatus values are outside the supported bounds.")
+            .ValidateOnStart();
+        services.AddOptions<AiImageModelAdminOptions>()
+            .Bind(configuration.GetSection(AiImageModelAdminOptions.SectionName))
+            .Validate(
+                options => options.AllowedHosts.All(host => !string.IsNullOrWhiteSpace(host))
+                    && options.AllowPrivateNetworkHosts.All(host => !string.IsNullOrWhiteSpace(host))
+                    && options.ProbeTimeoutSeconds is >= 1 and <= 60,
+                "AiImageModelAdmin values are outside the supported bounds.")
+            .ValidateOnStart();
         services.AddOptions<MobileConfigurationOptions>()
             .Bind(configuration.GetSection(MobileConfigurationOptions.SectionName))
             .Validate(

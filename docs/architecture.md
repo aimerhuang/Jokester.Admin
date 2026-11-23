@@ -30,6 +30,12 @@ Refresh Token 以 SHA-256 哈希作为 Redis 定位键，明文只返回给客�
 
 移动端错误响应使用独立 `ApiErrorResponse`，`code` 是稳定字符串而非成功响应的数值 `0`。Swagger Operation Filter 为移动端操作统一声明错误 Schema；业务时间在 DTO 边界转换为 UTC，旧积分/充值表的本地时间存储约定不被业务重构破坏。
 
+## 用户管理
+
+`AdminUsersController` 将 `/api/admin/users` 请求交给 `UserAdminService`。列表批量读取当前页有效月卡，详情通过 `IPointService` 复用本人余额查询的行锁、过期结算和批次汇总。汇总和流水以历史账本的本地时间筛选，响应转换为 UTC。
+
+`UserStatusTransition` 在写事务中锁定操作者和目标用户。新接口、旧状态接口和旧用户编辑接口的状态变化共用保护规则和审计写入；旧用户编辑接口也不能取消其他超管的超管标记。提交后撤销 Refresh Token 并清理权限缓存。注销清理事务同时抹除目标用户的审计原因。
+
 ## iOS 合规与 StoreKit 数据流
 
 相关表：
@@ -234,9 +240,10 @@ Provider 租约前按最新快照复检。MySQL 保存权威规则，进程内�
 
 ### 后台接口
 
-- `GET/POST/PUT/DELETE /api/users`
-- `GET /api/users/{id}/menus/tree`
-- `PUT /api/users/{id}/menus`
+- `GET/POST/PUT/DELETE /api/users`（仅超级管理员）
+- `GET /api/users/{id}/menus/tree`（仅超级管理员）
+- `PUT /api/users/{id}/menus`（仅超级管理员）
+- `GET /api/users/{id}/point-details`、`PUT /api/users/{id}/nickname`、`PUT /api/users/{id}/password`、`POST /api/users/{id}/avatar`、`PUT /api/users/{id}/signature`（本人或超级管理员，其他用户 404）
 - `GET/POST/PUT/DELETE /api/roles`
 - `GET/POST/PUT/DELETE /api/sites`
 - `GET/POST/PUT/DELETE /api/menus`

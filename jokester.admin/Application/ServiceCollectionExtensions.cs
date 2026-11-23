@@ -22,6 +22,8 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IAiCanvasService, AiCanvasService>();
         services.AddHostedService<AccountDeletionWorker>();
         services.AddHttpClient<IEmailValidationService, EmailValidationService>();
+        services.AddScoped<UserStatusTransition>();
+        services.AddScoped<IUserAdminService, UserAdminService>();
         services.AddScoped<IUserService, UserService>();
         services.AddScoped<IRoleService, RoleService>();
         services.AddScoped<ISiteService, SiteService>();
@@ -98,6 +100,14 @@ public static class ServiceCollectionExtensions
             client.Timeout = TimeSpan.FromMinutes(5);
         });
         services.AddScoped<IAiImageModelConfigService, AiImageModelConfigService>();
+        services.AddSingleton<IHostAddressResolver, DnsHostAddressResolver>();
+        services.AddSingleton<IAiImageModelStatusService, AiImageModelStatusService>();
+        services.AddHostedService<AiImageModelStatusWorker>();
+        services.AddScoped<IAiImageModelRouteAdminService, AiImageModelRouteAdminService>();
+        services.AddHttpClient(AiImageModelRouteAdminService.ProbeHttpClientName)
+            .ConfigurePrimaryHttpMessageHandler(serviceProvider => AiImageRouteEndpointPolicy.CreateGuardedHandler(
+                serviceProvider.GetRequiredService<IOptions<AiImageModelAdminOptions>>().Value,
+                serviceProvider.GetRequiredService<IHostAddressResolver>()));
         services.AddScoped<IAiImageCatalogService, AiImageCatalogService>();
         services.AddScoped<IAiSizeModeRolloutPolicy, AiSizeModeRolloutPolicy>();
         services.AddScoped<IAiPromptSensitiveWordService, AiPromptSensitiveWordService>();

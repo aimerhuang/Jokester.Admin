@@ -3,6 +3,11 @@ using jokester.admin.Application.DTOs.Points;
 using jokester.admin.Application.Services;
 using jokester.admin.Common;
 using jokester.admin.Domain.Entities;
+using jokester.admin.Application.DTOs.AiImages;
+using jokester.admin.Infrastructure;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Moq;
 using SqlSugar;
 
@@ -758,6 +763,119 @@ public sealed class PointServiceBillingTests
         CreatedAt = createdAt
     };
 
+    [Theory]
+    [InlineData(1, true, 1)]
+    [InlineData(2, true, 2)]
+    [InlineData(2, false, null)]
+    public async Task SettleImageTaskAsync_RecordsModelHealthSampleForLegacyTask(
+        int finalStatus,
+        bool modelSideFailure,
+        int? expectedSample)
+    {
+        using var context = new TestContext(pointBalance: 1_000);
+        var reservation = await context.Service.ReserveImageTaskAsync(
+            CreateTask(pointCost: 100, key: $"health-{finalStatus}-{modelSideFailure}"),
+            "gpt-image-2",
+            "1k",
+            "med",
+            default);
+
+        await context.Service.SettleImageTaskAsync(
+            reservation.TaskId,
+            finalStatus,
+            finalStatus == 1 ? "[\"/api/media/ai/1/a.png\"]" : null,
+            finalStatus == 1 ? null : "failed",
+            finalStatus == 1 ? 1 : 0,
+            default,
+            modelSideFailure);
+
+        var task = context.Db.Queryable<AiImageTaskEntity>().Single(x => x.Id == reservation.TaskId);
+        Assert.Equal(expectedSample, task.HealthSample);
+        // Legacy tasks keep model_code empty and store the model code in model_name.
+        Assert.Null(task.ModelCode);
+        Assert.Equal(expectedSample is null ? null : "gpt-image-2", task.HealthModelCode);
+    }
+
+    [Theory]
+    [InlineData("provider", 2)]
+    [InlineData("output", 2)]
+    [InlineData("preflight", null)]
+    [InlineData("settlement", null)]
+    public async Task SettleVersionedImageTaskAsync_CountsOnlyModelSideStages(string failureStage, int? expectedSample)
+    {
+        using var context = new TestContext(pointBalance: 1_000);
+        var task = CreateTask(pointCost: 100, key: $"versioned-health-{failureStage}");
+        task.ModelCode = "GPT-Image-2.6-Flare";
+        task.ModelName = "gpt-image-2.6-flare";
+        var reservation = await context.Service.ReserveImageTaskAsync(task, "gpt-image-2", "1k", "med", default);
+        context.Db.Updateable<AiImageTaskEntity>()
+            .SetColumns(x => new AiImageTaskEntity { Status = 3, ClaimTokenHash = "claim-hash" })
+            .Where(x => x.Id == reservation.TaskId)
+            .ExecuteCommand();
+
+        await context.Service.SettleVersionedImageTaskAsync(
+            reservation.TaskId,
+            2,
+            new VersionedImageTaskSettlement(
+                null, null, null, null, null,
+                MachineErrorCodes.ProviderUnavailable,
+                failureStage,
+                true,
+                0,
+                "claim-hash",
+                null,
+                "failed"),
+            "failed",
+            0,
+            default);
+
+        var settled = context.Db.Queryable<AiImageTaskEntity>().Single(x => x.Id == reservation.TaskId);
+        Assert.Equal(expectedSample, settled.HealthSample);
+        Assert.Equal(expectedSample is null ? null : "gpt-image-2.6-flare", settled.HealthModelCode);
+    }
+
+    [Theory]
+    [InlineData(true, false, false)] // versioned queue: fail during account preflight
+    [InlineData(false, false, false)] // legacy queue: provider succeeds after disable
+    [InlineData(false, true, false)] // legacy queue: failed provider call is refunded
+    [InlineData(false, false, true)] // disable after provider admission
+    public async Task DisabledAccount_QueuedAndInFlightWorkSettlesOnce(bool versioned, bool providerFails, bool disableInFlight)
+    {
+        using var context = new TestContext(pointBalance: 1000);
+        var reservation = await context.Service.ReserveImageTaskAsync(CreateTask(100, "disable"), "gpt-image-2", "1k", "med", default);
+        if (versioned) context.Db.Ado.ExecuteCommand("UPDATE ai_image_task SET size_contract_version='size-mode-v1'");
+        void Disable() => context.Db.Ado.ExecuteCommand("UPDATE sys_user SET status=0 WHERE id=1");
+        if (!disableInFlight) Disable();
+        var imageService = new Mock<IAiImageService>();
+        imageService.Setup(x => x.GenerateFromResolvedAsync(It.IsAny<string>(), It.IsAny<string>(),
+            It.IsAny<ResolveAiImageParametersResponse>(), It.IsAny<IReadOnlyList<string>>(), null, UserId, It.IsAny<CancellationToken>()))
+            .Returns(() => {
+                if (disableInFlight) Disable();
+                if (providerFails) throw new HttpRequestException("test failure");
+                return Task.FromResult(new GenerateAiImageResponse { Url = "/api/media/ai/1/result.png" });
+            });
+        using var services = new ServiceCollection().AddSingleton(imageService.Object).BuildServiceProvider();
+        var gate = new Mock<IAiImageProviderGate>();
+        gate.Setup(x => x.AcquireAsync(It.IsAny<CancellationToken>())).ReturnsAsync(Mock.Of<IAiImageProviderLease>());
+        var models = new Mock<IAiImageModelConfigService>();
+        models.Setup(x => x.ResolveAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new ResolvedAiImageModelConfig { ProviderProtocol = "openai-image", ConsentProviderCode = "openai" });
+        var worker = new AiImageTaskProcessor(context.Db, services.GetRequiredService<IServiceScopeFactory>(), context.Service,
+            Mock.Of<IAiImageAdmissionService>(), gate.Object, Mock.Of<IAiPromptFilter>(), models.Object,
+            Mock.Of<IAiImageCatalogService>(), Mock.Of<IUserConsentService>(), Options.Create(new AiImageSizeModeOptions()),
+            NullLogger<AiImageTaskProcessor>.Instance);
+        await worker.ProcessAsync(reservation.TaskId, default);
+        await worker.ProcessAsync(reservation.TaskId, default);
+        var task = context.Db.Queryable<AiImageTaskEntity>().Single();
+        var failed = versioned || providerFails;
+        Assert.Equal(failed ? 2 : 1, task.Status);
+        Assert.Equal(failed ? 1000 : 900, context.GetUser().PointBalance);
+        Assert.Equal(failed ? 1 : 0, context.GetDetails().Count(x => x.Source == "image_refund"));
+        Assert.Equal(versioned ? MachineErrorCodes.AccountUnavailable : null, task.FailureCode);
+        Assert.Equal(versioned ? null : failed ? 2 : 1, task.HealthSample);
+        gate.Verify(x => x.AcquireAsync(It.IsAny<CancellationToken>()), versioned ? Times.Never() : Times.Once());
+    }
+
     private static AiImageTaskEntity CreateTask(int pointCost, string key) => new()
     {
         SiteId = 1,
@@ -947,6 +1065,8 @@ public sealed class PointServiceBillingTests
                     failure_code TEXT NULL,
                     failure_stage TEXT NULL,
                     retryable INTEGER NULL,
+                    health_model_code TEXT NULL,
+                    health_sample INTEGER NULL,
                     claim_epoch INTEGER NOT NULL DEFAULT 0,
                     claim_token_hash TEXT NULL,
                     lease_expires_at TEXT NULL,

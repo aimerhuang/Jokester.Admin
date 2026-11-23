@@ -188,6 +188,25 @@ public sealed class SecurityRateLimitMiddlewareTests
         Assert.Single(counts);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AdminUserStatusWrites_LimitBothUserAndIp(bool sameUser)
+    {
+        var redis = CreateCountingDatabase(new());
+        var connection = new Mock<IConnectionMultiplexer>();
+        connection.Setup(x => x.GetDatabase(It.IsAny<int>(), It.IsAny<object>())).Returns(redis.Object);
+        var middleware = new SecurityRateLimitMiddleware(_ => Task.CompletedTask, NullLogger<SecurityRateLimitMiddleware>.Instance);
+        for (var i = 1; i <= 21; i++)
+        {
+            var ctx = CreateUploadContext("/api/admin/users/2/status", sameUser ? 1 : i, 10);
+            ctx.Request.Method = HttpMethods.Put;
+            if (sameUser) ctx.Connection.RemoteIpAddress = IPAddress.Parse($"192.0.2.{i}");
+            await middleware.InvokeAsync(ctx, connection.Object);
+            Assert.Equal(i <= 20 ? 200 : 429, ctx.Response.StatusCode);
+        }
+    }
+
     private static DefaultHttpContext CreateEmailCodeContext(
         string propertyName,
         string email,

@@ -67,7 +67,7 @@ public sealed class AuthService(
 
         if (user.Status != 1)
         {
-            throw new AppException(ErrorCodes.InvalidCredentials, "用户名或密码错误");
+            throw new AppException(ErrorCodes.AccountDisabled, "账号已被禁用，请联系客服");
         }
 
         await ResetLoginFailuresAsync(failKey, lockKey, cancellationToken);
