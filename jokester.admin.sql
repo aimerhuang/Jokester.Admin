@@ -497,8 +497,11 @@ CREATE TABLE `ai_image_model_config` (
   `request_format` VARCHAR(32) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL DEFAULT 'openai-size' COMMENT '请求格式：openai-size按size指定尺寸 prompt-aspect-ratio在提示词追加宽高比',
   `sort` INT NOT NULL DEFAULT 0 COMMENT '排序',
   `status` TINYINT NOT NULL DEFAULT 1 COMMENT '状态：1启用 0禁用',
+  `revision` INT NOT NULL DEFAULT 0 COMMENT '后台乐观并发版本',
+  `api_key_updated_at` DATETIME DEFAULT NULL COMMENT 'API Key最近更换时间(UTC)',
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   `updated_at` DATETIME DEFAULT NULL COMMENT '更新时间',
+  `updated_by` BIGINT DEFAULT NULL COMMENT '最近修改人用户ID',
   `is_deleted` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '逻辑删除：1已删除 0未删除',
   PRIMARY KEY (`id`),
   CONSTRAINT `chk_ai_image_model_config_route_role` CHECK (`route_role` IN ('primary', 'fallback')),
@@ -506,6 +509,26 @@ CREATE TABLE `ai_image_model_config` (
   UNIQUE KEY `uk_ai_image_model_config_code_resolution_role` (`model_code`, `resolution_code`, `route_role`),
   KEY `idx_ai_image_model_config_resolve` (`model_code`, `resolution_code`, `status`, `is_deleted`, `route_role`, `sort`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI生图模型配置表';
+
+CREATE TABLE `ai_image_model_config_audit` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `config_id` BIGINT NOT NULL,
+  `model_code` VARCHAR(100) NOT NULL,
+  `resolution_code` VARCHAR(50) NOT NULL DEFAULT '',
+  `route_role` VARCHAR(16) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `action` VARCHAR(16) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `changed_fields` VARCHAR(500) NOT NULL DEFAULT '',
+  `before_json` TEXT DEFAULT NULL,
+  `after_json` TEXT DEFAULT NULL,
+  `operator_user_id` BIGINT NOT NULL,
+  `operator_ip` VARCHAR(50) DEFAULT NULL,
+  `created_at` DATETIME NOT NULL COMMENT 'UTC',
+  PRIMARY KEY (`id`),
+  KEY `idx_ai_image_model_config_audit_config` (`config_id`, `id`),
+  KEY `idx_ai_image_model_config_audit_created` (`created_at`),
+  CONSTRAINT `fk_ai_image_model_config_audit_config` FOREIGN KEY (`config_id`) REFERENCES `ai_image_model_config` (`id`),
+  CONSTRAINT `chk_ai_image_model_config_audit_action` CHECK (`action` IN ('create', 'update', 'enable', 'disable', 'rotate_key'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI生图模型路由变更审计(不含明文Key)';
 
 CREATE TABLE `ai_image_model_release` (
   `id` BIGINT NOT NULL AUTO_INCREMENT,
@@ -761,6 +784,8 @@ CREATE TABLE `ai_image_task` (
   `failure_code` VARCHAR(64) CHARACTER SET ascii COLLATE ascii_general_ci DEFAULT NULL COMMENT '稳定失败机器码',
   `failure_stage` VARCHAR(16) CHARACTER SET ascii COLLATE ascii_general_ci DEFAULT NULL COMMENT '失败阶段',
   `retryable` TINYINT(1) DEFAULT NULL COMMENT '是否可用新key重试',
+  `health_model_code` VARCHAR(100) DEFAULT NULL COMMENT '模型状态统计用的归一化模型编码；不计入样本为空',
+  `health_sample` TINYINT DEFAULT NULL COMMENT '模型状态样本：1模型侧成功 2模型侧失败；不计入为空',
   `claim_epoch` BIGINT NOT NULL DEFAULT 0 COMMENT '执行claim代次',
   `claim_token_hash` CHAR(64) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL COMMENT '执行claim token哈希',
   `lease_expires_at` DATETIME DEFAULT NULL COMMENT '执行claim到期时间',
@@ -778,6 +803,7 @@ CREATE TABLE `ai_image_task` (
   KEY `idx_ai_image_task_claim` (`status`,`billing_status`,`lease_expires_at`),
   KEY `idx_ai_image_task_source_prompt` (`source_prompt_id`),
   KEY `idx_ai_image_task_created_at` (`created_at`),
+  KEY `idx_ai_image_task_health` (`health_model_code`, `completed_at`),
   CONSTRAINT `fk_ai_image_task_site` FOREIGN KEY (`site_id`) REFERENCES `sys_site` (`id`),
   CONSTRAINT `fk_ai_image_task_user` FOREIGN KEY (`user_id`) REFERENCES `sys_user` (`id`),
   CONSTRAINT `fk_ai_image_task_source_prompt` FOREIGN KEY (`source_prompt_id`) REFERENCES `prompt_library_item` (`id`),

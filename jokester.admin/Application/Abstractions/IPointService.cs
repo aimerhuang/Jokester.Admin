@@ -36,13 +36,18 @@ public interface IPointService
         long priceId,
         CancellationToken cancellationToken);
 
+    /// <remarks>
+    /// <c>modelSideFailure</c>: for a failed task, whether the failure is attributed to the model and counts toward
+    /// the public model status. Pass false for admission, queue, prompt-filter and other user- or platform-side failures.
+    /// </remarks>
     Task<ImageTaskSettlementResult> SettleImageTaskAsync(
         long taskId,
         int finalStatus,
         string? resultUrls,
         string? errorMessage,
         int completedImageCount,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        bool modelSideFailure = true);
 
     Task<ImageTaskSettlementResult> SettleVersionedImageTaskAsync(
         long taskId,

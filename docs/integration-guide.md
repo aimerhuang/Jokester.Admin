@@ -565,3 +565,68 @@ Content-Type: application/json
 - 响应结构与 `POST /api/ai/images/upload` 相同（`assetId`、`url`、`thumbnailUrl`、`width`、`height`、`mimeType` 等）。同一 `taskId + resultOrdinal` 始终返回同一 `assetId`，删除后再次登记会恢复原 Asset。
 - 生成型 Asset（`asset_type=generated`）复用生图结果原文件，只额外生成缩略图；`DELETE /api/assets/{assetId}` 只删除记录和缩略图，不删除生图历史中的原图。
 - 按用户限流 60 次/分钟。
+
+## AI 模型状态与模型路由管理
+
+产品需求见 [ai-model-config-status-prd.md](./ai-model-config-status-prd.md)。响应时间均为 UTC。
+
+### 模型状态（所有登录用户）
+
+```http
+GET /api/ai/images/model-status
+Authorization: Bearer <accessToken>
+```
+
+只要求登录，不需要菜单权限。响应：
+
+```json
+{
+  "generatedAt": "2026-11-22T08:30:00Z",
+  "windowHours": 24,
+  "sampleLimit": 60,
+  "items": [
+    {
+      "modelCode": "gpt-image-2.6-flare",
+      "modelName": "GPT Image 2.6 Flare",
+      "state": "down",
+      "availability": 45,
+      "sampleCount": 11,
+      "fastestSuccessSeconds": 18,
+      "slowestSuccessSeconds": 66,
+      "recent": [1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 1],
+      "recentCompletedAt": ["2026-11-22T07:02:11Z"],
+      "lastSampleAt": "2026-11-22T08:21:40Z"
+    }
+  ]
+}
+```
+
+- `state`：`normal`（可用性 ≥ 90%）、`degraded`（70%–89%）、`down`（< 70%）、`unknown`（样本少于 5 条）。`unknown` 时 `availability`、`fastestSuccessSeconds`、`slowestSuccessSeconds` 为 `null`。状态文案由前端映射。
+- 样本为近 24 小时内最近 60 条终态任务；`recent` 与 `recentCompletedAt` 从旧到新、等长，`1` 成功、`0` 失败。耗时为提交到完成（含排队）。
+- 只统计模型侧结果：提示词拦截、授权缺失、素材无效、准入失败、未派发即过期等不计入。用户软删除任务不影响统计。
+- 模型范围与 `GET /api/ai/images/models` 的 legacy 列表一致（启用、有路由、有价格）。
+- 接口只读服务端快照（约 30 秒刷新），不会因频繁刷新放大数据库压力；快照延迟时仍返回旧数据，前端可据 `generatedAt` 提示“数据可能延迟”。限流：每用户每分钟 30 次。
+
+### 模型路由管理（超级管理员）
+
+```http
+GET  /api/ai/model-routes?keyword=&status=
+GET  /api/ai/model-routes/{id}
+POST /api/ai/model-routes
+PUT  /api/ai/model-routes/{id}
+PUT  /api/ai/model-routes/{id}/status
+POST /api/ai/model-routes/{id}/test
+GET  /api/ai/model-routes/audits?configId=&page=1&pageSize=50
+Authorization: Bearer <accessToken>
+```
+
+- 全部要求超级管理员；写操作在事务内复核当前用户仍为启用、未删除的超级管理员，否则 403。前端用登录资料的 `isSuperAdmin` 控制入口显示。
+- **API Key 只写不读**：响应只有 `apiKeySet`、`apiKeyMask`（如 `••••a1B2`）和 `apiKeyUpdatedAt`。新增时 `apiKey` 必填；编辑时留空表示不修改。提交后应清空输入框。
+- 列表返回按模型分组的 `[{ modelCode, modelName, state, missingPrimaryRoute, routes[] }]`；每条路由带 `revision`、`publishedCatalogVersions` 等字段。
+- 新增请求：`modelCode`（必须是已有模型）、`modelName`（可选，修改会同步到该模型所有路由）、`resolutionCode`（空为通用或已启用分辨率）、`routeRole`（`primary`/`fallback`）、`provider`（协议须与该模型已有路由一致）、`providerModel`、`baseUrl`、`apiKey`、`textToImagePath`、`imageToImagePath`、`requestFormat`、`sort`、`status`。`modelCode + resolutionCode + routeRole` 已存在（含已删除行）返回 409 `CONFLICT`。
+- 编辑请求：`revision`、`modelName`、`providerModel`、`baseUrl`、`apiKey`、两个路径、`requestFormat`、`sort`。`revision` 过期返回 409 `MODEL_ROUTE_REVISION_CONFLICT`。保存后对新的 Provider 调用（含已排队任务）立即生效。
+- 启停请求：`{ "revision": 3, "status": 0, "confirmOffline": false }`。禁用会让某个有价格的分辨率失去所有启用路由时返回 409 `MODEL_ROUTE_OFFLINE_CONFIRM_REQUIRED`（`details.resolutionCodes`），带 `confirmOffline=true` 重试即可。
+- 被已发布 `size-mode-v1` 发布引用的路由（`publishedCatalogVersions` 非空）：允许更换 Key（后端同事务同步发布快照的密钥哈希）、修改请求格式/排序/展示名；修改地址、路径、供应商模型或禁用返回 409 `MODEL_ROUTE_LOCKED_BY_RELEASE`。
+- `baseUrl` 必须是不带凭据、查询串和片段的 https 绝对地址，且解析结果不能是回环、私网、链路本地等地址；违反返回 400 `VALIDATION_ERROR`。部署可配置 `AiImageModelAdmin.AllowedHosts`（白名单）和 `AllowPrivateNetworkHosts`（允许 http 与内网的主机）。路径必须以 `/` 开头，不得含 `..`、`//`、`?`、`#`。
+- 测试连接 `POST /{id}/test` 请求 `GET {baseUrl}/models`（Bearer Key，10 秒超时，不跟随重定向），返回 `{ result, httpStatus, elapsedMilliseconds }`，`result` 为 `passed` / `auth_failed` / `unreachable`。不出图、不扣积分、不计入模型状态；部分中转站不实现该端点，`unreachable` 不等于不可用。
+- 限流：写接口每用户、每 IP 各 20 次/分钟；测试连接各 10 次/分钟。

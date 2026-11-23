@@ -140,6 +140,12 @@ public sealed class AiImageTaskEntity
     [SugarColumn(ColumnName = "retryable")]
     public bool? Retryable { get; set; }
 
+    [SugarColumn(ColumnName = "health_model_code")]
+    public string? HealthModelCode { get; set; }
+
+    [SugarColumn(ColumnName = "health_sample")]
+    public int? HealthSample { get; set; }
+
     [SugarColumn(ColumnName = "claim_epoch")]
     public long ClaimEpoch { get; set; }
 

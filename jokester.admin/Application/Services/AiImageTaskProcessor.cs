@@ -772,7 +772,8 @@ public sealed class AiImageTaskProcessor(
             mergedResults.Count == 0 ? latestTask?.ResultUrls : JsonSerializer.Serialize(mergedResults),
             message,
             mergedResults.Count,
-            cancellationToken);
+            cancellationToken,
+            AiImageModelHealth.IsModelSideFailure(ex));
         if (settlement.Transitioned)
         {
             await admissionService.CompleteAsync(task, settlement.CompletedImageCount, settlement.RefundedPoints);

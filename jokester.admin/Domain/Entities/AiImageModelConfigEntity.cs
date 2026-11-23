@@ -47,11 +47,20 @@ public sealed class AiImageModelConfigEntity
     [SugarColumn(ColumnName = "status")]
     public int Status { get; set; } = 1;
 
+    [SugarColumn(ColumnName = "revision")]
+    public int Revision { get; set; }
+
+    [SugarColumn(ColumnName = "api_key_updated_at")]
+    public DateTime? ApiKeyUpdatedAt { get; set; }
+
     [SugarColumn(ColumnName = "created_at")]
     public DateTime CreatedAt { get; set; }
 
     [SugarColumn(ColumnName = "updated_at")]
     public DateTime? UpdatedAt { get; set; }
+
+    [SugarColumn(ColumnName = "updated_by")]
+    public long? UpdatedBy { get; set; }
 
     [SugarColumn(ColumnName = "is_deleted")]
     public bool IsDeleted { get; set; }

@@ -177,6 +177,30 @@ public sealed class SecurityRateLimitMiddleware(RequestDelegate next, ILogger<Se
                 new("blog-upload-user-bytes-1d", RateLimitPartition.User, MaxBlogUploadBytesPerDay, 86400, Weight: uploadWeight)
             ];
         }
+        if (HttpMethods.IsPost(method) && IsModelRouteProbePath(path))
+        {
+            return
+            [
+                new("model-route-test-user-1m", RateLimitPartition.User, 10, 60),
+                new("model-route-test-ip-1m", RateLimitPartition.Ip, 10, 60)
+            ];
+        }
+        if (!HttpMethods.IsGet(method) && !HttpMethods.IsHead(method) && path.StartsWithSegments("/api/ai/model-routes"))
+        {
+            return
+            [
+                new("model-route-write-user-1m", RateLimitPartition.User, 20, 60),
+                new("model-route-write-ip-1m", RateLimitPartition.Ip, 20, 60)
+            ];
+        }
+        if (HttpMethods.IsGet(method) && path.Equals("/api/ai/images/model-status"))
+        {
+            return
+            [
+                new("model-status-user-1m", RateLimitPartition.User, 30, 60),
+                new("api-read-ip-1m", RateLimitPartition.Ip, 120, 60)
+            ];
+        }
         if (HttpMethods.IsPost(method)
             && path.StartsWithSegments("/api/ai/images")
             && !path.Equals("/api/ai/images/parameters/resolve"))
@@ -197,6 +221,15 @@ public sealed class SecurityRateLimitMiddleware(RequestDelegate next, ILogger<Se
         }
 
         return [];
+    }
+
+    private static bool IsModelRouteProbePath(PathString path)
+    {
+        var segments = path.Value?.Trim('/').Split('/') ?? [];
+        return segments.Length == 5
+            && segments[0] == "api" && segments[1] == "ai" && segments[2] == "model-routes"
+            && long.TryParse(segments[3], out _)
+            && segments[4] == "test";
     }
 
     private static string ResolveIdentity(HttpContext context, RateLimitPartition partition)

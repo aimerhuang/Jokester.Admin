@@ -125,7 +125,8 @@ public sealed class AiImageTaskRecoveryWorker(
                     task.ResultUrls,
                     "AI image task expired before a worker could start it.",
                     DeserializeImageUrls(task.ResultUrls).Count,
-                    cancellationToken);
+                    cancellationToken,
+                    modelSideFailure: false);
                 if (settlement.Transitioned)
                 {
                     await admissionService.CompleteAsync(task, settlement.CompletedImageCount, settlement.RefundedPoints);

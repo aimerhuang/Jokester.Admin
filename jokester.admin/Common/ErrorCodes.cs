@@ -56,6 +56,9 @@ public static class MachineErrorCodes
     public const string CanvasRevisionConflict = "CANVAS_REVISION_CONFLICT";
     public const string CanvasDocumentTooLarge = "CANVAS_DOCUMENT_TOO_LARGE";
     public const string CanvasLimitExceeded = "CANVAS_LIMIT_EXCEEDED";
+    public const string ModelRouteRevisionConflict = "MODEL_ROUTE_REVISION_CONFLICT";
+    public const string ModelRouteLockedByRelease = "MODEL_ROUTE_LOCKED_BY_RELEASE";
+    public const string ModelRouteOfflineConfirmRequired = "MODEL_ROUTE_OFFLINE_CONFIRM_REQUIRED";
     public const string ReauthenticationRequired = "REAUTH_REQUIRED";
     public const string ServiceUnavailable = "SERVICE_UNAVAILABLE";
     public const string ServerError = "SERVER_ERROR";

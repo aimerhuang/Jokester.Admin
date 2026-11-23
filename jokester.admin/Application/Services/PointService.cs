@@ -578,7 +578,8 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
         string? resultUrls,
         string? errorMessage,
         int completedImageCount,
-        CancellationToken cancellationToken) =>
+        CancellationToken cancellationToken,
+        bool modelSideFailure = true) =>
         await SettleImageTaskCoreAsync(
             taskId,
             finalStatus,
@@ -586,6 +587,7 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
             errorMessage,
             completedImageCount,
             null,
+            AiImageModelHealth.ForLegacy(finalStatus, modelSideFailure),
             cancellationToken);
 
     public async Task<ImageTaskSettlementResult> SettleVersionedImageTaskAsync(
@@ -602,6 +604,7 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
             errorMessage,
             completedImageCount,
             settlement,
+            AiImageModelHealth.ForVersioned(finalStatus, settlement.FailureStage),
             cancellationToken);
 
     private async Task<ImageTaskSettlementResult> SettleImageTaskCoreAsync(
@@ -611,6 +614,7 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
         string? errorMessage,
         int completedImageCount,
         VersionedImageTaskSettlement? versioned,
+        int? healthSample,
         CancellationToken cancellationToken)
     {
         if (finalStatus is not 1 and not 2)
@@ -737,10 +741,16 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
                 cancellationToken);
 
             var now = HongKongNow();
+            var healthModelCode = healthSample.HasValue
+                ? AiImageModelConfigService.NormalizeModelCode(
+                    string.IsNullOrWhiteSpace(task.ModelCode) ? task.ModelName : task.ModelCode)
+                : null;
             var affected = await db.Updateable<AiImageTaskEntity>()
                 .SetColumns(x => new AiImageTaskEntity
                 {
                     Status = finalStatus,
+                    HealthModelCode = healthModelCode,
+                    HealthSample = healthSample,
                     BillingStatus = billingStatus,
                     CompletedImageCount = normalizedCompletedCount,
                     ResultUrls = resultUrls,

@@ -1124,7 +1124,8 @@ public sealed class AiImageService(
                         null,
                         ex is AppException ? ex.Message : "AI image task admission failed",
                         0,
-                        CancellationToken.None);
+                        CancellationToken.None,
+                        modelSideFailure: false);
                     if (settlement.Transitioned)
                     {
                         await admissionService.CompleteAsync(entity, 0, settlement.RefundedPoints);
@@ -1327,7 +1328,8 @@ public sealed class AiImageService(
             resultUrls.Count == 0 ? task.ResultUrls : JsonSerializer.Serialize(resultUrls),
             message,
             resultUrls.Count,
-            cancellationToken);
+            cancellationToken,
+            modelSideFailure: task.Status == 3);
         if (settlement.Transitioned)
         {
             await admissionService.CompleteAsync(task, settlement.CompletedImageCount, settlement.RefundedPoints);

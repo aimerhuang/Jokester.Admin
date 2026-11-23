@@ -174,6 +174,9 @@ public sealed class AiImageCatalogReleaseConfigurationTests
                     request_format TEXT NOT NULL DEFAULT 'openai-size',
                     sort INTEGER NOT NULL,
                     status INTEGER NOT NULL,
+                    revision INTEGER NOT NULL DEFAULT 0,
+                    api_key_updated_at TEXT NULL,
+                    updated_by INTEGER NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NULL,
                     is_deleted INTEGER NOT NULL

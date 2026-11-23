@@ -142,6 +142,33 @@ docs/migrations/20260820-add-user-membership-entitlements.sql
 
 充值接口和安全约束见 [point-recharge.md](./point-recharge.md)。
 
+## AI 模型路由后台与模型状态上线检查
+
+已有数据库先执行迁移，再部署 API：
+
+```text
+docs/migrations/20261122-add-ai-model-admin.sql
+```
+
+该迁移给 `ai_image_model_config` 增加 `revision`、`api_key_updated_at`、`updated_by`，给 `ai_image_task` 增加 `health_model_code`、`health_sample` 和索引 `idx_ai_image_task_health`（在线 DDL），创建 `ai_image_model_config_audit`，并回填最近 24 小时的终态任务样本。新版 API 实体会读取这些列，**必须先迁移再部署**。`jokester.admin.sql` 已同步，新库不要重复执行。
+
+上线前检查：
+
+- 核对存量路由地址：后台再次保存、启用或测试连接时，`base_url` 必须是 https 且解析到公网地址。若中转服务在同一 Docker 网络或内网，或仍是 http，先在 `docker/api.env` 配置 `AiImageModelAdmin__AllowPrivateNetworkHosts__0=<host>`；需要严格白名单时配置 `AiImageModelAdmin__AllowedHosts__0=<host>`。
+- 可选配置 `AiImageModelStatus.SampleLimit`（默认 60）、`WindowHours`（24）、`MinSampleCount`（5）、`NormalThresholdPercent`（90）、`DegradedThresholdPercent`（70）、`RefreshSeconds`（30）；超出安全范围时应用启动失败。
+
+Key 轮换与切换中转站优先在后台“模型配置”操作，不再手写 SQL：
+
+- 更换 Key：编辑路由只填新 Key 保存，下一次 Provider 调用即生效；被 `size-mode-v1` 发布引用的路由会同步发布快照的 `secret_version_hash`，不会出现 “secret version is unavailable” 503。
+- 切换地址：编辑地址保存；被发布引用的路由会返回 `MODEL_ROUTE_LOCKED_BY_RELEASE`，此时仍需用 `--configure-ai-image-catalog` 发布新版本。
+- 每次变更都写入 `ai_image_model_config_audit`（只含掩码，不含明文 Key），可在后台“变更记录”或直接查询该表追溯。
+
+模型状态排查：
+
+- 状态页数据来自 `ai_image_task.health_model_code` / `health_sample`，由任务结算写入；`health_sample IS NULL` 表示该任务不计入（用户侧或平台侧失败）。
+- 快照由 `AiImageModelStatusWorker` 约 30 秒刷新一次并写入 Redis 键 `<InstanceName>ai-model-status:snapshot`（TTL 120 秒），多实例共享；Redis 不可用时各实例用进程内快照。
+- 迁移回填的历史失败无法区分模型侧与用户侧，首日状态可能偏低，24 小时后自然滑出时间窗。
+
 ## AI 无限画布上线检查
 
 已有数据库先停 API 写入，再执行：
@@ -356,7 +383,7 @@ GPT Image2 显式尺寸的上游 `size` 宽高都必须为 `16px` 倍数且不�
 - 该 `180` 秒只约束 Jokester 对主路由的等待，不能延长上游网关或中转服务自己的超时；如果上游在约 `90` 秒返回 `504` 或 `context canceled`，应调整上游网关超时，或使用后台任务接口并轮询结果
 - 禁用主路由且保持备用启用时，请求直接走备用；禁用备用时只请求主路由
 
-既有数据库先停 API/Worker 并执行 `docs/migrations/20260811-add-ai-image-route-role.sql`。迁移创建的 GPT 主路由是禁用占位，必须在目标数据库写入真实地址和 Key 后启用：
+既有数据库先停 API/Worker 并执行 `docs/migrations/20260811-add-ai-image-route-role.sql`。迁移创建的 GPT 主路由是禁用占位，必须在目标数据库写入真实地址和 Key 后启用（执行过 `20261122-add-ai-model-admin.sql` 后，也可以由超级管理员在后台“模型配置”中填写并启用，见下方“AI 模型路由后台与模型状态上线检查”）：
 
 ```sql
 UPDATE ai_image_model_config
