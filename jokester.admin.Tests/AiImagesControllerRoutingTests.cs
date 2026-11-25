@@ -3,12 +3,32 @@ using jokester.admin.Application.DTOs.AiImages;
 using jokester.admin.Application.DTOs.NanoBananaImages;
 using jokester.admin.Application.Services;
 using jokester.admin.Controllers;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
+using System.Text.Json;
 using Moq;
 
 namespace jokester.admin.Tests;
 
 public sealed class AiImagesControllerRoutingTests
 {
+    [Fact]
+    public async Task LegacyPricingKeepsArrayAndReturnsPrivateRevisionEvenWhenEmpty()
+    {
+        var images = new Mock<IAiImageService>();
+        images.Setup(x => x.GetPricingRevisionAsync(default)).ReturnsAsync(12);
+        images.Setup(x => x.GetPricingOptionsAsync(default)).ReturnsAsync(Array.Empty<AiImagePricingOptionDto>());
+        var controller = new AiImagesController(images.Object, Mock.Of<INanoBananaImageService>(),
+            Mock.Of<IAiImageModelConfigService>(), Mock.Of<IAiImageCatalogService>(), Mock.Of<IAiSizeModeRolloutPolicy>())
+        { ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() } };
+        var result = Assert.IsType<OkObjectResult>(await controller.GetPricingOptions(null, null, default));
+        var json = JsonSerializer.SerializeToElement(result.Value, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        Assert.Equal(12, json.GetProperty("pricingRevision").GetInt64());
+        Assert.Equal(0, json.GetProperty("data").GetArrayLength());
+        Assert.Equal("private, no-store", controller.Response.Headers.CacheControl.ToString());
+        Assert.Contains("Authorization", controller.Response.Headers.Vary.ToString());
+    }
+
     [Fact]
     public async Task Create_RoutesArbitraryModelCodeByConfiguredProviderProtocol()
     {
@@ -47,6 +67,9 @@ public sealed class AiImagesControllerRoutingTests
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(321L);
 
+        gptService.Setup(x => x.BuildCreateTasksResponseAsync(It.IsAny<IReadOnlyList<long>>(), "active", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new CreateAiImageTasksResponse { Id = 321 });
+
         var controller = new AiImagesController(
             gptService.Object,
             geminiService.Object,
@@ -58,6 +81,6 @@ public sealed class AiImagesControllerRoutingTests
 
         modelConfigService.VerifyAll();
         geminiService.VerifyAll();
-        gptService.VerifyNoOtherCalls();
+        gptService.VerifyAll();
     }
 }

@@ -272,19 +272,6 @@ seed_admin() {
     compose run --rm --no-TTY --env BootstrapAdmin__UserName --env BootstrapAdmin__Password api --seed-admin
 }
 
-configure_legal() {
-  local arguments=() line platform
-  [[ -f legal.env ]] || die "legal.env is missing. Copy legal.env.example to legal.env and fill in the approved values."
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    line="${line%$'\r'}"
-    [[ -z "$line" || "$line" == \#* || "$line" != *=* ]] && continue
-    arguments+=(--env "$line")
-  done <legal.env
-  for platform in web all; do
-    compose run --rm --no-TTY "${arguments[@]}" --env "LegalDocuments__Platform=$platform" api --configure-legal-documents
-  done
-}
-
 usage() {
   cat <<'EOF'
 Usage: ./jokester.sh <command> [arguments]
@@ -297,7 +284,6 @@ Usage: ./jokester.sh <command> [arguments]
   ps                            Show container status
   logs [service...]             Follow logs (default: api)
   seed-admin                    Create or reset a super admin (prompts; email accounts supported)
-  legal                         Configure legal documents from legal.env (web, then all)
   sql <file>                    Run a SQL file against the database, e.g. a docs/migrations script
   mysql                         Open a MySQL client
   backup [file]                 Dump the database (default: backups/jokester-<time>.sql, mode 600)
@@ -340,7 +326,6 @@ case "$command" in
     compose logs --follow --tail 200 "$@"
     ;;
   seed-admin) require_env_files; seed_admin ;;
-  legal) require_env_files; configure_legal ;;
   sql)
     [[ $# -eq 1 && -f "$1" ]] || die "usage: sql <file.sql>"
     compose exec -T mysql sh -c 'exec mysql --default-character-set=utf8mb4 --user=root --password="$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE"' <"$1"

@@ -22,21 +22,27 @@ public interface IPointService
         string modelCode,
         string resolutionCode,
         string qualityCode,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        int? expectedUnitPoints = null,
+        Func<int, Task>? adjustQuota = null);
 
     Task<ImageTaskBatchReservationResult> ReserveImageTasksAsync(
         IReadOnlyList<AiImageTaskEntity> tasks,
         string modelCode,
         string resolutionCode,
         string qualityCode,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        int? expectedUnitPoints = null,
+        Func<int, Task>? adjustQuota = null);
 
     Task<VersionedImageTaskBatchReservationResult> ReserveVersionedImageTasksAsync(
         AiImageRequestEntity request,
         IReadOnlyList<AiImageTaskEntity> tasks,
         IReadOnlyList<AiImageTaskInputEntity> inputs,
         long priceId,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        int? expectedUnitPoints = null,
+        Func<int, Task>? adjustQuota = null);
 
     /// <remarks>
     /// <c>modelSideFailure</c>: for a failed task, whether the failure is attributed to the model and counts toward
@@ -49,7 +55,8 @@ public interface IPointService
         string? errorMessage,
         int completedImageCount,
         CancellationToken cancellationToken,
-        bool modelSideFailure = true);
+        bool modelSideFailure = true,
+        GifTaskResult? gifResult = null);
 
     Task<ImageTaskSettlementResult> SettleVersionedImageTaskAsync(
         long taskId,

@@ -141,8 +141,10 @@ public sealed class PromptLibraryContractTests
             .Setup(x => x.GenerateAsync(gptGenerate, It.IsAny<CancellationToken>()))
             .ReturnsAsync(new GenerateAiImageResponse { SourcePromptId = SourcePromptId, Prompt = prompt });
         aiImageService
-            .Setup(x => x.CreateTasksAsync(gptCreate, It.IsAny<CancellationToken>()))
-            .ReturnsAsync([101L]);
+            .Setup(x => x.CreateTasksResponseAsync(gptCreate, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new CreateAiImageTasksResponse { Id = 101 });
+        aiImageService.Setup(x => x.BuildCreateTasksResponseAsync(It.IsAny<IReadOnlyList<long>>(), "active", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new CreateAiImageTasksResponse { Id = 102 });
         nanoBananaService
             .Setup(x => x.GenerateAsync(nanoGenerate, It.IsAny<CancellationToken>()))
             .ReturnsAsync(new GenerateNanoBananaImageResponse { SourcePromptId = SourcePromptId, Prompt = prompt });

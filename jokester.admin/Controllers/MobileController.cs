@@ -12,21 +12,15 @@ namespace jokester.admin.Controllers;
 [AllowAnonymous]
 [Route("api/mobile")]
 public sealed class MobileController(
-    ILegalDocumentService legalDocumentService,
     IOptions<MobileConfigurationOptions> mobileOptions,
     IOptions<AppleAppStoreOptions> appleOptions,
     IOptions<PromptLibraryOptions> promptLibraryOptions) : BaseApiController
 {
     [HttpGet("config")]
     [ProducesResponseType(typeof(ApiResponse<MobileConfigurationDto>), StatusCodes.Status200OK)]
-    public async Task<IActionResult> GetConfiguration(
-        [FromQuery] string? platform,
-        [FromQuery] string? appVersion,
-        [FromQuery] string? locale,
-        CancellationToken cancellationToken)
+    public IActionResult GetConfiguration([FromQuery] string? appVersion)
     {
         ValidateAppVersion(appVersion);
-        var legal = await legalDocumentService.GetCurrentAsync(platform, locale, cancellationToken);
         var options = mobileOptions.Value;
         return Success(new MobileConfigurationDto
         {
@@ -38,12 +32,6 @@ public sealed class MobileController(
                 AppleIap = options.Features.AppleIap && appleOptions.Value.Enabled,
                 AccountDeletion = options.Features.AccountDeletion,
                 PromptLibrary = options.Features.PromptLibrary && promptLibraryOptions.Value.Enabled
-            },
-            LegalDocumentVersions = new MobileLegalDocumentVersionsDto
-            {
-                Privacy = legal.PrivacyPolicy.Version,
-                Terms = legal.TermsOfService.Version,
-                AiProcessing = legal.AiProcessingNotice?.Version ?? string.Empty
             }
         });
     }

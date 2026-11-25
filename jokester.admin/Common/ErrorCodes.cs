@@ -39,7 +39,10 @@ public static class MachineErrorCodes
     public const string Conflict = "CONFLICT";
     public const string IdempotencyConflict = "IDEMPOTENCY_CONFLICT";
     public const string AutoSizeNotSupported = "AUTO_SIZE_NOT_SUPPORTED";
+    public const string GifNotSupported = "GIF_NOT_SUPPORTED";
     public const string InvalidSizeModeCombination = "INVALID_SIZE_MODE_COMBINATION";
+    public const string VipRequired = "VIP_REQUIRED";
+    public const string PriceChanged = "PRICE_CHANGED";
     public const string ImageCatalogChanged = "IMAGE_CATALOG_CHANGED";
     public const string ImagePriceNotConfigured = "IMAGE_PRICE_NOT_CONFIGURED";
     public const string LegacyIdempotencyUnverifiable = "LEGACY_IDEMPOTENCY_UNVERIFIABLE";

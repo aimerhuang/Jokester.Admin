@@ -59,6 +59,39 @@ public sealed class AiImageTaskEntity
     [SugarColumn(ColumnName = "output_size")]
     public string? OutputSize { get; set; }
 
+    [SugarColumn(ColumnName = "output_format")]
+    public string OutputFormat { get; set; } = "png";
+
+    [SugarColumn(ColumnName = "frame_count")]
+    public int? FrameCount { get; set; }
+
+    [SugarColumn(ColumnName = "frame_duration_ms")]
+    public int? FrameDurationMs { get; set; }
+
+    [SugarColumn(ColumnName = "gif_rate_snapshot")]
+    public string? GifRateSnapshot { get; set; }
+
+    [SugarColumn(ColumnName = "usage_input_tokens")]
+    public int? UsageInputTokens { get; set; }
+
+    [SugarColumn(ColumnName = "usage_text_input_tokens")]
+    public int? UsageTextInputTokens { get; set; }
+
+    [SugarColumn(ColumnName = "usage_image_input_tokens")]
+    public int? UsageImageInputTokens { get; set; }
+
+    [SugarColumn(ColumnName = "usage_output_tokens")]
+    public int? UsageOutputTokens { get; set; }
+
+    [SugarColumn(ColumnName = "usage_input_breakdown")]
+    public string? UsageInputBreakdown { get; set; }
+
+    [SugarColumn(ColumnName = "charged_points")]
+    public int? ChargedPoints { get; set; }
+
+    [SugarColumn(ColumnName = "platform_cost_cny")]
+    public decimal? PlatformCostCny { get; set; }
+
     [SugarColumn(ColumnName = "output_mime_type")]
     public string? OutputMimeType { get; set; }
 
@@ -73,6 +106,15 @@ public sealed class AiImageTaskEntity
 
     [SugarColumn(ColumnName = "unit_point_cost")]
     public int? UnitPointCost { get; set; }
+
+    [SugarColumn(ColumnName = "pricing_tier")]
+    public string? PricingTier { get; set; }
+
+    [SugarColumn(ColumnName = "list_unit_point_cost")]
+    public int? ListUnitPointCost { get; set; }
+
+    [SugarColumn(ColumnName = "access_basis")]
+    public string? AccessBasis { get; set; }
 
     [SugarColumn(ColumnName = "image_count")]
     public int ImageCount { get; set; } = 1;

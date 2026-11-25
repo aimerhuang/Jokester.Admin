@@ -15,8 +15,6 @@ public static class ServiceCollectionExtensions
     {
         services.AddScoped<IAuthService, AuthService>();
         services.AddScoped<IRegistrationService, RegistrationService>();
-        services.AddScoped<ILegalDocumentService, LegalDocumentService>();
-        services.AddScoped<IUserConsentService, UserConsentService>();
         services.AddScoped<IAccountDeletionService, AccountDeletionService>();
         services.AddScoped<IMediaAssetService, MediaAssetService>();
         services.AddScoped<IAiCanvasService, AiCanvasService>();
@@ -98,11 +96,23 @@ public static class ServiceCollectionExtensions
         services.AddHttpClient<INanoBananaImageService, NanoBananaImageService>(client =>
         {
             client.Timeout = TimeSpan.FromMinutes(5);
+        })
+        // 路由地址与供应商返回的结果 URL 都按连接时解析结果复检；私网例外只能来自部署配置 AiImageModelAdmin.AllowPrivateNetworkHosts。
+        .ConfigurePrimaryHttpMessageHandler(serviceProvider =>
+        {
+            var handler = AiImageRouteEndpointPolicy.CreateGuardedHandler(
+                serviceProvider.GetRequiredService<IOptions<AiImageModelAdminOptions>>().Value,
+                serviceProvider.GetRequiredService<IHostAddressResolver>());
+            handler.AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate;
+            return handler;
         });
         services.AddScoped<IAiImageModelConfigService, AiImageModelConfigService>();
         services.AddSingleton<IHostAddressResolver, DnsHostAddressResolver>();
         services.AddSingleton<IAiImageModelStatusService, AiImageModelStatusService>();
         services.AddHostedService<AiImageModelStatusWorker>();
+        services.AddScoped<IAiImagePriceResolver, AiImagePriceResolver>();
+        services.AddScoped<AiImagePricingAdminService>();
+        services.AddHostedService<AiImagePricingMonitor>();
         services.AddScoped<IAiImageModelRouteAdminService, AiImageModelRouteAdminService>();
         services.AddHttpClient(AiImageModelRouteAdminService.ProbeHttpClientName)
             .ConfigurePrimaryHttpMessageHandler(serviceProvider => AiImageRouteEndpointPolicy.CreateGuardedHandler(

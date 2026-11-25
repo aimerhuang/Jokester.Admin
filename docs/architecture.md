@@ -40,8 +40,7 @@ Refresh Token 以 SHA-256 哈希作为 Redis 定位键，明文只返回给客�
 
 相关表：
 
-- `legal_document`：按文档类型、平台、语言和版本保存已审批文档。
-- `user_consent`：追加式保存隐私/条款/AI 处理的接受或撤回历史。
+- `legal_document`、`user_consent`：已停用的法律文档/授权历史表，2026-11-24 起代码不再读写（账号删除仍清理 `user_consent`）。
 - `account_deletion_request`：保存删除申请、计划、数据删除、邮件通知和重试状态。
 - `apple_iap_product`：一对一映射现有积分套餐与 StoreKit 消耗型商品。
 - `apple_transaction`：已验证 Apple 交易的幂等履约账本，只保存 JWS 哈希。
@@ -50,7 +49,7 @@ Refresh Token 以 SHA-256 哈希作为 Redis 定位键，明文只返回给客�
 
 注册只接收 `email`、`emailCode`、`password`，不读取或记录隐私政策和服务条款版本。服务端用规范化邮箱 `@` 前的账号部分生成 `userName` 和 `nickName`，在用户名冲突时自动消歧；登录查询同时支持用户名和邮箱。
 
-法律文档与注册保持解耦。AI processing 告知仍按独立流程查询，不依赖同平台的隐私政策或服务条款是否存在。AI 授权写入时使用请求的真实客户端平台，后续生图校验按用户最近一条 AI 授权记录的平台解析精确 scope 或 `all` 告知，不再固定读取 `ios`。生图创建和 Worker 调 Provider 前都用实际路由的 `ConsentProviderCode` 检查最新 AI 告知和授权：告知未配置时服务不可用，告知已配置但授权缺失时要求用户同意，避免平台或 Provider 配置切换后发送未获授权的数据。
+法律文档系统和第三方 AI 数据处理授权已移除：生图创建和 Worker 调用 Provider 前不再检查 AI 告知或用户授权。
 
 StoreKit 履约流程：
 
@@ -217,7 +216,6 @@ Provider 租约前按最新快照复检。MySQL 保存权威规则，进程内�
 - `POST /api/auth/register/email-code`
 - `POST /api/auth/register`
 - `POST /api/auth/refresh`
-- `GET /api/legal/documents/current`
 - `GET /api/mobile/config`
 - `POST /api/integrations/apple/app-store-server-notifications/v2`（Apple JWS 验签）
 - `GET /api/sites/site_code`
@@ -271,7 +269,6 @@ Provider 租约前按最新快照复检。MySQL 保存权威规则，进程内�
 - `POST /api/points/recharge/redeem`
 - `POST /api/points/recharge/admin/codes`
 - `POST /api/points/recharge/apple/transactions`
-- `GET/PUT /api/users/me/consents`
 - `POST/GET/DELETE /api/auth/account-deletion/requests`
 - `GET/DELETE /api/logs/login`
 - `GET/DELETE /api/logs/operation`

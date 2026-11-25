@@ -77,6 +77,17 @@ public static class ServiceCollectionExtensions
                     && options.MinimumActiveWordCount is >= 1 and <= 1_000_000,
                 "AiPromptFilter values are outside the supported safety bounds.")
             .ValidateOnStart();
+        var gifSection = configuration.GetSection(AiImageGifOptions.SectionName);
+        services.AddOptions<AiImageGifOptions>()
+            .Bind(gifSection)
+            .PostConfigure(options =>
+            {
+                // The configuration binder appends to initialized arrays. Explicit option lists replace the defaults.
+                options.FrameCounts = gifSection.GetSection("FrameCounts").Get<int[]>() ?? options.FrameCounts;
+                options.FrameDurationsMs = gifSection.GetSection("FrameDurationsMs").Get<int[]>() ?? options.FrameDurationsMs;
+            })
+            .Validate(options => options.IsValid(), "AiImageGif 帧设置、预扣规则或 Token 价格无效。")
+            .ValidateOnStart();
         services.AddOptions<AiImageSizeModeOptions>()
             .Bind(configuration.GetSection(AiImageSizeModeOptions.SectionName))
             .Validate(
@@ -113,6 +124,11 @@ public static class ServiceCollectionExtensions
                     && options.DegradedThresholdPercent <= options.NormalThresholdPercent
                     && options.RefreshSeconds is >= 5 and <= 3600,
                 "AiImageModelStatus values are outside the supported bounds.")
+            .ValidateOnStart();
+        services.AddOptions<AiImagePricingAdminOptions>()
+            .Bind(configuration.GetSection(AiImagePricingAdminOptions.SectionName))
+            .Validate(options => options.DailyAuditWarningThreshold > 0, "价格审计告警阈值必须为正数。")
+            .Validate(options => options.LargeChangePercent >= 0, "大幅调价阈值必须为非负数。")
             .ValidateOnStart();
         services.AddOptions<AiImageModelAdminOptions>()
             .Bind(configuration.GetSection(AiImageModelAdminOptions.SectionName))

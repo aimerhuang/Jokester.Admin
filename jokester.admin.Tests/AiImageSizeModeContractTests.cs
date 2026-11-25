@@ -9,7 +9,9 @@ using jokester.admin.Application.Security;
 using jokester.admin.Application.Services;
 using jokester.admin.Common;
 using jokester.admin.Common.Exceptions;
+using jokester.admin.Controllers;
 using jokester.admin.Domain.Entities;
+using Microsoft.AspNetCore.Mvc;
 using jokester.admin.Infrastructure;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -20,6 +22,42 @@ namespace jokester.admin.Tests;
 
 public sealed class AiImageSizeModeContractTests
 {
+    [Theory]
+    [InlineData(false, false, null)]
+    [InlineData(false, true, "super_admin")]
+    [InlineData(true, false, "vip")]
+    [InlineData(true, true, "vip")]
+    public async Task RestrictedModelIsVisibleAndGuideCountsOnlyLockedUsers(bool vip, bool admin, string? basis)
+    {
+        using var context = new CatalogContext();
+        var db = context.Db;
+        db.Ado.ExecuteCommand("CREATE TABLE sys_user (id INTEGER PRIMARY KEY, status INTEGER, is_deleted INTEGER, is_super_admin INTEGER)");
+        db.Ado.ExecuteCommand("INSERT INTO sys_user VALUES (7,1,0,@admin)", new SugarParameter("@admin", admin));
+        db.Ado.ExecuteCommand("INSERT INTO ai_image_model_policy VALUES ('gpt-image-2','vip_only')");
+        db.Ado.ExecuteCommand("""
+            CREATE TABLE sys_user_membership_entitlement (id INTEGER PRIMARY KEY, user_id INTEGER, tier_code TEXT,
+                source TEXT, business_key TEXT, status TEXT, starts_at TEXT, expires_at TEXT, revoked_at TEXT, created_at TEXT, updated_at TEXT)
+            """);
+        if (vip)
+            db.Insertable(new SysUserMembershipEntitlementEntity
+            {
+                UserId = 7, TierCode = "monthly_vip", Source = "recharge", BusinessKey = "test-redeem", Status = "active",
+                StartsAt = DateTime.Now.AddDays(-1), ExpiresAt = DateTime.Now.AddDays(1), CreatedAt = DateTime.Now.AddDays(-1)
+            }).ExecuteCommand();
+        var access = Assert.Single(await context.Service.GetModelsAsync(context.Client, default)).Access;
+        Assert.Equal("vip_only", access.Level);
+        Assert.Equal(basis, access.Basis);
+        Assert.Equal(basis != null, access.Available);
+        Assert.Equal(basis == null ? "VIP_REQUIRED" : null, access.ReasonCode);
+        var pricing = await context.Service.GetPricingAsync("gpt-image-2", "imgcat_test_1", context.Client, default);
+        Assert.All(pricing.Items, item => { Assert.Equal(item.Points, item.EffectivePoints); Assert.Equal("standard", item.PricingTier); });
+        var events = new AiModelPricingEventsController(db, Mock.Of<ICurrentUser>(x => x.UserId == 7));
+        var click = await events.RecordGuide("gpt-image-2", default);
+        if (access.Available) Assert.IsType<ConflictResult>(click);
+        else Assert.IsType<NoContentResult>(click);
+        Assert.IsType<NotFoundResult>(await events.RecordGuide("unknown", default));
+    }
+
     [Fact]
     public async Task ResolveAsync_AutoReturnsUnknownRequestedDimensionsAndIndependentPrice()
     {
@@ -44,6 +82,19 @@ public sealed class AiImageSizeModeContractTests
         Assert.Null(result.Parameters.Height);
         Assert.Equal(91, result.Price.Points);
         Assert.All(result.Routes, route => Assert.Equal("auto", route.SizeMode));
+    }
+
+    [Fact]
+    public async Task ResolveAsync_CountsDisabledReleasePrice()
+    {
+        using var context = new CatalogContext();
+        context.Db.Ado.ExecuteCommand("UPDATE ai_image_model_release_price SET status=0");
+        var error = await PricingRejectionMetrics.AssertMissingPriceAsync("gpt-image-2", () => context.Service.ResolveAsync(
+            new ResolveAiImageParametersRequest
+            {
+                ModelCode = "gpt-image-2", SizeMode = "auto", CatalogVersion = "imgcat_test_1", QualityCode = "med"
+            }, context.Client, default));
+        Assert.Equal(MachineErrorCodes.ImagePriceNotConfigured, error.MachineCode);
     }
 
     [Fact]
@@ -95,8 +146,9 @@ public sealed class AiImageSizeModeContractTests
             Options.Create(new PromptLibraryOptions()),
             Mock.Of<IAiMediaPathResolver>(),
             Mock.Of<IAiPromptFilter>(),
-            Mock.Of<IUserConsentService>(),
-            Mock.Of<IMediaAssetService>());
+            Mock.Of<IMediaAssetService>(),
+            Options.Create(new AiImageSizeModeOptions()),
+            NullLogger<NanoBananaImageService>.Instance);
 
         var exception = await Assert.ThrowsAsync<AppException>(() => service.CreateAsync(
             new CreateNanoBananaImageTaskRequest
@@ -121,6 +173,9 @@ public sealed class AiImageSizeModeContractTests
         Assert.Equal("active", active.RequestState);
         Assert.Equal(101, active.Id);
         Assert.Equal(active.Id, active.TaskId);
+        Assert.Equal("standard", active.PricingTier);
+        Assert.Equal(91, active.UnitPointCost);
+        Assert.Equal(91, active.ListUnitPointCost);
         Assert.Equal([101L, 102L], active.Ids);
         Assert.Equal(active.Ids, active.TaskIds);
 
@@ -181,6 +236,18 @@ public sealed class AiImageSizeModeContractTests
                     PRIMARY KEY (request_id, task_ordinal)
                 );
                 CREATE TABLE ai_image_task (
+                    output_format TEXT NOT NULL DEFAULT 'png',
+                    frame_count INTEGER NULL,
+                    frame_duration_ms INTEGER NULL,
+                    gif_rate_snapshot TEXT NULL,
+                    usage_input_tokens INTEGER NULL,
+                    usage_text_input_tokens INTEGER NULL,
+                    usage_image_input_tokens INTEGER NULL,
+                    usage_output_tokens INTEGER NULL,
+                    usage_input_breakdown TEXT NULL,
+                    charged_points INTEGER NULL,
+                    platform_cost_cny NUMERIC NULL,
+                    user_id INTEGER, pricing_tier TEXT, unit_point_cost INTEGER, list_unit_point_cost INTEGER,
                     id INTEGER PRIMARY KEY,
                     is_deleted INTEGER NOT NULL DEFAULT 0
                 );
@@ -220,7 +287,7 @@ public sealed class AiImageSizeModeContractTests
                 Status = "active",
                 CreatedAt = DateTime.Now
             }).ExecuteCommand();
-            Db.Ado.ExecuteCommand("INSERT INTO ai_image_task (id, is_deleted) VALUES (101, 0), (102, 0)");
+            Db.Ado.ExecuteCommand("INSERT INTO ai_image_task (id,user_id,pricing_tier,unit_point_cost,list_unit_point_cost) VALUES (101,7,'standard',91,91),(102,7,'standard',91,91)");
             Db.Insertable(new[]
             {
                 new AiImageRequestTaskEntity { RequestId = 1, TaskOrdinal = 0, TaskId = 101 },
@@ -245,7 +312,6 @@ public sealed class AiImageSizeModeContractTests
                 Options.Create(new PromptLibraryOptions()),
                 Mock.Of<IAiMediaPathResolver>(),
                 Mock.Of<IAiPromptFilter>(),
-                Mock.Of<IUserConsentService>(),
                 Mock.Of<IMediaAssetService>(),
                 Catalog.Object,
                 Mock.Of<IAiSizeModeRolloutPolicy>(),
@@ -338,6 +404,9 @@ public sealed class AiImageSizeModeContractTests
         private void CreateSchema()
         {
             Db.Ado.ExecuteCommand("""
+                CREATE TABLE ai_image_model_policy (model_code TEXT PRIMARY KEY, access_level TEXT);
+                CREATE TABLE ai_image_pricing_setting (id INTEGER PRIMARY KEY, pricing_revision INTEGER, revision INTEGER, default_vip_discount_percent INTEGER, updated_by INTEGER, updated_at TEXT);
+                INSERT INTO ai_image_pricing_setting (id, pricing_revision) VALUES (1, 1);
                 CREATE TABLE ai_image_model_release (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, model_code TEXT NOT NULL, model_name TEXT NOT NULL,
                     catalog_version TEXT NOT NULL, size_contract_version TEXT NOT NULL, default_size_mode TEXT NOT NULL,
@@ -357,6 +426,7 @@ public sealed class AiImageSizeModeContractTests
                     points INTEGER NOT NULL, price_amount NUMERIC NOT NULL, currency TEXT NOT NULL,
                     sort INTEGER NOT NULL, status INTEGER NOT NULL);
                 CREATE TABLE ai_image_model_config (
+                    gif_provider_model TEXT NULL,
                     id INTEGER PRIMARY KEY AUTOINCREMENT, model_code TEXT NOT NULL, model_name TEXT NOT NULL,
                     provider TEXT NOT NULL, provider_model TEXT NOT NULL, resolution_code TEXT NOT NULL,
                     route_role TEXT NOT NULL, base_url TEXT NOT NULL, api_key TEXT NOT NULL,

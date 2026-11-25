@@ -17,6 +17,9 @@ public sealed class AiImageModelConfigEntity
     [SugarColumn(ColumnName = "provider")]
     public string Provider { get; set; } = string.Empty;
 
+    [SugarColumn(ColumnName = "gif_provider_model")]
+    public string? GifProviderModel { get; set; }
+
     [SugarColumn(ColumnName = "provider_model")]
     public string ProviderModel { get; set; } = string.Empty;
 

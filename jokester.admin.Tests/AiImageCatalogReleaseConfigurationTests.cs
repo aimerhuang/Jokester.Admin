@@ -33,6 +33,15 @@ public sealed class AiImageCatalogReleaseConfigurationTests
         Assert.Equal(9, first.ExplicitPriceCount);
         Assert.Equal(3, first.AutoPriceCount);
 
+        var twoK = context.Db.Queryable<AiImagePointPriceEntity>().Where(x => x.ResolutionCode == "2k").OrderBy(x => x.Sort).ToList();
+        Assert.Equal(new int?[] { 12, 24, 48 }, twoK.Select(x => x.VipPoints));
+        Assert.All(twoK, row => Assert.Equal(1, row.Revision));
+        var audits = context.Db.Queryable<AiImagePricingAuditEntity>().ToList();
+        Assert.Equal(3, audits.Count);
+        Assert.Single(audits.Select(x => x.BatchId).Distinct());
+        Assert.All(audits, audit => { Assert.Equal(0, audit.OperatorUserId); Assert.Equal("create", audit.Action); });
+        Assert.Equal(2, context.Db.Queryable<AiImagePricingSettingEntity>().Single().PricingRevision);
+
         var autoRoute = context.Db.Queryable<AiImageModelReleaseRouteEntity>()
             .Single(x => x.SizeMode == "auto");
         Assert.Empty(autoRoute.ResolutionCode);
@@ -47,6 +56,55 @@ public sealed class AiImageCatalogReleaseConfigurationTests
             .ToList();
         Assert.All(autoPrices, price => Assert.Empty(price.ResolutionCode));
         Assert.Equal(["high", "low", "med"], autoPrices.Select(x => x.QualityCode));
+    }
+
+    [Fact]
+    public async Task Configuration_PreservesDisabledAndDeletedTwoKPricesAndFillsOnlyMissingSlot()
+    {
+        using var context = new CatalogContext();
+        context.SeedLegacyCatalog();
+        var db = context.Db;
+        db.Insertable(new AiImageModelPolicyEntity { ModelCode = "gpt-image-2", VipDiscountPercent = 50 }).ExecuteCommand();
+        foreach (var quality in new[] { "high", "med" })
+        {
+            db.Insertable(new AiImagePointPriceEntity
+            {
+                ModelCode = "gpt-image-2", ResolutionCode = "2k", QualityCode = quality, Points = 77, VipPoints = 31,
+                VipPriceMode = "manual", Revision = 7, Status = 0, IsDeleted = quality == "high", PriceAmount = 1.23m,
+                Sort = 42, UpdatedBy = 19, CreatedAt = DateTime.UtcNow
+            }).ExecuteCommand();
+        }
+        await AiImageCatalogReleaseConfiguration.RunAsync(db, ApprovedOptions());
+        await AiImageCatalogReleaseConfiguration.RunAsync(db, ApprovedOptions());
+        var rows = db.Queryable<AiImagePointPriceEntity>().Where(x => x.ResolutionCode == "2k").ToList();
+        Assert.Equal(3, rows.Count);
+        Assert.All(rows.Where(x => x.QualityCode != "low"), row =>
+        {
+            Assert.Equal((77, (int?)31, "manual", 7, 0, 1.23m, 42, (long?)19),
+                (row.Points, row.VipPoints, row.VipPriceMode, row.Revision, row.Status, row.PriceAmount, row.Sort, row.UpdatedBy));
+            Assert.Equal(row.QualityCode == "high", row.IsDeleted);
+            Assert.Null(row.UpdatedAt);
+        });
+        var created = rows.Single(x => x.QualityCode == "low");
+        Assert.Equal((15, (int?)8, "follow", 1), (created.Points, created.VipPoints, created.VipPriceMode, created.Revision));
+        var audit = db.Queryable<AiImagePricingAuditEntity>().Single();
+        Assert.Equal(created.Id.ToString(), audit.TargetId);
+        Assert.Null(audit.BeforeJson);
+        Assert.Contains("\"vipPoints\":8", audit.AfterJson, StringComparison.Ordinal);
+        Assert.Equal(2, db.Queryable<AiImagePricingSettingEntity>().Single().PricingRevision);
+    }
+
+    [Fact]
+    public async Task Configuration_RollsBackTwoKPricesAuditAndRevisionOnPublishFailure()
+    {
+        using var context = new CatalogContext();
+        context.SeedLegacyCatalog();
+        var db = context.Db;
+        db.Ado.ExecuteCommand("UPDATE ai_image_model_config SET status=0 WHERE resolution_code='4k'");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => AiImageCatalogReleaseConfiguration.RunAsync(db, ApprovedOptions()));
+        Assert.Equal(0, db.Queryable<AiImagePointPriceEntity>().Count(x => x.ResolutionCode == "2k"));
+        Assert.Equal(0, db.Queryable<AiImagePricingAuditEntity>().Count());
+        Assert.Equal(1, db.Queryable<AiImagePricingSettingEntity>().Single().PricingRevision);
     }
 
     [Fact]
@@ -129,6 +187,14 @@ public sealed class AiImageCatalogReleaseConfigurationTests
                 IsAutoCloseConnection = false
             });
             Db.Ado.ExecuteCommand("""
+                CREATE TABLE ai_image_pricing_setting (id INTEGER PRIMARY KEY, default_vip_discount_percent INTEGER,
+                    revision INTEGER, pricing_revision INTEGER, updated_by INTEGER, updated_at TEXT);
+                INSERT INTO ai_image_pricing_setting (id, default_vip_discount_percent, revision, pricing_revision) VALUES (1,80,0,1);
+                CREATE TABLE ai_image_model_policy (model_code TEXT PRIMARY KEY, access_level TEXT, required_tier_code TEXT,
+                    vip_discount_percent INTEGER, revision INTEGER, updated_by INTEGER, updated_at TEXT);
+                CREATE TABLE ai_image_pricing_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id TEXT, target_type TEXT,
+                    target_id TEXT, model_code TEXT, resolution_code TEXT, quality_code TEXT, action TEXT, before_json TEXT,
+                    after_json TEXT, reason TEXT, operator_user_id INTEGER, operator_ip TEXT, created_at TEXT);
                 CREATE TABLE ai_image_parameter (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     param_type TEXT NOT NULL,
@@ -145,6 +211,7 @@ public sealed class AiImageCatalogReleaseConfigurationTests
                 );
                 CREATE UNIQUE INDEX uk_parameter ON ai_image_parameter(param_type, param_code);
                 CREATE TABLE ai_image_point_price (
+                    vip_points INTEGER NULL, vip_price_mode TEXT DEFAULT 'follow', revision INTEGER DEFAULT 0, updated_by INTEGER NULL,
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     model_code TEXT NOT NULL,
                     resolution_code TEXT NOT NULL,
@@ -160,6 +227,7 @@ public sealed class AiImageCatalogReleaseConfigurationTests
                 );
                 CREATE UNIQUE INDEX uk_legacy_price ON ai_image_point_price(model_code, resolution_code, quality_code);
                 CREATE TABLE ai_image_model_config (
+                    gif_provider_model TEXT NULL,
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     model_code TEXT NOT NULL,
                     model_name TEXT NOT NULL,

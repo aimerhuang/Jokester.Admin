@@ -83,6 +83,9 @@ public sealed class AiImageModelStatusService(
         // ai_image_task timestamps are stored as Hong Kong time (UTC+8).
         var since = ToHongKong(utcNow).AddHours(-options.WindowHours);
         var items = new List<AiImageModelStatusItemDto>(models.Length);
+        var restrictedCodes = models.Length == 0 ? new List<string>() : await db.Queryable<AiImageModelPolicyEntity>()
+            .Where(x => x.AccessLevel == "vip_only").Select(x => x.ModelCode).ToListAsync(cancellationToken);
+        var restricted = restrictedCodes.ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (var model in models)
         {
             var modelCode = model.Code;
@@ -103,7 +106,7 @@ public sealed class AiImageModelStatusService(
                     x.CreatedAt,
                     x.CompletedAt!.Value))
                 .ToArray();
-            items.Add(BuildItem(modelCode, model.Name, samples, options));
+            items.Add(BuildItem(modelCode, model.Name, samples, options, restricted.Contains(modelCode)));
         }
 
         return new AiImageModelStatusResponse
@@ -120,7 +123,7 @@ public sealed class AiImageModelStatusService(
         string modelCode,
         string modelName,
         IReadOnlyList<AiImageModelHealthSample> newestFirst,
-        AiImageModelStatusOptions options)
+        AiImageModelStatusOptions options, bool vipOnly = false)
     {
         var chronological = newestFirst.Take(options.SampleLimit).Reverse().ToArray();
         var sampleCount = chronological.Length;
@@ -144,6 +147,7 @@ public sealed class AiImageModelStatusService(
         {
             ModelCode = modelCode,
             ModelName = modelName,
+            VipOnly = vipOnly,
             State = state,
             Availability = availability,
             SampleCount = sampleCount,

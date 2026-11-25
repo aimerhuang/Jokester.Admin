@@ -39,9 +39,6 @@ public sealed class MobileSwaggerContractTests
         ("/api/auth/account-deletion/requests", "post"),
         ("/api/auth/account-deletion/requests/current", "get"),
         ("/api/auth/account-deletion/requests/{requestId}", "delete"),
-        ("/api/legal/documents/current", "get"),
-        ("/api/users/me/consents", "get"),
-        ("/api/users/me/consents/ai-processing", "put"),
         ("/api/mobile/config", "get")
     ];
 
@@ -114,6 +111,10 @@ public sealed class MobileSwaggerContractTests
             .GetProperty("schema");
         var pricingVariants = pricingSchema.GetProperty("oneOf").EnumerateArray().ToArray();
         Assert.Equal(2, pricingVariants.Length);
+        Assert.Contains(pricingVariants, variant => variant.GetProperty("$ref").GetString()!.EndsWith("/AiImageLegacyPricingResponse", StringComparison.Ordinal));
+        var legacy = schemas.GetProperty("AiImageLegacyPricingResponse").GetProperty("properties");
+        Assert.Equal("array", legacy.GetProperty("data").GetProperty("type").GetString());
+        Assert.Equal("integer", legacy.GetProperty("pricingRevision").GetProperty("type").GetString());
         Assert.Contains(pricingVariants, variant =>
             variant.GetProperty("$ref").GetString()!.Contains("AiImageCatalogPricingResponse", StringComparison.Ordinal));
 

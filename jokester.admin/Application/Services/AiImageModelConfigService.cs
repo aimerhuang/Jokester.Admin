@@ -3,12 +3,15 @@ using jokester.admin.Application.DTOs.AiImages;
 using jokester.admin.Common;
 using jokester.admin.Common.Exceptions;
 using jokester.admin.Domain.Entities;
+using jokester.admin.Infrastructure;
+using Microsoft.Extensions.Options;
 using SqlSugar;
 
 namespace jokester.admin.Application.Services;
 
-public sealed class AiImageModelConfigService(ISqlSugarClient db) : IAiImageModelConfigService
+public sealed class AiImageModelConfigService(ISqlSugarClient db, IOptions<AiImageGifOptions>? gifOptions = null) : IAiImageModelConfigService
 {
+    private readonly AiImageGifOptions _gif = gifOptions?.Value ?? new();
     public const string DefaultGptModelCode = "gpt-image-2";
     public const string DefaultNanoBananaModelCode = "nano-banana-2";
     public const string NanoBananaProModelCode = "nano-banana-pro";
@@ -102,6 +105,10 @@ public sealed class AiImageModelConfigService(ISqlSugarClient db) : IAiImageMode
                     ProviderCode = ResolveConsentProviderCode(providerProtocol),
                     Capabilities = new AiImageModelCapabilitiesDto
                     {
+                        Gif = _gif.AcceptNewTasks && !isGeminiImage && group.Any(IsGifRoute)
+                            ? new(_gif.FrameCounts, _gif.DefaultFrameCount, _gif.FrameDurationsMs,
+                                _gif.DefaultFrameDurationMs, _gif.TokenPricing, _gif.Reserve)
+                            : null,
                         SupportsReferenceImages = true,
                         MaxReferenceImages = 6,
                         SupportsQuality = !isGeminiImage,
@@ -174,6 +181,30 @@ public sealed class AiImageModelConfigService(ISqlSugarClient db) : IAiImageMode
         return routes;
     }
 
+    // Super admins opt a model into GIF by giving one of its OpenAI Images routes a native GIF provider model.
+    private static bool IsGifRoute(AiImageModelConfigEntity config) =>
+        !string.IsNullOrWhiteSpace(config.GifProviderModel)
+        && !string.IsNullOrWhiteSpace(config.ApiKey)
+        && !string.IsNullOrWhiteSpace(config.BaseUrl)
+        && IsSupportedRouteRole(config.RouteRole)
+        && ResolveProviderProtocol(config.Provider) == OpenAiImageProtocol;
+
+    public async Task<IReadOnlyList<ResolvedAiImageModelConfig>> ResolveGifRoutesAsync(
+        string modelCode, CancellationToken cancellationToken)
+    {
+        var code = NormalizeModelCode(modelCode);
+        var configs = await db.Queryable<AiImageModelConfigEntity>()
+            .Where(x => !x.IsDeleted && x.Status == 1 && x.ModelCode == code && x.GifProviderModel != null)
+            .OrderBy(x => x.Sort).OrderBy(x => x.Id)
+            .ToListAsync(cancellationToken);
+        var routes = configs.Where(IsGifRoute)
+            .GroupBy(x => GetRouteOrder(x.RouteRole))
+            .OrderBy(group => group.Key)
+            .Select(group => Validate(group.First(), group.First().GifProviderModel))
+            .ToArray();
+        return routes.Length > 0 ? routes : throw AiImageGifRequest.Unsupported();
+    }
+
     public static string NormalizeModelCode(string? modelCode)
     {
         var normalized = string.IsNullOrWhiteSpace(modelCode)
@@ -190,9 +221,12 @@ public sealed class AiImageModelConfigService(ISqlSugarClient db) : IAiImageMode
             || string.Equals(normalized, NanoBananaProModelCode, StringComparison.OrdinalIgnoreCase);
     }
 
+    public static string NormalizeProviderCode(string? providerCode) =>
+        string.IsNullOrWhiteSpace(providerCode) ? string.Empty : providerCode.Trim().ToLowerInvariant();
+
     public static string ResolveProviderProtocol(string? provider)
     {
-        var normalized = LegalDocumentService.NormalizeProviderCode(provider);
+        var normalized = NormalizeProviderCode(provider);
         if (normalized is "openai" or OpenAiImageProtocol
             || normalized.EndsWith("-openai-image", StringComparison.Ordinal))
         {
@@ -236,9 +270,10 @@ public sealed class AiImageModelConfigService(ISqlSugarClient db) : IAiImageMode
         return string.IsNullOrWhiteSpace(resolutionCode) ? "1k" : resolutionCode.Trim().ToLowerInvariant();
     }
 
-    private static ResolvedAiImageModelConfig Validate(AiImageModelConfigEntity config)
+    private static ResolvedAiImageModelConfig Validate(AiImageModelConfigEntity config, string? gifProviderModel = null)
     {
-        if (string.IsNullOrWhiteSpace(config.ProviderModel))
+        var selectedProviderModel = gifProviderModel ?? config.ProviderModel;
+        if (string.IsNullOrWhiteSpace(selectedProviderModel))
         {
             throw new AppException(ErrorCodes.BadRequest, $"AI image model {config.ModelCode} provider model is not configured");
         }
@@ -267,7 +302,7 @@ public sealed class AiImageModelConfigService(ISqlSugarClient db) : IAiImageMode
             : config.ImageToImagePath.Trim();
 
         var normalizedModelCode = NormalizeModelCode(config.ModelCode);
-        var providerModel = config.ProviderModel.Trim();
+        var providerModel = selectedProviderModel.Trim();
         var providerProtocol = ResolveProviderProtocol(config.Provider);
         var routeRole = NormalizeRouteRole(config.RouteRole);
         if (!IsSupportedRouteRole(routeRole))

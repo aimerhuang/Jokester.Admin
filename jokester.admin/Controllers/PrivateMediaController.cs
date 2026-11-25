@@ -44,7 +44,7 @@ public sealed class PrivateMediaController(ICurrentUser currentUser, ISqlSugarCl
             return NotFound();
         }
         if (!System.IO.File.Exists(file)) return NotFound();
-        var type = Path.GetExtension(file).ToLowerInvariant() switch { ".jpg" or ".jpeg" => "image/jpeg", ".webp" => "image/webp", _ => "image/png" };
+        var type = Path.GetExtension(file).ToLowerInvariant() switch { ".jpg" or ".jpeg" => "image/jpeg", ".webp" => "image/webp", ".gif" => "image/gif", _ => "image/png" };
         return PhysicalFile(file, type, enableRangeProcessing: false);
     }
 

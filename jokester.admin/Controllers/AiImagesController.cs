@@ -52,6 +52,7 @@ public sealed class AiImagesController(
     [ProducesResponseType(typeof(ApiResponse<AiImageParameterOptionsDto>), StatusCodes.Status200OK)]
     public async Task<IActionResult> GetParameters(CancellationToken cancellationToken)
     {
+        SetCatalogResponseHeaders();
         var result = await aiImageService.GetParameterOptionsAsync(cancellationToken);
         return Success(result);
     }
@@ -61,21 +62,22 @@ public sealed class AiImagesController(
     /// </summary>
     [Permission("AiImage.Generate")]
     [HttpGet("pricing-options")]
-    [ProducesResponseType(typeof(ApiResponse<IReadOnlyList<AiImagePricingOptionDto>>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(AiImageLegacyPricingResponse), StatusCodes.Status200OK)]
     public async Task<IActionResult> GetPricingOptions(
         [FromQuery] string? modelCode,
         [FromQuery] string? catalogVersion,
         CancellationToken cancellationToken)
     {
+        SetCatalogResponseHeaders();
         var client = rolloutPolicy.GetClientContext();
         if (rolloutPolicy.CanUseVersionedContract(client))
         {
-            SetCatalogResponseHeaders();
             var versioned = await catalogService.GetPricingAsync(modelCode, catalogVersion, client, cancellationToken);
             return Success(versioned);
         }
+        var revision = await aiImageService.GetPricingRevisionAsync(cancellationToken);
         var result = await aiImageService.GetPricingOptionsAsync(cancellationToken);
-        return Success(result);
+        return Ok(new AiImageLegacyPricingResponse { RequestId = HttpContext.TraceIdentifier, Data = result, PricingRevision = revision });
     }
 
     /// <summary>
@@ -145,7 +147,7 @@ public sealed class AiImagesController(
     public async Task<IActionResult> CreateNanoBananaImage([FromBody] CreateNanoBananaImageTaskRequest request, CancellationToken cancellationToken)
     {
         var id = await nanoBananaImageService.CreateAsync(request, cancellationToken);
-        return Success(new { id });
+        return Success(await aiImageService.BuildCreateTasksResponseAsync([id], "active", cancellationToken));
     }
 
     /// <summary>
@@ -177,7 +179,8 @@ public sealed class AiImagesController(
     public async Task<IActionResult> Create([FromBody] CreateAiImageTaskRequest request, CancellationToken cancellationToken)
     {
         IReadOnlyList<long> ids;
-        if (request.SizeMode is not null || request.CatalogVersion is not null)
+        if (AiImageGifRequest.IsGif(request, allowGif: true)
+            || request.SizeMode is not null || request.CatalogVersion is not null)
         {
             return Success(await aiImageService.CreateTasksResponseAsync(request, cancellationToken));
         }
@@ -190,6 +193,7 @@ public sealed class AiImagesController(
         {
             var id = await nanoBananaImageService.CreateAsync(new CreateNanoBananaImageTaskRequest
             {
+                ExpectedUnitPoints = request.ExpectedUnitPoints,
                 IdempotencyKey = request.IdempotencyKey,
                 SourcePromptId = request.SourcePromptId,
                 Prompt = request.Prompt,
@@ -206,15 +210,9 @@ public sealed class AiImagesController(
         }
         else
         {
-            ids = await aiImageService.CreateTasksAsync(request, cancellationToken);
+            return Success(await aiImageService.CreateTasksResponseAsync(request, cancellationToken));
         }
-        return Success(new CreateAiImageTasksResponse
-        {
-            Id = ids[0],
-            TaskId = ids[0],
-            Ids = ids,
-            TaskIds = ids
-        });
+        return Success(await aiImageService.BuildCreateTasksResponseAsync(ids, "active", cancellationToken));
     }
 
     private void SetCatalogResponseHeaders()

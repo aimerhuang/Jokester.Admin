@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using jokester.admin.Application.Services;
 using jokester.admin.Domain.Entities;
 using SqlSugar;
@@ -166,7 +167,7 @@ public static class AiImageCatalogReleaseConfiguration
         var modelCode = AiImageModelConfigService.NormalizeModelCode(options.ModelCode);
         var modelName = RequireText(options.ModelName, "ModelName", 100);
         var catalogVersion = RequireAsciiToken(options.CatalogVersion, "CatalogVersion", 100);
-        var consentProviderCode = LegalDocumentService.NormalizeProviderCode(options.ConsentProviderCode);
+        var consentProviderCode = AiImageModelConfigService.NormalizeProviderCode(options.ConsentProviderCode);
         if (consentProviderCode is not ("openai" or "google"))
         {
             throw new InvalidOperationException("AiImageCatalogRelease:ConsentProviderCode must be openai or google.");
@@ -393,6 +394,8 @@ public static class AiImageCatalogReleaseConfiguration
         DateTime now,
         CancellationToken cancellationToken)
     {
+        await InsertMissingTwoKPricesAsync(db, now, cancellationToken);
+
         var parameters = await db.Queryable<AiImageParameterEntity>()
             .Where(x => x.ParamType == "resolution")
             .ToListAsync(cancellationToken);
@@ -430,47 +433,6 @@ public static class AiImageCatalogReleaseConfiguration
             }
         }
 
-        foreach (var (quality, points, amount, sort) in new[]
-        {
-            ("low", 15, 0.15m, 4),
-            ("med", 30, 0.30m, 5),
-            ("high", 60, 0.60m, 6)
-        })
-        {
-            var price = await db.Queryable<AiImagePointPriceEntity>()
-                .FirstAsync(x => x.ModelCode == AiImageModelConfigService.DefaultGptModelCode
-                    && x.ResolutionCode == "2k"
-                    && x.QualityCode == quality,
-                    cancellationToken);
-            if (price is null)
-            {
-                await db.Insertable(new AiImagePointPriceEntity
-                {
-                    ModelCode = AiImageModelConfigService.DefaultGptModelCode,
-                    ResolutionCode = "2k",
-                    QualityCode = quality,
-                    Points = points,
-                    PriceAmount = amount,
-                    Currency = "CNY",
-                    Sort = sort,
-                    Status = 1,
-                    CreatedAt = now,
-                    IsDeleted = false
-                }).ExecuteCommandAsync(cancellationToken);
-            }
-            else
-            {
-                price.Points = points;
-                price.PriceAmount = amount;
-                price.Currency = "CNY";
-                price.Sort = sort;
-                price.Status = 1;
-                price.UpdatedAt = now;
-                price.IsDeleted = false;
-                await db.Updateable(price).ExecuteCommandAsync(cancellationToken);
-            }
-        }
-
         var allGptConfigs = await db.Queryable<AiImageModelConfigEntity>()
             .Where(x => x.ModelCode == AiImageModelConfigService.DefaultGptModelCode && !x.IsDeleted)
             .OrderBy(x => x.Sort)
@@ -497,6 +459,43 @@ public static class AiImageCatalogReleaseConfiguration
         }
     }
 
+    private static async Task InsertMissingTwoKPricesAsync(ISqlSugarClient db, DateTime now, CancellationToken ct)
+    {
+        const string model = AiImageModelConfigService.DefaultGptModelCode;
+        var settings = await db.Queryable<AiImagePricingSettingEntity>().TranLock(DbLockType.Wait)
+            .FirstAsync(x => x.Id == 1, ct) ?? throw new InvalidOperationException("Pricing settings must be initialized before publishing.");
+        var policy = await db.Queryable<AiImageModelPolicyEntity>().TranLock(DbLockType.Wait)
+            .FirstAsync(x => x.ModelCode == model, ct);
+        var existing = await db.Queryable<AiImagePointPriceEntity>().Where(x => x.ModelCode == model && x.ResolutionCode == "2k")
+            .OrderBy(x => x.Id).TranLock(DbLockType.Wait).Select(x => x.QualityCode).ToListAsync(ct);
+        var batchId = Guid.NewGuid().ToString("N");
+        var added = false;
+        foreach (var (quality, points, amount, sort) in new[] { ("low", 15, 0.15m, 4), ("med", 30, 0.30m, 5), ("high", 60, 0.60m, 6) })
+        {
+            if (existing.Contains(quality, StringComparer.OrdinalIgnoreCase)) continue;
+            var row = new AiImagePointPriceEntity
+            {
+                ModelCode = model, ResolutionCode = "2k", QualityCode = quality, Points = points, PriceAmount = amount,
+                VipPoints = AiImagePricingAdminService.AutoVip(points, policy?.VipDiscountPercent ?? settings.DefaultVipDiscountPercent),
+                VipPriceMode = "follow", Currency = "CNY", Sort = sort, Status = 1, Revision = 1, UpdatedBy = 0, CreatedAt = now
+            };
+            row.Id = await db.Insertable(row).ExecuteReturnBigIdentityAsync();
+            await db.Insertable(new AiImagePricingAuditEntity
+            {
+                BatchId = batchId, TargetType = "price", TargetId = row.Id.ToString(CultureInfo.InvariantCulture), ModelCode = model,
+                ResolutionCode = row.ResolutionCode, QualityCode = quality, Action = "create", OperatorUserId = 0,
+                AfterJson = JsonSerializer.Serialize(new { points, vipPoints = row.VipPoints, vipPriceMode = row.VipPriceMode, priceAmount = amount, status = row.Status }),
+                Reason = "发布模型目录时初始化缺失的 2K 价格档", CreatedAt = now
+            }).ExecuteCommandAsync(ct);
+            added = true;
+        }
+        if (added)
+        {
+            settings.PricingRevision = checked(settings.PricingRevision + 1);
+            await db.Updateable(settings).UpdateColumns(x => x.PricingRevision).ExecuteCommandAsync(ct);
+        }
+    }
+
     private static AiImageModelConfigEntity CopyAsTwoK(AiImageModelConfigEntity source, DateTime now)
     {
         var target = new AiImageModelConfigEntity { CreatedAt = now };
@@ -507,7 +506,8 @@ public static class AiImageCatalogReleaseConfiguration
     private static void ApplyTwoKRoute(AiImageModelConfigEntity target, AiImageModelConfigEntity source, DateTime now)
     {
         target.ModelCode = source.ModelCode;
-        target.ModelName = "GPT Image 2 2K";
+        // The display name is model-level; resolution is a separate route attribute, never a name suffix.
+        target.ModelName = source.ModelName;
         target.Provider = source.Provider;
         target.ProviderModel = source.ProviderModel;
         target.ResolutionCode = "2k";

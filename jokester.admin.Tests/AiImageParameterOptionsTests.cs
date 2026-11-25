@@ -11,8 +11,10 @@ namespace jokester.admin.Tests;
 
 public sealed class AiImageParameterOptionsTests
 {
-    [Fact]
-    public async Task GetParameterOptionsAsync_ConvertsPriceAndExcludesAutoAspectRatio()
+    [Theory]
+    [InlineData(false, 15, "standard")]
+    [InlineData(true, 12, "vip")]
+    public async Task GetParameterOptionsAsync_ReportsPersonalizedQuoteWithoutChangingListPrice(bool isVip, int effective, string tier)
     {
         SQLitePCL.Batteries_V2.Init();
         using var db = new SqlSugarClient(new ConnectionConfig
@@ -23,6 +25,8 @@ public sealed class AiImageParameterOptionsTests
             InitKeyType = InitKeyType.Attribute
         });
         db.Ado.ExecuteCommand("""
+            CREATE TABLE ai_image_pricing_setting (id INTEGER PRIMARY KEY, pricing_revision INTEGER, revision INTEGER, default_vip_discount_percent INTEGER, updated_by INTEGER, updated_at TEXT);
+            INSERT INTO ai_image_pricing_setting (id, pricing_revision) VALUES (1, 19);
             CREATE TABLE ai_image_parameter (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 param_type TEXT NOT NULL,
@@ -38,6 +42,7 @@ public sealed class AiImageParameterOptionsTests
                 is_deleted INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE ai_image_point_price (
+                vip_points INTEGER NULL, vip_price_mode TEXT DEFAULT 'follow', revision INTEGER DEFAULT 0, updated_by INTEGER NULL,
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 model_code TEXT NOT NULL,
                 resolution_code TEXT NOT NULL,
@@ -91,6 +96,7 @@ public sealed class AiImageParameterOptionsTests
             ResolutionCode = "1k",
             QualityCode = "med",
             Points = 15,
+            VipPoints = 12,
             PriceAmount = 1.235m,
             Currency = "CNY",
             Sort = 1,
@@ -98,13 +104,23 @@ public sealed class AiImageParameterOptionsTests
             CreatedAt = DateTime.UtcNow
         }).ExecuteCommand();
 
+        db.Ado.ExecuteCommand("""
+            CREATE TABLE sys_user_membership_entitlement (id INTEGER PRIMARY KEY, user_id INTEGER, tier_code TEXT,
+                source TEXT, business_key TEXT, status TEXT, starts_at TEXT, expires_at TEXT, revoked_at TEXT, created_at TEXT, updated_at TEXT)
+            """);
+        if (isVip)
+            db.Insertable(new SysUserMembershipEntitlementEntity
+            {
+                UserId = 7, TierCode = "monthly_vip", Source = "recharge", BusinessKey = "test-redeem", Status = "active",
+                StartsAt = DateTime.Now.AddDays(-1), ExpiresAt = DateTime.Now.AddDays(1), CreatedAt = DateTime.Now.AddDays(-1)
+            }).ExecuteCommand();
         using var httpClient = new HttpClient();
         var service = new AiImageService(
             httpClient,
             Mock.Of<IAiImageModelConfigService>(),
             Mock.Of<IPointService>(),
             db,
-            Mock.Of<ICurrentUser>(),
+            Mock.Of<ICurrentUser>(x => x.UserId == 7),
             Mock.Of<IAiImageTaskQueue>(),
             Mock.Of<IAiImageAdmissionService>(),
             Options.Create(new OpenAiOptions()),
@@ -112,7 +128,6 @@ public sealed class AiImageParameterOptionsTests
             Options.Create(new PromptLibraryOptions()),
             Mock.Of<IAiMediaPathResolver>(),
             Mock.Of<IAiPromptFilter>(),
-            Mock.Of<IUserConsentService>(),
             Mock.Of<IMediaAssetService>(),
             Mock.Of<IAiImageCatalogService>(),
             Mock.Of<IAiSizeModeRolloutPolicy>(),
@@ -121,6 +136,11 @@ public sealed class AiImageParameterOptionsTests
         var result = await service.GetParameterOptionsAsync(default);
 
         var price = Assert.Single(result.PointPrices);
+        Assert.Equal(19, result.PricingRevision);
+        Assert.Equal(15, price.Points);
+        Assert.Equal(12, price.VipPoints);
+        Assert.Equal(effective, price.EffectivePoints);
+        Assert.Equal(tier, price.PricingTier);
         Assert.Equal(1.235m, price.PriceAmount);
         Assert.Equal(124, price.PriceMinorUnits);
         Assert.Equal(["1:1"], result.AspectRatios.Select(x => x.Code));

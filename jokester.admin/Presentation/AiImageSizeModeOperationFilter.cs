@@ -84,7 +84,7 @@ public sealed class AiImageSizeModeOperationFilter : IOperationFilter
         }
 
         var legacySchema = context.SchemaGenerator.GenerateSchema(
-            typeof(ApiResponse<IReadOnlyList<AiImagePricingOptionDto>>),
+            typeof(AiImageLegacyPricingResponse),
             context.SchemaRepository);
         var versionedSchema = context.SchemaGenerator.GenerateSchema(
             typeof(ApiResponse<AiImageCatalogPricingResponse>),

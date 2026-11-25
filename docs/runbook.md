@@ -218,58 +218,7 @@ docs/migrations/20260812-ios-api-upgrade.sql
 
 注册接口已经与法律文档配置解耦，恢复和验收注册不需要先配置法律版本。`POST /api/auth/register/email-code` 只接收 `email`，不使用图片验证码；`POST /api/auth/register` 只接收 `email`、`emailCode`、`password`。后端从规范化邮箱账号部分生成用户名和昵称并自动处理用户名冲突，注册用户可直接用邮箱登录。
 
-`privacy_policy`、`terms_of_service` 和 `ai_processing` 仍由独立法律文档系统维护。未启用 AI processing 时 `GET /api/legal/documents/current` 返回 `aiProcessingNotice=null`，客户端不显示 AI 授权提示；所有第三方 AI 生图入口则在 Provider 调用、Redis 准入和积分预留前 fail-closed，返回 HTTP 503、`SERVICE_UNAVAILABLE`。告知已启用但用户未授权当前 Provider 时返回 HTTP 412、`AI_CONSENT_REQUIRED`。小范围使用或 TestFlight 不得绕过该限制。本轮已启用独立 AI 数据处理授权声明。
-
-前端仓库的 `public/legal/privacy/index.html`、`public/legal/terms/index.html` 和 `public/legal/ai-processing/index.html` 已构建并部署。本轮版本分别为 `privacy-2026-08-14`、`terms-2026-08-14` 和 `ai-processing-2026-08-14`，正式页面位于 `https://ai.jokester.cc:8011/legal/privacy/index.html`、`https://ai.jokester.cc:8011/legal/terms/index.html` 和 `https://ai.jokester.cc:8011/legal/ai-processing/index.html`。运行配置命令前应确认三个地址仍可匿名访问；`Approved=true` 是操作者对该次审批结果的明确确认。
-
-从项目根目录执行下面的幂等维护命令，两次配置共用同一个实际 UTC 生效时间。`Approved=true` 只表示操作者确认本次启用的输入已经完成业务/法务审批；命令不会替代审批。由于数据库可能存在旧的 `web/zh-CN` 精确版本，先更新 `web`，再写入 `all`，避免精确版本遮蔽通用版本：
-
-```powershell
-$env:LegalDocuments__Approved = 'true'
-$env:LegalDocuments__Locale = 'zh-CN'
-$env:LegalDocuments__EffectiveAt = '2026-08-14T06:31:54Z'
-$env:LegalDocuments__PrivacyPolicy__Version = 'privacy-2026-08-14'
-$env:LegalDocuments__PrivacyPolicy__Url = 'https://ai.jokester.cc:8011/legal/privacy/index.html'
-$env:LegalDocuments__PrivacyPolicy__RequiresReconsent = 'false'
-$env:LegalDocuments__TermsOfService__Version = 'terms-2026-08-14'
-$env:LegalDocuments__TermsOfService__Url = 'https://ai.jokester.cc:8011/legal/terms/index.html'
-$env:LegalDocuments__TermsOfService__RequiresReconsent = 'false'
-$env:LegalDocuments__AiProcessing__Enabled = 'true'
-$env:LegalDocuments__AiProcessing__Version = 'ai-processing-2026-08-14'
-$env:LegalDocuments__AiProcessing__Url = 'https://ai.jokester.cc:8011/legal/ai-processing/index.html'
-$env:LegalDocuments__AiProcessing__RequiresReconsent = 'true'
-$env:LegalDocuments__AiProcessing__ProviderCodes__0 = 'openai'
-$env:LegalDocuments__AiProcessing__ProviderCodes__1 = 'google'
-
-foreach ($platform in @('web', 'all')) {
-  $env:LegalDocuments__Platform = $platform
-  dotnet run --project .\jokester.admin --configuration Release --no-build --no-launch-profile -- --configure-legal-documents
-  if ($LASTEXITCODE -ne 0) { throw "Legal document configuration failed for $platform." }
-}
-
-Remove-Item Env:LegalDocuments__Approved,Env:LegalDocuments__Platform,Env:LegalDocuments__Locale,
-  Env:LegalDocuments__EffectiveAt,
-  Env:LegalDocuments__PrivacyPolicy__Version,Env:LegalDocuments__PrivacyPolicy__Url,
-  Env:LegalDocuments__PrivacyPolicy__RequiresReconsent,
-  Env:LegalDocuments__TermsOfService__Version,Env:LegalDocuments__TermsOfService__Url,
-  Env:LegalDocuments__TermsOfService__RequiresReconsent,
-  Env:LegalDocuments__AiProcessing__Enabled,Env:LegalDocuments__AiProcessing__Version,
-  Env:LegalDocuments__AiProcessing__Url,Env:LegalDocuments__AiProcessing__RequiresReconsent,
-  Env:LegalDocuments__AiProcessing__ProviderCodes__0,
-  Env:LegalDocuments__AiProcessing__ProviderCodes__1 -ErrorAction SilentlyContinue
-```
-
-命令在同一事务内停用目标 scope 的旧活动版本、插入或重新启用本次目标版本，并回读验证当前集合；`AiProcessing.Enabled=false` 还会停用相同 scope 的活动 AI 告知。同一个 `version` 的 URL、生效时间、重授权标记和 provider 集合不可变；内容变化必须使用新版本。审批标记缺失、非 HTTPS URL、未来生效时间或同版本内容冲突时零写入。完成后再做独立审计查询：
-
-`Platform=all` 会分别回读 `ios`、`android` 和 `web`；若仍有其他活动的精确平台版本遮蔽通用版本，命令会回滚并指出冲突平台，应先用相同版本更新该精确 scope 后再重试 `all`。`ProviderCodes` 必须覆盖 `ai_image_model_config` 当前全部启用路由映射出的 `openai` / `google`。AI 声明使用 `RequiresReconsent=true`；以后更换声明内容必须发布新版本并重新取得授权。
-
-```sql
-SELECT document_type, version, platform, locale, url, provider_codes_json,
-       effective_at, requires_reconsent, status
-FROM legal_document
-WHERE status = 1
-ORDER BY document_type, platform, locale, effective_at DESC;
-```
+法律文档系统与第三方 AI 数据处理授权已于 2026-11-24 移除：API 不再提供 `GET /api/legal/documents/current`、`/api/users/me/consents` 和 `--configure-legal-documents`，生图不再校验 AI 告知或授权。库中已有的 `legal_document`、`user_consent` 数据保留不动，不再被读取（账号删除仍清理对应用户的 `user_consent` 行）。前端 `public/legal/` 下的静态隐私政策/服务条款页面仍可按需保留为普通网页。
 
 Apple IAP 默认关闭。启用前通过环境变量、Secret Manager 或部署密钥提供：
 
@@ -298,15 +247,14 @@ ORDER BY p.sort, p.id;
 
 Sandbox/TestFlight 门禁：
 
-1. `GET /api/legal/documents/current` 返回三类当前文档，时间带 `Z`。
-2. `GET /api/mobile/config` 在 Apple 配置有效时才返回 `features.appleIap=true`。
-3. `GET /api/points/recharge/packages?platform=ios` 只返回已映射商品且不含外部购买 URL，其中 `monthly.points=5000`。
-4. 同一 Sandbox Transaction ID 连续/并发重放只增加一次积分；同 key 改 payload 返回 409。
-5. App Store Server `TEST`、退款和撤销通知验签成功；通知重放不重复扣分，处理失败保持可重试。
-6. 追扣尚未过期的可撤销积分时，余额不足会产生 open debt，随后生图返回 403；当前仓库没有自动偿还或关闭 debt 的流程，产品/财务确认人工或专门清偿流程后再开放生产。
-7. 用月卡积分创建一个处理中任务后模拟退款：退款不能扣除无关永久积分或立即形成该预留部分的 debt；任务失败不恢复月卡额度，任务成功才追扣并在不足时增加 debt，重复结算不重复追扣。
-8. 未授权当前 Provider 时生成请求返回 412；敏感提示词返回 422；限流返回 429 和 `Retry-After`。
-9. 账户删除申请立即撤销会话，完成后无法登录、私有 Asset 不可访问，完成邮件失败会重试。
+1. `GET /api/mobile/config` 在 Apple 配置有效时才返回 `features.appleIap=true`。
+2. `GET /api/points/recharge/packages?platform=ios` 只返回已映射商品且不含外部购买 URL，其中 `monthly.points=5000`。
+3. 同一 Sandbox Transaction ID 连续/并发重放只增加一次积分；同 key 改 payload 返回 409。
+4. App Store Server `TEST`、退款和撤销通知验签成功；通知重放不重复扣分，处理失败保持可重试。
+5. 追扣尚未过期的可撤销积分时，余额不足会产生 open debt，随后生图返回 403；当前仓库没有自动偿还或关闭 debt 的流程，产品/财务确认人工或专门清偿流程后再开放生产。
+6. 用月卡积分创建一个处理中任务后模拟退款：退款不能扣除无关永久积分或立即形成该预留部分的 debt；任务失败不恢复月卡额度，任务成功才追扣并在不足时增加 debt，重复结算不重复追扣。
+7. 敏感提示词返回 422；限流返回 429 和 `Retry-After`。
+8. 账户删除申请立即撤销会话，完成后无法登录、私有 Asset 不可访问，完成邮件失败会重试。
 
 切换生产前把商品映射和 Apple 环境改为 `Production`，再启用 `Mobile.Features.AppleIap`。生产通知处理失败、open debt、账户删除 `failed/notification_pending` 都应接入告警；本仓库只实现状态和重试，不包含外部告警平台配置。
 
@@ -367,19 +315,19 @@ POST /api/admin/prompt-sync/snapshots/{snapshotId}/activate
 
 ## AI 生图积分配置与排查
 
-legacy 生图会从 `ai_image_point_price` 查询价格并扣除 `points * imageCount`。价格缺失会导致接口返回“当前模型、分辨率、画质未配置积分价格”。
+legacy 生图在预留事务中读取 `ai_image_point_price`，按当前用户实付单价乘张数扣分。价格缺失会导致接口返回“当前模型、分辨率、画质未配置积分价格”。
 
 价格表配置要点：
 
 - legacy GPT Image2：`resolution_code` 使用业务分辨率档位，如 `1k`、`2k`、`4k`；`quality_code` 使用 `low`、`med`、`high`，价格按 `modelCode + resolutionCode + qualityCode` 匹配。
-- GPT Image2 的 2K 单张价格固定为 `low=15`、`med=30`、`high=60` 积分，对应 `price_amount=0.15/0.30/0.60 CNY`；价格排序位于 1K 之后、4K 之前。
+- GPT Image2 的 2K 单张初始标准价为 `low=15`、`med=30`、`high=60` 积分，对应 `price_amount=0.15/0.30/0.60 CNY`；价格排序位于 1K 之后、4K 之前。
 - Nano Banana2：官方无 `quality` 参数，价格只按 `modelCode + resolutionCode` 匹配，`quality_code` 列不参与查询（存 `''` 或 `NULL` 都不影响）。`resolution_code` 使用业务分辨率档位，如 `1k`、`2k`、`4k`；`aspectRatioCode=auto` 时上游 `size` 会传 `auto`，但积分价格仍按 `resolutionCode` 匹配。
 - 只启用 `status=1` 且 `is_deleted=0` 的价格行。
 - legacy 价格匹配逻辑见 `PointService.GetImageGenerateCostAsync`：仅当调用方显式传入 `quality` 时才把 `quality_code` 加入查询条件。
 
 `size-mode-v1` 不使用上述可变价格表直接查价。创建事务会锁定客户端提交的 current `modelCode + catalogVersion`，并从 `ai_image_model_release_price` 选择 explicit 或 auto 独立价格；auto 行的规范化 `resolution_code` 为空，API 返回 `null`。迁移不发布 release 或 auto 价格，必须按“AI 尺寸模式升级与回滚”完成受控发布。
 
-既有数据库执行 `docs/migrations/20260821-add-gpt-image-2-2k-prices.sql` 可幂等新增或修正上述价格。该迁移只维护 `ai_image_point_price`，不会创建或启用 `ai_image_model_config` 的 2K 路由。确认当前启用的 1K 主路由使用官方通用 `provider_model=gpt-image-2` 后，再执行 `docs/migrations/20260821-add-gpt-image-2-2k-primary-route.sql`；后者会复制该主路由的连接配置并启用精确 2K 路由，不会为第三方 1K/4K 专用模型伪造 2K 备用路由。
+旧版本在引入 VIP 定价前使用 `docs/migrations/20260821-add-gpt-image-2-2k-prices.sql` 初始化上述价格。完成 VIP 定价迁移后，补缺档应使用下方 `EnsureGptImage2TwoK` 命令；重放历史价格脚本会覆盖运营调整。该迁移只维护 `ai_image_point_price`，不会创建或启用 `ai_image_model_config` 的 2K 路由。确认当前启用的 1K 主路由使用官方通用 `provider_model=gpt-image-2` 后，再执行 `docs/migrations/20260821-add-gpt-image-2-2k-primary-route.sql`；后者会复制该主路由的连接配置并启用精确 2K 路由，不会为第三方 1K/4K 专用模型伪造 2K 备用路由。
 
 冒烟检查建议：
 
@@ -390,6 +338,60 @@ legacy 生图会从 `ai_image_point_price` 查询价格并扣除 `points * image
 5. 同时存在月卡和永久积分时创建生图任务，确认先减少月卡批次并写入 `source=image_generate` 流水。
 6. 模拟任务失败时，确认写入 `source=image_refund` 返还流水，批次剩余恢复且 `expires_at` 不变。
 7. 发布升级时先结算所有活动生图任务，再停止全部 API/Worker 写入并执行 `20260819-add-expiring-point-buckets.sql`；禁止旧、新节点同时写积分余额与批次表，并人工核对历史月卡和 Apple 履约流水。
+
+## 生图定价发布与运营
+
+1. 在目标库备份及副本上演练 `docs/migrations/20261124-add-ai-pricing-admin-and-vip-models.sql`。按价格行 ID 比对标准积分，确认每个未删除档有一条 `system_init` 审计，初始 VIP 价为 `CEIL(points * 0.8)`，取整后无优惠则为 NULL。全新数据库使用 `jokester.admin.sql`。
+2. 先迁移，再切换处理新请求的全部 API 实例，再发布 Web。通知运营 API 开始接收流量时 VIP 优惠即生效；默认所有模型全员可用。生产启用 `AiImageSizeMode.Enabled` 须先完成二期发布价格 VIP 支持。
+3. 超管进入 `/admin/pricing`，新增缺价档、编辑标准价或单档 VIP 价，填写原因并保存。模型折扣覆盖默认折扣，手动价单独保留。调整折扣先预览影响条目，冲突后重新预览；切换专属模型后用普通账号、月卡账号和非会员超管分别复核。按批次、操作者和模型查询审计。修正错误价格通过后台再次写入，保留历史审计与任务快照。
+4. 若需回退应用，先暂停受影响的新建入口并核对在途任务与退款。保留扩展表结构。回退旧 API 将停止执行 VIP 准入与优惠，运营确认是否可恢复新流量。禁止通过回退脚本重算历史任务。
+
+API 的 .NET Meter `Jokester.AiImage.Pricing` 发布 `ai.image.pricing.rejections` 计数器。按 `model` 和 `reason` 查看 `PRICE_CHANGED`、`VIP_REQUIRED`、`IMAGE_PRICE_NOT_CONFIGURED`。每个 API 实例的定价巡检每五分钟检查一次，首次发现启用路由无启用价格时输出 `AI_PRICING_ROUTE_UNPRICED`；UTC 当天人工审计超过 `AiImagePricingAdmin:DailyAuditWarningThreshold` 时输出 `AI_PRICING_AUDIT_VOLUME`，默认 500 条。集中日志按模型/路由或 UTC 日期合并多实例告警。系统初始化审计不计入人工告警。上涨后如 `PRICE_CHANGED` 持续集中在同一模型，核查客户端的窗口刷新与价格版本。
+
+下列查询按任务创建日统计，任务以香港时间存储。预留节省和已结算节省分别按请求张数和已完成张数计算，历史无价格快照的任务排除在分母之外。
+
+```sql
+SELECT DATE(created_at) AS task_day, COALESCE(model_code, model_name) AS model, COUNT(*) AS priced_tasks,
+       ROUND(AVG(pricing_tier = 'vip') * 100, 2) AS vip_task_percent,
+       SUM((list_unit_point_cost - unit_point_cost) * image_count) AS reserved_savings,
+       SUM(CASE WHEN billing_status IN (1,2) THEN
+           (list_unit_point_cost - unit_point_cost) * completed_image_count ELSE 0 END) AS settled_savings,
+       SUM(access_basis IS NOT NULL) AS restricted_tasks,
+       SUM(CASE WHEN access_basis = 'super_admin' THEN 1 ELSE 0 END) AS admin_exception_tasks
+FROM ai_image_task
+WHERE pricing_tier IS NOT NULL AND created_at >= UTC_DATE() - INTERVAL 7 DAY
+GROUP BY DATE(created_at), COALESCE(model_code, model_name);
+```
+
+按模型统计从锁定引导到月卡购买的七日转化。分母是期间进入月卡引导的独立用户。购买范围为已付款月卡订单或已履约的 Apple 月卡，另列实际开通人数以覆盖通过独立兑换码到账的权益。操作日志与支付表均使用业务本地时间。按模型可分别归因，同一用户跨模型时不能直接加总。离窗口结束不足七日的用户仍可能转化。
+
+```sql
+WITH guides AS (
+    SELECT user_id, SUBSTRING_INDEX(request_url, '/', -1) AS model_code, created_at
+    FROM sys_operation_log
+    WHERE created_at >= CURRENT_DATE - INTERVAL 30 DAY AND user_id IS NOT NULL
+      AND request_method = 'POST' AND request_url LIKE '/api/ai/model-pricing-events/vip-guide/%'
+      AND JSON_EXTRACT(IF(JSON_VALID(response_data), response_data, NULL), '$.statusCode') = 204
+), purchases AS (
+    SELECT user_id, paid_at AS purchased_at FROM point_recharge_order
+    WHERE package_code = 'monthly' AND status IN (1,2) AND paid_at IS NOT NULL
+    UNION ALL
+    SELECT user_id, starts_at FROM sys_user_membership_entitlement
+    WHERE tier_code = 'monthly_vip' AND source = 'apple_iap'
+), attribution AS (
+    SELECT g.model_code, g.user_id, MAX(EXISTS (
+        SELECT 1 FROM purchases p WHERE p.user_id = g.user_id AND p.purchased_at >= g.created_at
+          AND p.purchased_at < g.created_at + INTERVAL 7 DAY
+    )) AS purchased, MAX(EXISTS (
+        SELECT 1 FROM sys_user_membership_entitlement e WHERE e.user_id = g.user_id AND e.tier_code = 'monthly_vip'
+          AND e.starts_at >= g.created_at AND e.starts_at < g.created_at + INTERVAL 7 DAY
+    )) AS activated
+    FROM guides g GROUP BY g.model_code, g.user_id
+)
+SELECT model_code, COUNT(*) AS guided_users, SUM(purchased) AS buyers, SUM(activated) AS activated_users,
+       ROUND(100 * AVG(purchased), 2) AS conversion_percent
+FROM attribution GROUP BY model_code;
+```
 
 ## GPT Image2 生图配置
 
@@ -516,7 +518,7 @@ $env:AiImageCatalogRelease__AutoPriceAmounts__high = '<approved-cny>'
 dotnet run --project .\jokester.admin -- --configure-ai-image-catalog
 ```
 
-`EnsureGptImage2TwoK=true` 会幂等补齐并按 `1k/2k/4k` 固定参数排序、补齐 2K legacy 价格，并从已启用的通用 GPT Image 2 1K primary 配置复制 2K primary 路由；执行前必须确认该 Provider 路由确实不按业务分辨率使用不同模型别名。命令在一个数据库事务中发布 release 和 current pointer；同版本同内容可重跑，不同内容不得覆盖已发布版本，必须使用新的 `CatalogVersion`。`Approved=true` 和三项 `AutoVerified*` 只允许在相应审批与逐路径证据已留存后设置，不能用本地联调结果代替生产审批。
+`EnsureGptImage2TwoK=true` 会补齐分辨率参数并按 `1k/2k/4k` 排序，再从已启用的通用 GPT Image 2 1K primary 配置复制 2K primary 路由。命令只新建尚无记录的 2K legacy 价格档，保留已有标准价、手动 VIP 价、停用和软删除记录。新档按当前模型折扣或默认折扣向上取整，逐档写入系统审计，同一批补档仅递增一次全局价格版本。重复运行且无缺档时价格版本保持原值。复制路由前需确认当前 Provider 对各分辨率使用同一通用模型别名。命令在一个数据库事务中发布 release 和 current pointer；同版本同内容可重跑，不同内容不得覆盖已发布版本，必须使用新的 `CatalogVersion`。`Approved=true` 和三项 `AutoVerified*` 只允许在相应审批与逐路径证据已留存后设置，不能用本地联调结果代替生产审批。
 
 关键配置：
 
@@ -565,6 +567,36 @@ WHERE model_code IN ('nano-banana-2', 'nano-banana-pro')
 ```
 
 `base_url`、`api_key`、`provider_model` 和两个请求路径都由该表提供。生产密钥由部署时写入数据库，不要写入 `appsettings.json`、`.env.example` 或 SQL 初始化脚本。
+
+## 启用和停用首页 GIF
+
+1. 在目标库执行 `docs/migrations/20261125-add-ai-image-gif-output.sql`。新装库随 `jokester.admin.sql` 创建相同的列。
+2. 先使用 `AiImageGif__AcceptNewTasks=false` 部署全部 API 和后台消费者。确认对应路由已通过原有密钥管理流程配置凭据，并确认该供应商支持原生 GIF 的 generations 和 edits。
+3. 以超管身份打开 Web「模型配置」页，编辑选定路由，在「GIF 供应商模型」填写该渠道确认的 native 别名（如 `gpt-image-2.6-flare-native`）并保存；变更写入路由审计，模型标题出现「支持 GIF」即生效。无法使用后台时，可先用只读查询核对主备角色、渠道及凭据，再执行下面的参数化 SQL。
+
+```sql
+SELECT id, model_code, route_role, resolution_code, provider, gif_provider_model,
+       (COALESCE(TRIM(api_key), '') <> '') AS has_key
+FROM ai_image_model_config
+WHERE model_code IN ('gpt-image-2.6-flare', 'gpt-image-2.6-sunburst')
+  AND status = 1 AND is_deleted = 0;
+
+UPDATE ai_image_model_config
+SET gif_provider_model = @approved_native_alias, revision = revision + 1, updated_at = UTC_TIMESTAMP()
+WHERE id = @selected_route_id AND model_code = @selected_model_code
+  AND model_code IN ('gpt-image-2.6-flare', 'gpt-image-2.6-sunburst')
+  AND status = 1 AND is_deleted = 0 AND TRIM(api_key) <> '';
+```
+
+4. 设置 `AiImageGif__AcceptNewTasks=true` 并重启 API；从首页检查能力、实付与退款。当前 Web 用户被分配到这两款模型的 `size-mode-v1` 合约时，模型不下发 GIF 能力。
+5. 降版时，先将所有入口的 `AiImageGif__AcceptNewTasks` 设为 `false` 并应用配置。保留原路由、密钥和新版消费者，直至以下查询返回零，再回滚程序或清除原生别名。
+
+```sql
+SELECT COUNT(*) AS unsettled_gifs
+FROM ai_image_task WHERE output_format = 'gif' AND billing_status = 0;
+```
+
+本机使用 DNS 代理时，供应商及结果 CDN 的域名需要在 API 容器内解析到真实公网地址。遇到 `Outbound endpoint did not resolve to an approved public address` 时，先从容器核对 DNS。`198.18.0.0/15` 是部分代理返回的合成地址，GPT 请求的出站校验会拒绝它。为这两个域名配置真实 DNS 即可保留连接时地址校验。
 
 ## 用户管理上线检查
 

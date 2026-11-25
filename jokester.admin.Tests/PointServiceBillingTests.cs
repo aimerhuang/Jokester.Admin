@@ -17,10 +17,104 @@ public sealed class PointServiceBillingTests
 {
     private const long UserId = 1;
 
+    [Theory]
+    [InlineData(26, 26, 0, 439, "0.0665")]
+    [InlineData(1024, null, null, 439, "0.09145")]
+    [InlineData(1024, 0, 1024, 439, "0.10681")]
+    [InlineData(0, 0, 0, 0, "0")]
+    [InlineData(0, 0, 0, 100_000, "15")]
+    [InlineData(null, null, null, null, null)]
+    public async Task GifSettlement_ChargesFixedQuoteAndRecordsUsageForReconciliation(
+        int? input, int? text, int? image, int? output, string? expectedCost)
+    {
+        var gifOptions = new AiImageGifOptions();
+        using var context = new TestContext(200, gifOptions: gifOptions);
+        var bucket = context.AddBucket(200, DateTime.Now.AddDays(1), 0, "recharge");
+        var task = CreateGifTask("gif-cost");
+        const string model = "gpt-image-2.6-sunburst";
+        context.Db.Insertable(new AiImageModelPolicyEntity { ModelCode = model, AccessLevel = "vip_only" }).ExecuteCommand();
+        var denied = await Assert.ThrowsAsync<jokester.admin.Common.Exceptions.AppException>(() =>
+            context.Service.ReserveImageTaskAsync(task, model, "", "low", default));
+        Assert.Equal(MachineErrorCodes.VipRequired, denied.MachineCode);
+        context.GrantVip();
+        var priceChanged = await Assert.ThrowsAsync<jokester.admin.Common.Exceptions.AppException>(() =>
+            context.Service.ReserveImageTaskAsync(task, model, "", "low", default, 43));
+        Assert.Equal(MachineErrorCodes.PriceChanged, priceChanged.MachineCode);
+        Assert.Empty(context.GetDetails());
+        var quoted = 0;
+        await context.Service.ReserveImageTaskAsync(task, model, "", "low", default, 44,
+            total => { quoted = total; return Task.CompletedTask; });
+        Assert.Equal(44, quoted); // base 2 + 9 low frames * 4 + one reference * 6
+        Assert.Equal("gif_fixed", task.PricingTier);
+        Assert.Equal("vip", task.AccessBasis);
+        Assert.Equal(156, context.GetBucket(bucket.Id).RemainingPoints);
+        context.RevokeVip();
+        gifOptions.TokenPricing.Output.PlatformCnyPerMillion = 2000;
+        GifTokenUsage? usage = input.HasValue ? new(input.Value, text, image, output!.Value) : null;
+        var settled = await context.Service.SettleImageTaskAsync(task.Id, 1, "[\"/api/media/ai/1/a.gif\"]", null, 1,
+            default, gifResult: new GifTaskResult(768, 768, usage));
+        var replay = await context.Service.SettleImageTaskAsync(task.Id, 2, null, "late timeout", 0, default);
+        var saved = context.Db.Queryable<AiImageTaskEntity>().Single(t => t.Id == task.Id);
+        Assert.True(settled.Transitioned);
+        Assert.False(replay.Transitioned);
+        // Token usage never lowers the fixed price; it is kept only to compare against the provider bill.
+        Assert.Equal(0, settled.RefundedPoints);
+        Assert.Equal(156, context.GetBucket(bucket.Id).RemainingPoints);
+        Assert.Equal(156, context.GetUser().PointBalance);
+        Assert.Equal(1, saved.BillingStatus);
+        Assert.Equal(44, saved.ChargedPoints);
+        Assert.Equal(0, saved.RefundedPoints);
+        Assert.Equal(expectedCost is null ? (decimal?)null : decimal.Parse(expectedCost, System.Globalization.CultureInfo.InvariantCulture), saved.PlatformCostCny);
+        Assert.Equal(usage?.InputBreakdown, saved.UsageInputBreakdown);
+        Assert.Equal(text, saved.UsageTextInputTokens);
+        Assert.Equal(image, saved.UsageImageInputTokens);
+        Assert.Equal(output, saved.UsageOutputTokens);
+        Assert.Equal(input, saved.UsageInputTokens);
+        Assert.Equal("image/gif", saved.OutputMimeType);
+        Assert.Equal(768, saved.OutputWidth);
+        Assert.Equal(0, context.GetUsages().Single().RefundedPoints);
+        Assert.DoesNotContain(context.GetDetails(), detail => detail.Source == "image_refund");
+    }
+
+    [Fact]
+    public async Task GifTimeout_WithPartialUrlAndRepeatedRecovery_RefundsEntireReserveOnce()
+    {
+        using var context = new TestContext(pointBalance: 60);
+        var task = CreateGifTask("gif-timeout");
+        await context.Service.ReserveImageTaskAsync(task, "gpt-image-2.6-sunburst", "", "low", default);
+        var timeout = await context.Service.SettleImageTaskAsync(task.Id, 2, "[\"/api/media/ai/1/tmp.gif\"]", "timeout", 1, default);
+        var lateSuccess = await context.Service.SettleImageTaskAsync(task.Id, 1, "[]", null, 1, default,
+            gifResult: new GifTaskResult(768, 768, new GifTokenUsage(26, 26, 0, 439)));
+        var saved = context.Db.Queryable<AiImageTaskEntity>().Single(t => t.Id == task.Id);
+        Assert.True(timeout.Transitioned);
+        Assert.False(lateSuccess.Transitioned);
+        Assert.Null(saved.ResultUrls);
+        Assert.Equal(2, saved.Status);
+        Assert.Equal(3, saved.BillingStatus);
+        Assert.Equal(0, saved.CompletedImageCount);
+        Assert.Equal(0, saved.ChargedPoints);
+        Assert.Equal(44, saved.RefundedPoints);
+        Assert.Equal(60, context.GetUser().PointBalance);
+        Assert.Single(context.GetDetails(), detail => detail.Source == "image_refund");
+    }
+
+    private static AiImageTaskEntity CreateGifTask(string key)
+    {
+        var task = CreateTask(1, key);
+        task.ModelName = "gpt-image-2.6-sunburst";
+        task.OutputFormat = "gif";
+        task.QualityCode = "low";
+        task.ResolutionCode = null;
+        task.FrameCount = 9;
+        task.FrameDurationMs = 200;
+        task.ReferenceImageUrls = "[\"/api/media/ai/1/reference.png\"]";
+        return task;
+    }
+
     [Fact]
     public async Task ReserveImageTaskAsync_UsesMonthlyBucketBeforeHistoricalPermanentBalance()
     {
-        using var context = new TestContext(pointBalance: 1_000);
+        using var context = new TestContext(pointBalance: 1_000, standardPoints: 300);
         var monthly = context.AddBucket(
             points: 600,
             expiresAt: DateTime.Now.AddDays(30),
@@ -52,7 +146,7 @@ public sealed class PointServiceBillingTests
     [Fact]
     public async Task ReserveImageTaskAsync_SpansExpiringBucketsThenUsesPermanentBalance()
     {
-        using var context = new TestContext(pointBalance: 1_000);
+        using var context = new TestContext(pointBalance: 1_000, standardPoints: 250);
         var earlierMonthly = context.AddBucket(
             points: 100,
             expiresAt: DateTime.Now.AddDays(10),
@@ -169,7 +263,7 @@ public sealed class PointServiceBillingTests
     [Fact]
     public async Task SettleImageTaskAsync_WhenTaskFails_RestoresOriginalBucketWithoutExtendingExpiry()
     {
-        using var context = new TestContext(pointBalance: 1_000);
+        using var context = new TestContext(pointBalance: 1_000, standardPoints: 300);
         var monthly = context.AddBucket(
             points: 500,
             expiresAt: DateTime.Now.AddDays(15),
@@ -252,7 +346,7 @@ public sealed class PointServiceBillingTests
     public async Task SettleImageTaskAsync_AppleRefundedReservationFailureDoesNotRestoreRevokedGrantPoints(
         bool expiringGrant)
     {
-        using var context = new TestContext(pointBalance: 100);
+        using var context = new TestContext(pointBalance: 100, standardPoints: 60);
         var monthly = context.AddBucket(
             points: 100,
             expiresAt: expiringGrant ? DateTime.Now.AddDays(30) : null,
@@ -315,7 +409,7 @@ public sealed class PointServiceBillingTests
     [Fact]
     public async Task SettleImageTaskAsync_AppleRefundedReservationSuccessAppliesDeferredClawback()
     {
-        using var context = new TestContext(pointBalance: 125);
+        using var context = new TestContext(pointBalance: 125, standardPoints: 60);
         var monthly = context.AddBucket(
             points: 100,
             expiresAt: DateTime.Now.AddDays(30),
@@ -445,7 +539,7 @@ public sealed class PointServiceBillingTests
     [Fact]
     public async Task SettleImageTaskAsync_WhenOriginalBucketAlreadyExpired_RefundExpiresAgainWithoutConflict()
     {
-        using var context = new TestContext(pointBalance: 1_000);
+        using var context = new TestContext(pointBalance: 1_000, standardPoints: 300);
         var monthly = context.AddBucket(
             points: 500,
             expiresAt: DateTime.Now.AddDays(15),
@@ -515,7 +609,7 @@ public sealed class PointServiceBillingTests
     [Fact]
     public async Task ReserveImageTaskAsync_UsesCurrentSignInBeforeTrackedPermanentPackage()
     {
-        using var context = new TestContext(pointBalance: 300);
+        using var context = new TestContext(pointBalance: 300, standardPoints: 25);
         var permanentPackage = context.AddBucket(
             points: 200,
             expiresAt: null,
@@ -539,6 +633,36 @@ public sealed class PointServiceBillingTests
         var usage = Assert.Single(context.GetUsages());
         Assert.Equal(signIn.Id, usage.BucketId);
         Assert.Equal(25, usage.UsedPoints);
+    }
+
+    [Fact]
+    public async Task VersionedBatchReservation_DeniesRestrictedModelBeforeLookingUpPrice()
+    {
+        using var context = new TestContext(pointBalance: 100);
+        context.Db.Insertable(new AiImageModelPolicyEntity { ModelCode = "gpt-image-2", AccessLevel = "vip_only" }).ExecuteCommand();
+        var now = DateTime.Now;
+        var error = await Assert.ThrowsAsync<jokester.admin.Common.Exceptions.AppException>(() => context.Service.ReserveVersionedImageTasksAsync(
+            CreateVersionedRequest(1, now), [CreateVersionedTask(1, 99, 0, now), CreateVersionedTask(1, 99, 1, now)], [], 99, default));
+        Assert.Equal(MachineErrorCodes.VipRequired, error.MachineCode);
+        Assert.Empty(context.Db.Queryable<AiImageRequestEntity>().ToList());
+        Assert.Empty(context.Db.Queryable<AiImageTaskEntity>().ToList());
+        Assert.Empty(context.GetDetails());
+    }
+
+    [Fact]
+    public async Task VersionedBatchReservation_CountsMissingReleasePriceAndRollsBack()
+    {
+        using var context = new TestContext(pointBalance: 100);
+        var now = DateTime.Now;
+        var error = await PricingRejectionMetrics.AssertMissingPriceAsync("gpt-image-2", () =>
+            context.Service.ReserveVersionedImageTasksAsync(
+                CreateVersionedRequest(1, now),
+                [CreateVersionedTask(1, 99, 0, now), CreateVersionedTask(1, 99, 1, now)], [], 99, default));
+        Assert.Equal(ErrorCodes.Conflict, error.Code);
+        Assert.Equal(MachineErrorCodes.ImageCatalogChanged, error.MachineCode);
+        Assert.Empty(context.Db.Queryable<AiImageRequestEntity>().ToList());
+        Assert.Empty(context.Db.Queryable<AiImageTaskEntity>().ToList());
+        Assert.Empty(context.GetDetails());
     }
 
     [Fact]
@@ -835,6 +959,49 @@ public sealed class PointServiceBillingTests
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GifWorker_SettlesNativeResultOrRefundsOnce(bool invalidOutput)
+    {
+        using var context = new TestContext(pointBalance: 100);
+        var task = CreateGifTask("gif-worker");
+        const string modelCode = "gpt-image-2.6-sunburst";
+        await context.Service.ReserveImageTaskAsync(task, modelCode, "", "low", default);
+        IReadOnlyList<ResolvedAiImageModelConfig> routes = [new() { ProviderModel = "native" }];
+        var models = new Mock<IAiImageModelConfigService>(MockBehavior.Strict);
+        models.Setup(x => x.ResolveGifRoutesAsync(modelCode, It.IsAny<CancellationToken>())).ReturnsAsync(routes);
+        var imageService = new Mock<IAiImageService>(MockBehavior.Strict);
+        const string url = "/api/media/ai/1/animation.gif";
+        imageService.Setup(x => x.GenerateGifFromTaskAsync(It.Is<AiImageTaskEntity>(t => t.Id == task.Id), routes, It.IsAny<CancellationToken>()))
+            .Returns(() =>
+            {
+                if (invalidOutput)
+                    throw new jokester.admin.Common.Exceptions.AppException(ErrorCodes.BadRequest, MachineErrorCodes.ProviderOutputInvalid, "unexpected frame count");
+                return Task.FromResult((url, new GifTaskResult(768, 768, new GifTokenUsage(1024, null, null, 439))));
+            });
+        using var services = new ServiceCollection().AddSingleton(imageService.Object).BuildServiceProvider();
+        var gate = new Mock<IAiImageProviderGate>();
+        gate.Setup(x => x.AcquireAsync(It.IsAny<CancellationToken>())).ReturnsAsync(Mock.Of<IAiImageProviderLease>());
+        var admission = new Mock<IAiImageAdmissionService>();
+        var worker = new AiImageTaskProcessor(context.Db, services.GetRequiredService<IServiceScopeFactory>(), context.Service,
+            admission.Object, gate.Object, Mock.Of<IAiPromptFilter>(), models.Object, Mock.Of<IAiImageCatalogService>(),
+            Options.Create(new AiImageSizeModeOptions()), NullLogger<AiImageTaskProcessor>.Instance);
+        await worker.ProcessAsync(task.Id, default);
+        await worker.ProcessAsync(task.Id, default);
+
+        var settled = context.Db.Queryable<AiImageTaskEntity>().Single(x => x.Id == task.Id);
+        Assert.Equal(invalidOutput ? 2 : 1, settled.Status);
+        Assert.Equal(invalidOutput ? 0 : 44, settled.ChargedPoints);
+        Assert.Equal(invalidOutput ? 44 : 0, settled.RefundedPoints);
+        Assert.Equal(invalidOutput ? null : "unsplit", settled.UsageInputBreakdown);
+        Assert.Equal(invalidOutput ? null : $"[\"{url}\"]", settled.ResultUrls);
+        gate.Verify(x => x.AcquireAsync(It.IsAny<CancellationToken>()), Times.Once);
+        gate.Verify(x => x.ReportSuccessAsync(), invalidOutput ? Times.Never : Times.Once);
+        gate.Verify(x => x.ReportFailureAsync(), invalidOutput ? Times.Once : Times.Never);
+        admission.Verify(x => x.CompleteAsync(It.IsAny<AiImageTaskEntity>(), invalidOutput ? 0 : 1, invalidOutput ? 44 : 0), Times.Once);
+    }
+
+    [Theory]
     [InlineData(true, false, false)] // versioned queue: fail during account preflight
     [InlineData(false, false, false)] // legacy queue: provider succeeds after disable
     [InlineData(false, true, false)] // legacy queue: failed provider call is refunded
@@ -862,7 +1029,7 @@ public sealed class PointServiceBillingTests
             .ReturnsAsync(new ResolvedAiImageModelConfig { ProviderProtocol = "openai-image", ConsentProviderCode = "openai" });
         var worker = new AiImageTaskProcessor(context.Db, services.GetRequiredService<IServiceScopeFactory>(), context.Service,
             Mock.Of<IAiImageAdmissionService>(), gate.Object, Mock.Of<IAiPromptFilter>(), models.Object,
-            Mock.Of<IAiImageCatalogService>(), Mock.Of<IUserConsentService>(), Options.Create(new AiImageSizeModeOptions()),
+            Mock.Of<IAiImageCatalogService>(), Options.Create(new AiImageSizeModeOptions()),
             NullLogger<AiImageTaskProcessor>.Instance);
         await worker.ProcessAsync(reservation.TaskId, default);
         await worker.ProcessAsync(reservation.TaskId, default);
@@ -874,6 +1041,102 @@ public sealed class PointServiceBillingTests
         Assert.Equal(versioned ? MachineErrorCodes.AccountUnavailable : null, task.FailureCode);
         Assert.Equal(versioned ? null : failed ? 2 : 1, task.HealthSample);
         gate.Verify(x => x.AcquireAsync(It.IsAny<CancellationToken>()), versioned ? Times.Never() : Times.Once());
+    }
+
+    [Theory]
+    [InlineData(false, false, null)]
+    [InlineData(true, false, "vip")]
+    [InlineData(false, true, "super_admin")]
+    [InlineData(true, true, "vip")]
+    public async Task VipOnly_UsesLiveIdentityAndPersistsActualPrice(bool vip, bool admin, string? basis)
+    {
+        using var context = new TestContext(pointBalance: 500);
+        const string model = "gpt-image-2";
+        context.Db.Insertable(new AiImageModelPolicyEntity { ModelCode = model, AccessLevel = "vip_only" }).ExecuteCommand();
+        context.Db.Updateable<SysUserEntity>().SetColumns(x => x.IsSuperAdmin == admin).Where(x => x.Id == UserId).ExecuteCommand();
+        if (vip) context.GrantVip();
+        var task = CreateTask(1, "vip-reservation");
+        if (basis is null)
+        {
+            var error = await Assert.ThrowsAsync<jokester.admin.Common.Exceptions.AppException>(() =>
+                context.Service.ReserveImageTaskAsync(task, model, "1k", "med", default));
+            Assert.Equal(MachineErrorCodes.VipRequired, error.MachineCode);
+            Assert.Equal(500, context.GetUser().PointBalance);
+            Assert.Empty(context.GetDetails());
+            return;
+        }
+        var expected = vip ? 80 : 100;
+        var created = await context.Service.ReserveImageTaskAsync(task, model, "1k", "med", default, expected);
+        Assert.Equal(expected, task.PointCost);
+        Assert.Equal(expected, task.UnitPointCost);
+        Assert.Equal(100, task.ListUnitPointCost);
+        Assert.Equal(vip ? "vip" : "standard", task.PricingTier);
+        Assert.Equal(basis, task.AccessBasis);
+        Assert.Equal(500 - expected, context.GetUser().PointBalance);
+        if (vip) context.RevokeVip();
+        var replay = await context.Service.ReserveImageTaskAsync(task, model, "1k", "med", default, 1);
+        Assert.False(replay.Created);
+        Assert.Equal(created.TaskId, replay.TaskId);
+        Assert.Single(context.GetDetails());
+        var refund = await context.Service.SettleImageTaskAsync(task.Id, 2, null, "failed", 0, default);
+        Assert.Equal(expected, refund.RefundedPoints);
+        Assert.Equal(500, context.GetUser().PointBalance);
+    }
+
+    [Fact]
+    public async Task ExpiredVip_PriceCeilingRejectsIncreaseAndLeavesKeyReusable()
+    {
+        using var context = new TestContext(pointBalance: 500);
+        context.GrantVip();
+        var quote = await context.Service.GetImageGenerateCostAsync("gpt-image-2", "1k", "med", 1, default);
+        Assert.Equal(80, quote);
+        context.RevokeVip();
+        var task = CreateTask(80, "changed-price");
+        var error = await Assert.ThrowsAsync<jokester.admin.Common.Exceptions.AppException>(() =>
+            context.Service.ReserveImageTaskAsync(task, "gpt-image-2", "1k", "med", default, quote));
+        Assert.Equal(MachineErrorCodes.PriceChanged, error.MachineCode);
+        Assert.Empty(context.GetDetails());
+        Assert.Empty(context.Db.Queryable<AiImageTaskEntity>().ToList());
+        Assert.Equal(500, context.GetUser().PointBalance);
+        var reserved = await context.Service.ReserveImageTaskAsync(task, "gpt-image-2", "1k", "med", default, 100);
+        Assert.True(reserved.Created);
+        Assert.Equal(100, task.PointCost);
+    }
+
+    [Fact]
+    public async Task ActiveVipWithoutDiscountPaysStandardAndSettlesAfterAccessChanges()
+    {
+        using var context = new TestContext(pointBalance: 500);
+        context.GrantVip();
+        context.Db.Ado.ExecuteCommand("UPDATE ai_image_point_price SET vip_points=NULL");
+        var task = CreateTask(100, "standard-no-discount");
+        await context.Service.ReserveImageTaskAsync(task, "gpt-image-2", "1k", "med", default);
+        Assert.Equal("standard", task.PricingTier);
+        Assert.Equal(100, task.UnitPointCost);
+        Assert.Equal(task.UnitPointCost, task.ListUnitPointCost);
+        context.RevokeVip();
+        context.Db.Insertable(new AiImageModelPolicyEntity { ModelCode = "gpt-image-2", AccessLevel = "vip_only" }).ExecuteCommand();
+        var settled = await context.Service.SettleImageTaskAsync(task.Id, 1, "[]", null, 1, default);
+        Assert.True(settled.Transitioned);
+        Assert.Equal(0, settled.RefundedPoints);
+        Assert.Equal(400, context.GetUser().PointBalance);
+        Assert.Single(context.GetDetails());
+    }
+
+    [Fact]
+    public async Task RestrictedModelRechecksVipBetweenQuoteAndReservation()
+    {
+        using var context = new TestContext(pointBalance: 500);
+        context.Db.Insertable(new AiImageModelPolicyEntity { ModelCode = "gpt-image-2", AccessLevel = "vip_only" }).ExecuteCommand();
+        context.GrantVip();
+        var seen = await context.Service.GetImageGenerateCostAsync("gpt-image-2", "1k", "med", 1, default);
+        context.RevokeVip();
+        var ex = await Assert.ThrowsAsync<jokester.admin.Common.Exceptions.AppException>(() => context.Service.ReserveImageTaskAsync(
+            CreateTask(seen, "revoked-between-checks"), "gpt-image-2", "1k", "med", default, seen));
+        Assert.Equal(MachineErrorCodes.VipRequired, ex.MachineCode);
+        Assert.Empty(context.Db.Queryable<AiImageTaskEntity>().ToList());
+        Assert.Empty(context.GetDetails());
+        Assert.Equal(500, context.GetUser().PointBalance);
     }
 
     private static AiImageTaskEntity CreateTask(int pointCost, string key) => new()
@@ -898,11 +1161,11 @@ public sealed class PointServiceBillingTests
         CreatedAt = DateTime.Now
     };
 
-    private sealed class TestContext : IDisposable
+    internal sealed class TestContext : IDisposable
     {
         private int _bucketSequence;
 
-        public TestContext(int pointBalance)
+        public TestContext(int pointBalance, int standardPoints = 100, AiImageGifOptions? gifOptions = null)
         {
             SQLitePCL.Batteries_V2.Init();
             Db = new SqlSugarClient(new ConnectionConfig
@@ -1020,6 +1283,17 @@ public sealed class PointServiceBillingTests
                 );
 
                 CREATE TABLE ai_image_task (
+                    output_format TEXT NOT NULL DEFAULT 'png',
+                    frame_count INTEGER NULL,
+                    frame_duration_ms INTEGER NULL,
+                    gif_rate_snapshot TEXT NULL,
+                    usage_input_tokens INTEGER NULL,
+                    usage_text_input_tokens INTEGER NULL,
+                    usage_image_input_tokens INTEGER NULL,
+                    usage_output_tokens INTEGER NULL,
+                    usage_input_breakdown TEXT NULL,
+                    charged_points INTEGER NULL,
+                    platform_cost_cny NUMERIC NULL,
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     site_id INTEGER NOT NULL,
                     user_id INTEGER NOT NULL,
@@ -1043,6 +1317,9 @@ public sealed class PointServiceBillingTests
                     price_id INTEGER NULL,
                     price_release_id INTEGER NULL,
                     unit_point_cost INTEGER NULL,
+                    pricing_tier TEXT NULL,
+                    list_unit_point_cost INTEGER NULL,
+                    access_basis TEXT NULL,
                     image_count INTEGER NOT NULL,
                     completed_image_count INTEGER NOT NULL DEFAULT 0,
                     idempotency_key TEXT NOT NULL,
@@ -1178,6 +1455,24 @@ public sealed class PointServiceBillingTests
                 );
                 """);
 
+            Db.Ado.ExecuteCommand("""
+                CREATE TABLE ai_image_point_price (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, model_code TEXT, resolution_code TEXT, quality_code TEXT,
+                    points INTEGER, vip_points INTEGER, vip_price_mode TEXT, price_amount NUMERIC, currency TEXT,
+                    sort INTEGER, status INTEGER, revision INTEGER, updated_by INTEGER,
+                    created_at TEXT, updated_at TEXT, is_deleted INTEGER);
+                CREATE TABLE ai_image_model_policy (
+                    model_code TEXT PRIMARY KEY, access_level TEXT, required_tier_code TEXT,
+                    vip_discount_percent INTEGER, revision INTEGER, updated_by INTEGER, updated_at TEXT);
+                CREATE TABLE sys_user_membership_entitlement (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, tier_code TEXT, source TEXT, business_key TEXT,
+                    starts_at TEXT, expires_at TEXT, status TEXT, revoked_at TEXT, created_at TEXT, updated_at TEXT);
+                """);
+            Db.Insertable(new AiImagePointPriceEntity
+            {
+                ModelCode = "gpt-image-2", ResolutionCode = "1k", QualityCode = "med",
+                Points = standardPoints, VipPoints = standardPoints * 8 / 10, CreatedAt = DateTime.Now
+            }).ExecuteCommand();
             Db.Insertable(new SysUserEntity
             {
                 Id = UserId,
@@ -1190,12 +1485,22 @@ public sealed class PointServiceBillingTests
 
             var currentUser = new Mock<ICurrentUser>();
             currentUser.SetupGet(x => x.UserId).Returns(UserId);
-            Service = new PointService(Db, currentUser.Object);
+            Service = new PointService(Db, currentUser.Object, gifOptions: Options.Create(gifOptions ?? new AiImageGifOptions()));
         }
 
         public SqlSugarClient Db { get; }
 
         public PointService Service { get; }
+
+        public void GrantVip() => Db.Insertable(new SysUserMembershipEntitlementEntity
+        {
+            UserId = UserId, TierCode = "monthly_vip", Source = "test", BusinessKey = "vip",
+            StartsAt = DateTime.Now.AddHours(-1), ExpiresAt = DateTime.Now.AddHours(1),
+            Status = "active", CreatedAt = DateTime.Now
+        }).ExecuteCommand();
+
+        public void RevokeVip() => Db.Updateable<SysUserMembershipEntitlementEntity>()
+            .SetColumns(x => x.Status == "revoked").Where(x => x.UserId == UserId).ExecuteCommand();
 
         public PointBucketEntity AddBucket(
             int points,

@@ -56,20 +56,23 @@ ssh root@<server-ip> "cd /opt/jokester-admin && ./jokester.sh deploy-api ./jokes
 
 ### 后端有编排文件（`docker/`）或 `jokester.admin.sql` 变更
 
-先打包并上传，服务器解压覆盖后再发布；数据库增量迁移要在 `deploy-api` 之前执行（见下）：
+部署包包含空库初始化文件 `jokester.admin.sql`，以及 `deploy/api-sql-files.txt` 中列出的增量迁移和核验 SQL。先上传并解压：
 
 ```powershell
 cd E:\Project\Jokester.Admin
-tar -cf jokester-docker-bundle.tar -C docker compose.yaml compose.production.yaml jokester.sh .env.production.example api.env.production.example legal.env.example README.md mysql/initdb/10-jokester-init.sh mysql/import/README.md -C .. jokester.admin.sql
+$releaseSql = Get-Content -LiteralPath deploy/api-sql-files.txt
+$env:COPYFILE_DISABLE = '1' # macOS tar 忽略扩展属性
+tar -cf jokester-docker-bundle.tar -C docker compose.yaml compose.production.yaml jokester.sh .env.production.example api.env.production.example README.md mysql/initdb/10-jokester-init.sh mysql/import/README.md -C .. jokester.admin.sql @releaseSql
+if ($LASTEXITCODE -ne 0) { throw "部署包生成失败" }
 scp jokester-docker-bundle.tar root@<server-ip>:/opt/jokester-admin/
 ssh root@<server-ip> "cd /opt/jokester-admin && tar -xf jokester-docker-bundle.tar --no-same-owner && chmod 755 jokester.sh && rm jokester-docker-bundle.tar"
 ```
 
-随后执行上面的“只更新后端”命令。
+核对目标库并完成该版本要求的迁移后，执行上面的“只更新后端”命令。使用 `deploy/teamcity-deploy.ps1` 时，该入口会解包后直接切换 API，须在触发部署前将所需 SQL 传到服务器并完成核验与迁移。
 
 ### 数据库增量迁移
 
-API 会读取新表和新列，必须先迁移、再发布。已有库不会重新执行 `jokester.admin.sql`：
+已有数据卷按版本说明运行增量 SQL。`jokester.admin.sql` 包含 `DROP TABLE`，仅供空库初始化。`deploy-api` 切换镜像时不会执行 SQL。
 
 ```bash
 cd /opt/jokester-admin
@@ -77,7 +80,32 @@ cd /opt/jokester-admin
 ./jokester.sh sql /path/to/migration.sql
 ```
 
-迁移文件在 `docs/migrations/`，先用 `scp` 传到服务器。不要重复执行已经跑过的迁移。
+### 2026-11-25 AI 生图后端
+
+本次升级以已经包含 11 月 22 日模型配置审计表和路由 `revision` 的 `main` 为基线（`12dd15b`）。解包后，在目标服务器运行只读核验。先确认 `target_database` 是业务库，再比较每项的 `actual` 和 `expected`。
+
+```bash
+cd /opt/jokester-admin
+./jokester.sh sql docs/checks/20261125-ai-image-rollout.sql
+```
+
+| 核验项 | 对应增量（位于 `docs/migrations/`） | 生效内容 |
+| --- | --- | --- |
+| `vip_price_columns`、`vip_task_columns`、`vip_tables`、`vip_price_checks`、`vip_setting_row` | `20261124-add-ai-pricing-admin-and-vip-models.sql` | 保留标准价，首次初始化 VIP 折扣与审计。后续运营调价以库内记录为准。 |
+| `old_gpt_seed_names` | `20261124-unify-ai-image-model-names.sql` | 将仍带 1K/2K/4K 后缀的 GPT Image 2 种子名改为统一展示名，并记录审计。 |
+| `gif_task_columns`、`gif_route_column` | `20261125-add-ai-image-gif-output.sql` | 增加 GIF 任务、用量与路由别名字段。已有任务的输出格式默认为 `png`。 |
+
+**已经更新的服务器**：各项均符合预期即可跳过本批 SQL。**等待升级的服务器**：先备份，只执行核验显示尚缺的对应行，再重复核验。若同一组列只出现一部分，先核对 `SHOW CREATE TABLE` 与对应迁移中的 `ALTER TABLE`；须补齐差异后再切换 API。
+
+```bash
+./jokester.sh backup
+./jokester.sh sql docs/migrations/20261124-add-ai-pricing-admin-and-vip-models.sql
+./jokester.sh sql docs/migrations/20261124-unify-ai-image-model-names.sql
+./jokester.sh sql docs/migrations/20261125-add-ai-image-gif-output.sql
+./jokester.sh sql docs/checks/20261125-ai-image-rollout.sql
+```
+
+首次上线时，在服务器 `api.env` 中设置 `AiImageGif__AcceptNewTasks=false`，再升级全部 API 和 Worker。确认消费者已升级、超管已在模型配置页填好支持 GIF 的供应商别名后，开放新任务并发布 Web。需要降版时，先关闭 GIF 新建，让新版 Worker 结清在途任务。具体设置和结清查询见 [运行手册](runbook.md#启用和停用首页-gif)。
 
 ### 验收与回滚
 
@@ -187,7 +215,6 @@ mkdir -p /opt/jokester-admin
 | `./jokester.sh seed-admin` | 创建或重置超级管理员（支持邮箱账号；会撤销该账号现有会话） |
 | `./jokester.sh sql docs-migration.sql` | 执行增量迁移 |
 | `./jokester.sh backup` | 导出数据库到 `backups/`（600 权限） |
-| `./jokester.sh legal` | 按 `legal.env` 配置法律文档 |
 | `./jokester.sh cli --migrate-ai-media --dry-run` | 执行 API 维护命令 |
 
 也可以直接使用 `docker compose`：`.env` 中的 `COMPOSE_FILE` 已组合生产编排，`API_IMAGE` / `WEB_IMAGE`

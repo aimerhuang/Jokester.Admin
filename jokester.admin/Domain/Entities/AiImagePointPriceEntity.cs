@@ -20,6 +20,18 @@ public sealed class AiImagePointPriceEntity
     [SugarColumn(ColumnName = "points")]
     public int Points { get; set; }
 
+    [SugarColumn(ColumnName = "vip_points")]
+    public int? VipPoints { get; set; }
+
+    [SugarColumn(ColumnName = "vip_price_mode")]
+    public string VipPriceMode { get; set; } = "follow";
+
+    [SugarColumn(ColumnName = "revision")]
+    public int Revision { get; set; }
+
+    [SugarColumn(ColumnName = "updated_by")]
+    public long? UpdatedBy { get; set; }
+
     [SugarColumn(ColumnName = "price_amount")]
     public decimal PriceAmount { get; set; }
 
