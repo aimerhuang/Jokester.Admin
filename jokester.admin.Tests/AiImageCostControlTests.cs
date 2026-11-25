@@ -97,6 +97,18 @@ public sealed class AiImageCostControlTests
             Assert.Equal(7, reservations.Count(x => x.IsDuplicate));
 
             var owner = reservations.Single(x => !x.IsDuplicate);
+            var reduced = await service.AdjustPointCostAsync(owner, 80, default);
+            var dailyKey = $"{instanceName}:security:ai:daily:{owner.QuotaDate}:points:42";
+            Assert.Equal(80L, (long)await connection.GetDatabase().StringGetAsync(dailyKey));
+            await service.AdjustPointCostAsync(owner, 80, default); // Reply to a prior adjustment may have been lost.
+            Assert.Equal(80L, (long)await connection.GetDatabase().StringGetAsync(dailyKey));
+            var quota = await Assert.ThrowsAsync<AppException>(() => service.AdjustPointCostAsync(reduced, 110, default));
+            Assert.Equal(ErrorCodes.TooManyRequests, quota.Code);
+            await service.CancelAsync(owner); // The caller may still know only the initial amount.
+            Assert.Equal(0L, (long)await connection.GetDatabase().StringGetAsync(dailyKey));
+            owner = await service.ReserveAsync(42, new string('a', 64), new string('b', 64), 2, 60, default);
+            owner = await service.AdjustPointCostAsync(owner, 100, default);
+            Assert.Equal(100L, (long)await connection.GetDatabase().StringGetAsync(dailyKey));
             await service.BindTaskAsync(owner, 99, default);
             var repeated = await service.ReserveAsync(42, new string('a', 64), new string('b', 64), 2, 100, default);
             Assert.True(repeated.IsDuplicate);

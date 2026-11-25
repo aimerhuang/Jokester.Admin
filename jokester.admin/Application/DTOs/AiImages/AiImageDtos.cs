@@ -1,4 +1,6 @@
+using System.Text.Json.Serialization;
 using jokester.admin.Application.DTOs.Common;
+using jokester.admin.Infrastructure;
 using Microsoft.AspNetCore.Http;
 
 namespace jokester.admin.Application.DTOs.AiImages;
@@ -22,6 +24,28 @@ public sealed class AiImageQuery : PageQuery
 
 public sealed class AiImageTaskDto
 {
+    /// <summary>任务输出格式。</summary>
+    public string OutputFormat { get; init; } = "png";
+    /// <summary>动图帧数。</summary>
+    public int? FrameCount { get; init; }
+    /// <summary>单帧时长（毫秒）。</summary>
+    public int? FrameDurationMs { get; init; }
+    /// <summary>上游报告的用量，输入未拆分时分类明细为空。</summary>
+    public GifUsageDto? Usage { get; init; }
+    /// <summary>GIF 结算后的实扣积分。</summary>
+    public int? ChargedPoints { get; init; }
+    /// <summary>按创建时单价计算的平台费用（人民币），封顶前。</summary>
+    public decimal? PlatformCostCny { get; init; }
+
+    /// <summary>预留时实际采用的计价档。</summary>
+    public string? PricingTier { get; init; }
+
+    /// <summary>预留时每张图实际扣除的积分。</summary>
+    public int? UnitPointCost { get; init; }
+
+    /// <summary>预留时每张图的标准积分价。</summary>
+    public int? ListUnitPointCost { get; init; }
+
     public long Id { get; init; }
 
     public long TaskId { get; init; }
@@ -126,6 +150,15 @@ public sealed class AiImageTaskAssetDto
 
 public sealed class CreateAiImageTasksResponse
 {
+    /// <summary>预留时实际采用的计价档。</summary>
+    public string? PricingTier { get; init; }
+
+    /// <summary>预留时每张图实际扣除的积分。</summary>
+    public int? UnitPointCost { get; init; }
+
+    /// <summary>预留时每张图的标准积分价。</summary>
+    public int? ListUnitPointCost { get; init; }
+
     public long Id { get; init; }
 
     public long TaskId { get; init; }
@@ -137,8 +170,16 @@ public sealed class CreateAiImageTasksResponse
     public string RequestState { get; init; } = "active";
 }
 
+/// <summary>当前账号对模型的访问权限。</summary>
+public sealed record AiImageModelAccess(string Level, bool Available,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] string? ReasonCode,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] string? Basis);
+
 public sealed class AiImageModelOptionDto
 {
+    /// <summary>模型的访问级别及当前用户的准入依据。</summary>
+    public AiImageModelAccess Access { get; set; } = new("all", true, null, null);
+
     public string Code { get; init; } = string.Empty;
 
     public string Name { get; init; } = string.Empty;
@@ -164,6 +205,9 @@ public sealed class AiImageModelOptionDto
 
 public sealed class AiImageModelCapabilitiesDto
 {
+    /// <summary>模型支持排队生成动图时提供的参数和价格。</summary>
+    public GifCapabilityDto? Gif { get; init; }
+
     public bool SupportsReferenceImages { get; init; } = true;
 
     public int MaxReferenceImages { get; init; } = 6;
@@ -204,6 +248,16 @@ public sealed class AiImagePointPriceDto
 
     public int Points { get; init; }
 
+    /// <summary>已配置的 VIP 优惠价。</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public int? VipPoints { get; init; }
+
+    /// <summary>当前用户实付的单图积分。</summary>
+    public int EffectivePoints { get; init; }
+
+    /// <summary>当前用户的计价档。</summary>
+    public string PricingTier { get; init; } = "standard";
+
     public decimal PriceAmount { get; init; }
 
     public long PriceMinorUnits { get; init; }
@@ -211,6 +265,12 @@ public sealed class AiImagePointPriceDto
     public string Currency { get; init; } = "CNY";
 
     public int Sort { get; init; }
+}
+
+/// <summary>旧协议价格列表及当前全局定价版本。</summary>
+public sealed class AiImageLegacyPricingResponse : jokester.admin.Common.ApiResponse<IReadOnlyList<AiImagePricingOptionDto>>
+{
+    public long PricingRevision { get; init; }
 }
 
 public sealed class AiImagePricingOptionDto
@@ -223,6 +283,16 @@ public sealed class AiImagePricingOptionDto
 
     public int Points { get; init; }
 
+    /// <summary>已配置的 VIP 优惠价。</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public int? VipPoints { get; init; }
+
+    /// <summary>当前用户实付的单图积分。</summary>
+    public int EffectivePoints { get; init; }
+
+    /// <summary>当前用户的计价档。</summary>
+    public string PricingTier { get; init; } = "standard";
+
     public decimal PriceAmount { get; init; }
 
     public long PriceMinorUnits { get; init; }
@@ -234,6 +304,9 @@ public sealed class AiImagePricingOptionDto
 
 public sealed class AiImageCatalogPricingResponse
 {
+    /// <summary>当前全局定价版本。</summary>
+    public long PricingRevision { get; init; }
+
     public string ModelCode { get; init; } = string.Empty;
 
     public string CatalogVersion { get; init; } = string.Empty;
@@ -253,6 +326,16 @@ public sealed class AiImageCatalogPricingOptionDto
 
     public int Points { get; init; }
 
+    /// <summary>已配置的 VIP 优惠价。</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public int? VipPoints { get; init; }
+
+    /// <summary>当前用户实付的单图积分。</summary>
+    public int EffectivePoints { get; init; }
+
+    /// <summary>当前用户的计价档。</summary>
+    public string PricingTier { get; init; } = "standard";
+
     public decimal PriceAmount { get; init; }
 
     public long PriceMinorUnits { get; init; }
@@ -264,6 +347,9 @@ public sealed class AiImageCatalogPricingOptionDto
 
 public sealed class AiImageParameterOptionsDto
 {
+    /// <summary>当前全局定价版本。</summary>
+    public long PricingRevision { get; init; }
+
     public IReadOnlyList<AiImageParameterOptionDto> Resolutions { get; init; } = [];
 
     public IReadOnlyList<AiImageParameterOptionDto> Qualities { get; init; } = [];
@@ -319,8 +405,32 @@ public sealed class ResolveAiImageParametersResponse
     public string ProviderQuality { get; init; } = string.Empty;
 }
 
-public sealed class CreateAiImageTaskRequest
+/// <summary>动图参数、Token 单价及预扣规则。</summary>
+public sealed record GifCapabilityDto(int[] FrameCounts, int DefaultFrameCount,
+    int[] FrameDurationsMs, int DefaultFrameDurationMs, GifTokenPricingOptions TokenPricing, GifReserveOptions Reserve);
+
+/// <summary>供应商的 Token 用量与输入分类方式。</summary>
+public sealed record GifUsageDto(int InputTokens,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] int? TextInputTokens,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] int? ImageInputTokens,
+    int OutputTokens, string InputBreakdown);
+
+/// <summary>生图接口共用的输出格式参数。</summary>
+public abstract class AiImageOutputRequest
 {
+    /// <summary>输出格式，默认 png。支持动图的排队入口可提交 gif。</summary>
+    public string? OutputFormat { get; init; }
+    /// <summary>动图帧数。</summary>
+    public int? FrameCount { get; init; }
+    /// <summary>动图单帧时长（毫秒）。</summary>
+    public int? FrameDurationMs { get; init; }
+}
+
+public sealed class CreateAiImageTaskRequest : AiImageOutputRequest
+{
+    /// <summary>用户确认的每张图片最高积分。</summary>
+    public int? ExpectedUnitPoints { get; init; }
+
     public string IdempotencyKey { get; init; } = string.Empty;
 
     public long SiteId { get; init; }
@@ -358,8 +468,11 @@ public sealed class CreateAiImageTaskRequest
     public string? MaskAssetId { get; init; }
 }
 
-public sealed class GenerateAiImageRequest
+public sealed class GenerateAiImageRequest : AiImageOutputRequest
 {
+    /// <summary>用户确认的每张图片最高积分。</summary>
+    public int? ExpectedUnitPoints { get; init; }
+
     public string IdempotencyKey { get; init; } = string.Empty;
 
     public long? SourcePromptId { get; init; }
@@ -432,6 +545,15 @@ public sealed class UploadAiImageResponse
 
 public sealed class GenerateAiImageResponse
 {
+    /// <summary>预留时实际采用的计价档。</summary>
+    public string? PricingTier { get; init; }
+
+    /// <summary>预留时每张图实际扣除的积分。</summary>
+    public int? UnitPointCost { get; init; }
+
+    /// <summary>预留时每张图的标准积分价。</summary>
+    public int? ListUnitPointCost { get; init; }
+
     public long TaskId { get; init; }
 
     public IReadOnlyList<long> TaskIds { get; init; } = [];

@@ -60,7 +60,7 @@ ssh root@<server-ip> "cd /opt/jokester-admin && ./jokester.sh deploy-api ./jokes
 
 ```powershell
 cd E:\Project\Jokester.Admin
-tar -cf jokester-docker-bundle.tar -C docker compose.yaml compose.production.yaml jokester.sh .env.production.example api.env.production.example legal.env.example README.md mysql/initdb/10-jokester-init.sh mysql/import/README.md -C .. jokester.admin.sql
+tar -cf jokester-docker-bundle.tar -C docker compose.yaml compose.production.yaml jokester.sh .env.production.example api.env.production.example README.md mysql/initdb/10-jokester-init.sh mysql/import/README.md -C .. jokester.admin.sql
 scp jokester-docker-bundle.tar root@<server-ip>:/opt/jokester-admin/
 ssh root@<server-ip> "cd /opt/jokester-admin && tar -xf jokester-docker-bundle.tar --no-same-owner && chmod 755 jokester.sh && rm jokester-docker-bundle.tar"
 ```
@@ -187,7 +187,6 @@ mkdir -p /opt/jokester-admin
 | `./jokester.sh seed-admin` | 创建或重置超级管理员（支持邮箱账号；会撤销该账号现有会话） |
 | `./jokester.sh sql docs-migration.sql` | 执行增量迁移 |
 | `./jokester.sh backup` | 导出数据库到 `backups/`（600 权限） |
-| `./jokester.sh legal` | 按 `legal.env` 配置法律文档 |
 | `./jokester.sh cli --migrate-ai-media --dry-run` | 执行 API 维护命令 |
 
 也可以直接使用 `docker compose`：`.env` 中的 `COMPOSE_FILE` 已组合生产编排，`API_IMAGE` / `WEB_IMAGE`

@@ -45,12 +45,30 @@ public sealed class AiImageAdmissionService : IAiImageAdmissionService
         return {'reserved', '0'}
         """;
 
+    // Pending owners store the corrected amount alongside the zero task ID. Cancellation can then
+    // release precisely what Redis accepted even if the adjustment reply was lost in transit.
+    private const string AdjustPointCostScript = """
+        local owner = ARGV[1] .. '|' .. ARGV[2] .. '|0'
+        local current = redis.call('GET', KEYS[1])
+        if not current then return 'expired' end
+        local held
+        if current == owner then held = tonumber(ARGV[3])
+        elseif string.sub(current, 1, #owner + 1) == owner .. ':' then held = tonumber(string.sub(current, #owner + 2))
+        else return 'expired' end
+        local target = tonumber(ARGV[4])
+        local daily = tonumber(redis.call('GET', KEYS[2]) or '0')
+        if target > held and daily + target - held > tonumber(ARGV[5]) then return 'point_quota' end
+        redis.call('SET', KEYS[2], math.max(0, daily + target - held), 'KEEPTTL')
+        redis.call('SET', KEYS[1], owner .. ':' .. ARGV[4], 'KEEPTTL')
+        return 'ok'
+        """;
+
     private const string BindScript = """
         local expected = ARGV[1] .. '|' .. ARGV[2] .. '|0'
         local bound = ARGV[1] .. '|' .. ARGV[2] .. '|' .. ARGV[3]
         local current = redis.call('GET', KEYS[1])
         if current == bound then return 2 end
-        if current ~= expected then return 0 end
+        if current ~= expected and (not current or string.sub(current, 1, #expected + 1) ~= expected .. ':') then return 0 end
         local ttl = redis.call('TTL', KEYS[1])
         redis.call('SET', KEYS[1], bound)
         if ttl > 0 then redis.call('EXPIRE', KEYS[1], ttl) end
@@ -58,7 +76,14 @@ public sealed class AiImageAdmissionService : IAiImageAdmissionService
         """;
 
     private const string CancelScript = """
-        if redis.call('GET', KEYS[1]) ~= ARGV[1] .. '|' .. ARGV[2] .. '|0' then return 0 end
+        local owner = ARGV[1] .. '|' .. ARGV[2] .. '|0'
+        local current = redis.call('GET', KEYS[1])
+        if not current then return 0 end
+        local held = tonumber(ARGV[4])
+        if current ~= owner then
+            if string.sub(current, 1, #owner + 1) ~= owner .. ':' then return 0 end
+            held = tonumber(string.sub(current, #owner + 2))
+        end
         redis.call('DEL', KEYS[1])
         local active = tonumber(redis.call('GET', KEYS[2]) or '0')
         redis.call('SET', KEYS[2], math.max(0, active - tonumber(ARGV[3])), 'KEEPTTL')
@@ -67,7 +92,7 @@ public sealed class AiImageAdmissionService : IAiImageAdmissionService
         local images = tonumber(redis.call('GET', KEYS[4]) or '0')
         redis.call('SET', KEYS[4], math.max(0, images - tonumber(ARGV[3])), 'KEEPTTL')
         local points = tonumber(redis.call('GET', KEYS[5]) or '0')
-        redis.call('SET', KEYS[5], math.max(0, points - tonumber(ARGV[4])), 'KEEPTTL')
+        redis.call('SET', KEYS[5], math.max(0, points - held), 'KEEPTTL')
         return 1
         """;
 
@@ -156,8 +181,6 @@ public sealed class AiImageAdmissionService : IAiImageAdmissionService
                     options.MaxQueuedTasks,
                     reservation.OwnerToken
                 ]);
-            cancellationToken.ThrowIfCancellationRequested();
-
             var status = result is { Length: >= 2 } ? result[0].ToString() : null;
             return status switch
             {
@@ -178,7 +201,32 @@ public sealed class AiImageAdmissionService : IAiImageAdmissionService
         }
         catch (RedisException ex)
         {
+            // The Lua invocation may have succeeded before its reply was lost.
+            await CancelAsync(reservation);
             logger.LogError("AI cost admission failed closed. FailureType={FailureType}", ex.GetType().Name);
+            throw new AppException(ErrorCodes.ServiceUnavailable, "AI cost control service is unavailable");
+        }
+    }
+
+    public async Task<AiImageAdmissionReservation> AdjustPointCostAsync(AiImageAdmissionReservation reservation, int pointCost, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (pointCost == reservation.PointCost) return reservation;
+        try
+        {
+            var result = await database.ScriptEvaluateAsync(AdjustPointCostScript,
+                [IdempotencyKey(reservation.UserId, reservation.IdempotencyKeyHash), DailyPointsKey(reservation.UserId, reservation.QuotaDate)],
+                [reservation.RequestFingerprint, reservation.OwnerToken, reservation.PointCost, pointCost, options.DailyPointLimitPerUser]);
+            return result.ToString() switch
+            {
+                "ok" => reservation with { PointCost = pointCost },
+                "point_quota" => throw new AppException(ErrorCodes.TooManyRequests, "Daily AI point quota exceeded"),
+                _ => throw new AppException(ErrorCodes.ServiceUnavailable, "AI task reservation expired before price confirmation")
+            };
+        }
+        catch (RedisException ex)
+        {
+            logger.LogError("AI point quota adjustment failed. FailureType={FailureType}", ex.GetType().Name);
             throw new AppException(ErrorCodes.ServiceUnavailable, "AI cost control service is unavailable");
         }
     }

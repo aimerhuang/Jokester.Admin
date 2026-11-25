@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('init', 'up', 'down', 'restart', 'ps', 'logs', 'seed-admin', 'legal', 'sql', 'mysql', 'backup', 'cli', 'reset', 'help')]
+    [ValidateSet('init', 'up', 'down', 'restart', 'ps', 'logs', 'seed-admin', 'sql', 'mysql', 'backup', 'cli', 'reset', 'help')]
     [string]$Command = 'help',
 
     [Parameter(Position = 1, ValueFromRemainingArguments = $true)]
@@ -91,7 +91,6 @@ Usage: .\jokester.ps1 <command> [arguments]
   ps                 Show container status
   logs [service]     Follow logs (default: api)
   seed-admin         Create or reset a super admin (prompts for the password)
-  legal              Configure legal documents from docker/legal.env (web, then all)
   sql <file>         Run a SQL file (for example docs/migrations/*.sql) against the database
   mysql              Open a MySQL client
   backup [file]      Export the database to a file (default: backups/jokester-<time>.sql)
@@ -155,21 +154,6 @@ try {
             }
             finally {
                 Remove-Item Env:BootstrapAdmin__UserName, Env:BootstrapAdmin__Password -ErrorAction SilentlyContinue
-            }
-        }
-        'legal' {
-            Assert-Initialized
-            $legalPath = Join-Path $dockerDirectory 'legal.env'
-            if (-not (Test-Path -LiteralPath $legalPath)) {
-                throw 'docker/legal.env is missing. Copy legal.env.example to legal.env and fill in the approved values.'
-            }
-            $environmentArguments = @()
-            foreach ($entry in (Read-EnvFile $legalPath).GetEnumerator()) {
-                $environmentArguments += @('--env', "$($entry.Key)=$($entry.Value)")
-            }
-            foreach ($platform in @('web', 'all')) {
-                Invoke-Compose (@('run', '--rm', '--no-TTY') + $environmentArguments +
-                    @('--env', "LegalDocuments__Platform=$platform", 'api', '--configure-legal-documents'))
             }
         }
         'sql' {

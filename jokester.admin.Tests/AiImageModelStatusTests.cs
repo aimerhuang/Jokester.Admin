@@ -264,7 +264,19 @@ public sealed class AiImageModelStatusTests
             InitKeyType = InitKeyType.Attribute
         });
         db.Ado.ExecuteCommand("""
-            CREATE TABLE ai_image_task (
+            CREATE TABLE ai_image_model_policy (model_code TEXT PRIMARY KEY, access_level TEXT);
+                CREATE TABLE ai_image_task (
+                output_format TEXT NOT NULL DEFAULT 'png',
+                frame_count INTEGER NULL,
+                frame_duration_ms INTEGER NULL,
+                gif_rate_snapshot TEXT NULL,
+                usage_input_tokens INTEGER NULL,
+                usage_text_input_tokens INTEGER NULL,
+                usage_image_input_tokens INTEGER NULL,
+                usage_output_tokens INTEGER NULL,
+                usage_input_breakdown TEXT NULL,
+                charged_points INTEGER NULL,
+                platform_cost_cny NUMERIC NULL,
                 id INTEGER PRIMARY KEY,
                 health_model_code TEXT NULL,
                 health_sample INTEGER NULL,

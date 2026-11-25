@@ -1,3 +1,6 @@
+using System.Text.Json;
+using Microsoft.Extensions.Options;
+using jokester.admin.Infrastructure;
 using jokester.admin.Application.Abstractions;
 using jokester.admin.Application.DTOs.Points;
 using jokester.admin.Application.DTOs.Common;
@@ -8,12 +11,15 @@ using SqlSugar;
 
 namespace jokester.admin.Application.Services;
 
-public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) : IPointService
+public sealed class PointService(
+    ISqlSugarClient db, ICurrentUser currentUser, IAiImagePriceResolver? priceResolver = null,
+    IOptions<AiImageGifOptions>? gifOptions = null, ILogger<PointService>? logger = null) : IPointService
 {
     private const int SignInGiftPoints = 25;
     private const string SignInSource = "sign_in";
     private const string ImageGenerateSource = "image_generate";
     private const string ImageRefundSource = "image_refund";
+    private readonly IAiImagePriceResolver _imagePrices = priceResolver ?? new AiImagePriceResolver(db);
     private readonly PointBucketLedger _pointBuckets = new(db);
 
     public Task<PointBalanceDto> GetBalanceAsync(CancellationToken cancellationToken)
@@ -207,21 +213,9 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
         var normalizedResolutionCode = NormalizeRequired(resolutionCode, "Resolution code is required");
         var normalizedQualityCode = NormalizeOptional(qualityCode);
 
-        var matchQuality = !string.IsNullOrEmpty(normalizedQualityCode);
-
-        var price = await db.Queryable<AiImagePointPriceEntity>()
-            .Where(x => !x.IsDeleted
-                && x.Status == 1
-                && x.ModelCode == normalizedModelCode
-                && x.ResolutionCode == normalizedResolutionCode)
-            .WhereIF(matchQuality, x => x.QualityCode == normalizedQualityCode)
-            .FirstAsync(cancellationToken);
-        if (price is null || price.Points <= 0)
-        {
-            throw new AppException(ErrorCodes.BadRequest, "当前模型、分辨率、画质未配置积分价格");
-        }
-
-        return price.Points * imageCount;
+        var userId = currentUser.UserId ?? throw new AppException(ErrorCodes.Unauthorized, "请先登录");
+        var price = await _imagePrices.ResolveAsync(userId, normalizedModelCode, normalizedResolutionCode, normalizedQualityCode, null, cancellationToken);
+        return checked(price.EffectivePoints * imageCount);
     }
 
     public async Task<ImageTaskReservationResult> ReserveImageTaskAsync(
@@ -229,14 +223,16 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
         string modelCode,
         string resolutionCode,
         string qualityCode,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int? expectedUnitPoints = null,
+        Func<int, Task>? adjustQuota = null)
     {
         var result = await ReserveImageTasksAsync(
             [task],
             modelCode,
             resolutionCode,
             qualityCode,
-            cancellationToken);
+            cancellationToken, expectedUnitPoints, adjustQuota);
         return new ImageTaskReservationResult(result.TaskIds[0], result.Created);
     }
 
@@ -245,7 +241,9 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
         string modelCode,
         string resolutionCode,
         string qualityCode,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int? expectedUnitPoints = null,
+        Func<int, Task>? adjustQuota = null)
     {
         if (tasks.Count == 0)
         {
@@ -254,7 +252,7 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
 
         var userId = tasks[0].UserId;
         if (userId <= 0
-            || tasks.Any(task => task.UserId != userId || task.PointCost <= 0 || task.ImageCount <= 0))
+            || tasks.Any(task => task.UserId != userId || task.ImageCount <= 0 || task.OutputFormat != tasks[0].OutputFormat))
         {
             throw new AppException(ErrorCodes.BadRequest, "AI image task billing snapshot is invalid");
         }
@@ -265,7 +263,6 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
             throw new AppException(ErrorCodes.BadRequest, "AI image task idempotency snapshot is invalid");
         }
 
-        var totalPointCost = tasks.Aggregate(0, (total, task) => checked(total + task.PointCost));
         var idempotencyKeys = tasks.Select(task => task.IdempotencyKey).ToArray();
         await db.Ado.BeginTranAsync();
         try
@@ -300,6 +297,41 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
                 return new ImageTaskBatchReservationResult(orderedExistingIds, false);
             }
 
+            if (tasks[0].OutputFormat == "gif")
+            {
+                var options = gifOptions?.Value ?? new AiImageGifOptions();
+                var access = await _imagePrices.RequireAccessAsync(userId, modelCode, user, cancellationToken);
+                var rates = JsonSerializer.Serialize(GifRateSnapshot.From(options.TokenPricing));
+                foreach (var task in tasks)
+                {
+                    if (task.OutputFormat != "gif" || task.ImageCount != 1 || task.FrameCount is null)
+                        throw new AppException(ErrorCodes.BadRequest, "GIF 任务的预扣参数无效");
+                    var referenceCount = task.ReferenceImageUrls is null ? 0
+                        : JsonSerializer.Deserialize<string[]>(task.ReferenceImageUrls)!.Length;
+                    var reserve = AiImageGifBilling.CalculateReservePoints(options, task.QualityCode, task.FrameCount.Value, referenceCount);
+                    AiImagePriceResolver.EnsureExpectedPrice(modelCode, expectedUnitPoints, reserve, "gif_fixed");
+                    task.PointCost = reserve;
+                    task.UnitPointCost = reserve;
+                    task.ListUnitPointCost = reserve;
+                    task.PricingTier = "gif_fixed";
+                    task.AccessBasis = access.Basis;
+                    task.GifRateSnapshot = rates;
+                }
+            }
+            else
+            {
+                var price = await _imagePrices.ResolveAsync(userId, modelCode, resolutionCode, qualityCode, user, cancellationToken);
+                AiImagePriceResolver.EnsureExpectedPrice(modelCode, expectedUnitPoints, price.EffectivePoints, price.PricingTier);
+                foreach (var task in tasks)
+                {
+                    task.PointCost = checked(price.EffectivePoints * task.ImageCount);
+                    task.UnitPointCost = price.EffectivePoints;
+                    task.ListUnitPointCost = price.StandardPoints;
+                    task.PricingTier = price.PricingTier;
+                    task.AccessBasis = price.AccessBasis;
+                }
+            }
+            var totalPointCost = tasks.Sum(task => task.PointCost);
             var hasAppleDebt = await db.Queryable<AppleIapDebtEntity>()
                 .AnyAsync(x => x.UserId == userId && x.Status == "open" && x.PointsOwed > 0, cancellationToken);
             if (hasAppleDebt)
@@ -383,11 +415,13 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
                     ChangeType = "consume",
                     Source = ImageGenerateSource,
                     BusinessKey = BuildImageBusinessKey(task.Id, "reserve"),
-                    Remark = $"AI 出图预留积分，任务ID：{task.Id}，模型：{modelCode}，分辨率：{resolutionCode}，画质：{qualityCode}",
+                    Remark = task.OutputFormat == "gif" ? $"GIF 动图生成扣分，任务ID：{task.Id}，帧数：{task.FrameCount}，画质：{task.QualityCode}"
+                        : $"AI 出图预留积分（{(task.PricingTier == "vip" ? "VIP 价" : "标准价")}），任务ID：{task.Id}，模型：{modelCode}，分辨率：{resolutionCode}，画质：{qualityCode}",
                     CreatedAt = billingNow
                 };
             }).ToArray();
             await db.Insertable(pointDetails).ExecuteCommandAsync(cancellationToken);
+            if (adjustQuota is not null) await adjustQuota(totalPointCost);
 
             await db.Ado.CommitTranAsync();
             return new ImageTaskBatchReservationResult(tasks.Select(task => task.Id).ToArray(), true);
@@ -404,7 +438,9 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
         IReadOnlyList<AiImageTaskEntity> tasks,
         IReadOnlyList<AiImageTaskInputEntity> inputs,
         long priceId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int? expectedUnitPoints = null,
+        Func<int, Task>? adjustQuota = null)
     {
         if (request.UserId <= 0 || tasks.Count == 0 || request.RequestedImageCount != tasks.Count
             || tasks.Any(task => task.UserId != request.UserId || task.ImageCount != 1)
@@ -452,11 +488,21 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
                 return new VersionedImageTaskBatchReservationResult(existingRequest.Id, existingIds, false);
             }
 
+            var modelCode = tasks[0].ModelCode;
+            if (string.IsNullOrWhiteSpace(modelCode) || tasks.Any(task => task.ModelCode != modelCode))
+            {
+                throw new AppException(ErrorCodes.BadRequest, MachineErrorCodes.ValidationError, "Versioned AI image batch must use a single model.");
+            }
+            var access = await _imagePrices.RequireAccessAsync(request.UserId, modelCode, user, cancellationToken);
             var price = await db.Queryable<AiImageModelReleasePriceEntity>()
                 .TranLock(DbLockType.Wait)
                 .FirstAsync(x => x.Id == priceId && x.Status == 1 && x.Points > 0, cancellationToken);
-            if (price is null || request.ModelReleaseId != price.ModelReleaseId)
+            if (price is null || request.ModelReleaseId != price.ModelReleaseId || price.ModelCode != modelCode)
             {
+                if (price is null)
+                {
+                    AiImagePriceResolver.CountMissingPrice(modelCode);
+                }
                 throw new AppException(ErrorCodes.Conflict, MachineErrorCodes.ImageCatalogChanged, "图片模型目录已更新，请刷新后重试");
             }
             var release = await db.Queryable<AiImageModelReleaseEntity>()
@@ -470,8 +516,12 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
                 throw new AppException(ErrorCodes.Conflict, MachineErrorCodes.ImageCatalogChanged, "图片模型目录已更新，请刷新后重试");
             }
 
+            AiImagePriceResolver.EnsureExpectedPrice(price.ModelCode, expectedUnitPoints, price.Points, "standard");
             foreach (var task in tasks)
             {
+                task.AccessBasis = access.Basis;
+                task.PricingTier = "standard";
+                task.ListUnitPointCost = price.Points;
                 task.PointCost = price.Points;
                 task.UnitPointCost = price.Points;
                 task.PriceId = price.Id;
@@ -569,11 +619,12 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
                     ChangeType = "consume",
                     Source = ImageGenerateSource,
                     BusinessKey = BuildImageBusinessKey(task.Id, "reserve"),
-                    Remark = $"AI 出图预留积分，任务ID：{task.Id}，模型：{task.ModelCode}，尺寸模式：{task.SizeMode}，目录：{release.CatalogVersion}",
+                    Remark = $"AI 出图预留积分（标准价），任务ID：{task.Id}，模型：{task.ModelCode}，尺寸模式：{task.SizeMode}，目录：{release.CatalogVersion}",
                     CreatedAt = billingNow
                 };
             }).ToArray();
             await db.Insertable(pointDetails).ExecuteCommandAsync(cancellationToken);
+            if (adjustQuota is not null) await adjustQuota(totalPointCost);
 
             await db.Ado.CommitTranAsync();
             return new VersionedImageTaskBatchReservationResult(request.Id, tasks.Select(x => x.Id).ToArray(), true);
@@ -592,7 +643,8 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
         string? errorMessage,
         int completedImageCount,
         CancellationToken cancellationToken,
-        bool modelSideFailure = true) =>
+        bool modelSideFailure = true,
+        GifTaskResult? gifResult = null) =>
         await SettleImageTaskCoreAsync(
             taskId,
             finalStatus,
@@ -600,6 +652,7 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
             errorMessage,
             completedImageCount,
             null,
+            gifResult,
             AiImageModelHealth.ForLegacy(finalStatus, modelSideFailure),
             cancellationToken);
 
@@ -617,6 +670,7 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
             errorMessage,
             completedImageCount,
             settlement,
+            null,
             AiImageModelHealth.ForVersioned(finalStatus, settlement.FailureStage),
             cancellationToken);
 
@@ -627,6 +681,7 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
         string? errorMessage,
         int completedImageCount,
         VersionedImageTaskSettlement? versioned,
+        GifTaskResult? gifResult,
         int? healthSample,
         CancellationToken cancellationToken)
     {
@@ -679,6 +734,14 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
                     0,
                     false);
             }
+            var isGif = task.OutputFormat == "gif";
+            if (isGif && finalStatus == 2)
+            {
+                // One GIF is one indivisible result. A timeout cannot earn a partial charge.
+                normalizedCompletedCount = 0;
+                resultUrls = null;
+                gifResult = null;
+            }
             if (finalStatus == 1 && normalizedCompletedCount != task.ImageCount)
             {
                 throw new AppException(ErrorCodes.ServerError, "A successful AI image task must contain all requested images");
@@ -694,6 +757,36 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
             var billingStatus = finalStatus == 1 || refundPoints == 0
                 ? 1
                 : normalizedCompletedCount == 0 ? 3 : 2;
+
+            decimal? platformCostCny = null;
+            int? chargedPoints = null;
+            if (isGif)
+            {
+                if (finalStatus == 1)
+                {
+                    if (gifResult is null || string.IsNullOrWhiteSpace(DeserializeSingleResultUrl(resultUrls)))
+                        throw new InvalidOperationException("GIF 成功结算缺少结果快照");
+                    // GIF is sold at a fixed price: the relay's bill does not track the usage it reports,
+                    // so usage only feeds the platform cost estimate used for reconciliation.
+                    if (gifResult.Usage is not null)
+                    {
+                        var rates = JsonSerializer.Deserialize<GifRateSnapshot>(task.GifRateSnapshot ?? "null")
+                            ?? throw new InvalidOperationException("GIF 单价快照缺失");
+                        platformCostCny = AiImageGifBilling.CalculatePlatformCostCny(rates, gifResult.Usage);
+                    }
+                    else
+                    {
+                        logger?.LogInformation("GIF task {TaskId} returned no provider usage; reconciliation cost is unavailable", task.Id);
+                    }
+                    chargedPoints = task.PointCost;
+                    refundPoints = 0;
+                    billingStatus = 1;
+                }
+                else
+                {
+                    chargedPoints = 0;
+                }
+            }
 
             var settlementNow = DateTime.Now;
             await _pointBuckets.ExpireAsync(user, settlementNow, cancellationToken);
@@ -758,6 +851,16 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
                 ? AiImageModelConfigService.NormalizeModelCode(
                     string.IsNullOrWhiteSpace(task.ModelCode) ? task.ModelName : task.ModelCode)
                 : null;
+            var outputWidth = gifResult?.Width ?? versioned?.OutputWidth ?? task.OutputWidth;
+            var outputHeight = gifResult?.Height ?? versioned?.OutputHeight ?? task.OutputHeight;
+            var outputSize = gifResult is null ? versioned?.OutputSize ?? task.OutputSize : $"{outputWidth}x{outputHeight}";
+            var outputMime = gifResult is null ? versioned?.OutputMimeType ?? task.OutputMimeType : "image/gif";
+            var usage = gifResult?.Usage;
+            var inputTokens = usage?.InputTokens;
+            var textTokens = usage?.TextInputTokens;
+            var imageTokens = usage?.ImageInputTokens;
+            var outputTokens = usage?.OutputTokens;
+            var breakdown = usage?.InputBreakdown;
             var affected = await db.Updateable<AiImageTaskEntity>()
                 .SetColumns(x => new AiImageTaskEntity
                 {
@@ -768,11 +871,18 @@ public sealed class PointService(ISqlSugarClient db, ICurrentUser currentUser) :
                     CompletedImageCount = normalizedCompletedCount,
                     ResultUrls = resultUrls,
                     ErrorMessage = finalStatus == 1 ? null : errorMessage,
-                    RefundedPoints = task.SizeContractVersion == AiImageCatalogService.SizeContractVersion ? refundPoints : task.RefundedPoints,
-                    OutputWidth = versioned == null ? task.OutputWidth : versioned.OutputWidth,
-                    OutputHeight = versioned == null ? task.OutputHeight : versioned.OutputHeight,
-                    OutputSize = versioned == null ? task.OutputSize : versioned.OutputSize,
-                    OutputMimeType = versioned == null ? task.OutputMimeType : versioned.OutputMimeType,
+                    RefundedPoints = isGif || task.SizeContractVersion == AiImageCatalogService.SizeContractVersion ? refundPoints : task.RefundedPoints,
+                    ChargedPoints = chargedPoints,
+                    PlatformCostCny = platformCostCny,
+                    UsageInputTokens = inputTokens,
+                    UsageTextInputTokens = textTokens,
+                    UsageImageInputTokens = imageTokens,
+                    UsageOutputTokens = outputTokens,
+                    UsageInputBreakdown = breakdown,
+                    OutputWidth = outputWidth,
+                    OutputHeight = outputHeight,
+                    OutputSize = outputSize,
+                    OutputMimeType = outputMime,
                     Width = versioned != null
                         && task.SizeMode == AiImageCatalogService.AutoSizeMode
                         && versioned.OutputWidth.HasValue

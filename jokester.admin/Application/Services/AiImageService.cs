@@ -31,12 +31,13 @@ public sealed class AiImageService(
     IOptions<PromptLibraryOptions> promptLibraryOptions,
     IAiMediaPathResolver mediaPathResolver,
     IAiPromptFilter promptFilter,
-    IUserConsentService userConsentService,
     IMediaAssetService mediaAssetService,
     IAiImageCatalogService catalogService,
     IAiSizeModeRolloutPolicy rolloutPolicy,
-    ILogger<AiImageService> logger) : IAiImageService
+    ILogger<AiImageService> logger,
+    IOptions<AiImageGifOptions>? gifOptions = null) : IAiImageService
 {
+    private readonly AiImageGifOptions _gif = gifOptions?.Value ?? new();
     private const string MimeType = "image/png";
     private const int MaxReferenceImageCount = 6;
     private const long MaxReferenceImageSizeBytes = 10 * 1024 * 1024;
@@ -114,8 +115,16 @@ public sealed class AiImageService(
         };
     }
 
+    public async Task<long> GetPricingRevisionAsync(CancellationToken cancellationToken) =>
+        (await db.Queryable<AiImagePricingSettingEntity>().FirstAsync(x => x.Id == 1, cancellationToken)).PricingRevision;
+
+    private async Task<bool> HasVipPriceAsync(CancellationToken cancellationToken) =>
+        currentUser.UserId is long id && await new MembershipEntitlementLedger(db).GetActiveAsync(id, DateTime.Now, cancellationToken) is not null;
+
     public async Task<AiImageParameterOptionsDto> GetParameterOptionsAsync(CancellationToken cancellationToken)
     {
+        var revision = await GetPricingRevisionAsync(cancellationToken);
+        var isVip = await HasVipPriceAsync(cancellationToken);
         var parameters = await db.Queryable<AiImageParameterEntity>()
             .Where(x => !x.IsDeleted && x.Status == 1)
             .Where(x => x.ParamType == ResolutionType || x.ParamType == QualityType || x.ParamType == AspectRatioType)
@@ -129,16 +138,23 @@ public sealed class AiImageService(
             .OrderBy(x => x.Id)
             .ToListAsync(cancellationToken);
         var pointPrices = pointPriceEntities
-            .Select(x => new AiImagePointPriceDto
+            .Select(x =>
             {
-                ModelCode = x.ModelCode,
-                ResolutionCode = x.ResolutionCode,
-                QualityCode = x.QualityCode,
-                Points = x.Points,
-                PriceAmount = x.PriceAmount,
-                PriceMinorUnits = Money.ToMinorUnits(x.PriceAmount),
-                Currency = x.Currency,
-                Sort = x.Sort
+                var quote = AiImagePriceResolver.GetEffectivePoints(x.Points, x.VipPoints, isVip);
+                return new AiImagePointPriceDto
+                {
+                    ModelCode = x.ModelCode,
+                    ResolutionCode = x.ResolutionCode,
+                    QualityCode = x.QualityCode,
+                    Points = x.Points,
+                    VipPoints = x.VipPoints,
+                    EffectivePoints = quote.EffectivePoints,
+                    PricingTier = quote.PricingTier,
+                    PriceAmount = x.PriceAmount,
+                    PriceMinorUnits = Money.ToMinorUnits(x.PriceAmount),
+                    Currency = x.Currency,
+                    Sort = x.Sort
+                };
             })
             .ToArray();
 
@@ -149,12 +165,14 @@ public sealed class AiImageService(
             AspectRatios = MapOptions(parameters, AspectRatioType)
                 .Where(x => !string.Equals(x.Code, "auto", StringComparison.OrdinalIgnoreCase))
                 .ToArray(),
+            PricingRevision = revision,
             PointPrices = pointPrices
         };
     }
 
     public async Task<IReadOnlyList<AiImagePricingOptionDto>> GetPricingOptionsAsync(CancellationToken cancellationToken)
     {
+        var isVip = await HasVipPriceAsync(cancellationToken);
         var prices = await db.Queryable<AiImagePointPriceEntity>()
             .Where(x => !x.IsDeleted && x.Status == 1)
             .OrderBy(x => x.ModelCode)
@@ -179,12 +197,16 @@ public sealed class AiImageService(
             {
                 var modelCode = AiImageModelConfigService.NormalizeModelCode(price.ModelCode);
 
+                var quote = AiImagePriceResolver.GetEffectivePoints(price.Points, price.VipPoints, isVip);
                 return new AiImagePricingOptionDto
                 {
                     ModelCode = modelCode,
                     ResolutionCode = price.ResolutionCode,
                     QualityCode = price.QualityCode,
                     Points = price.Points,
+                    VipPoints = price.VipPoints,
+                    EffectivePoints = quote.EffectivePoints,
+                    PricingTier = quote.PricingTier,
                     PriceAmount = price.PriceAmount,
                     PriceMinorUnits = Money.ToMinorUnits(price.PriceAmount),
                     Currency = price.Currency,
@@ -366,6 +388,7 @@ public sealed class AiImageService(
 
     public async Task<GenerateAiImageResponse> GenerateAsync(GenerateAiImageRequest request, CancellationToken cancellationToken)
     {
+        AiImageGifRequest.IsGif(request, allowGif: false);
         if (!await SyncGenerateSemaphore.WaitAsync(0, cancellationToken))
         {
             throw new AppException(ErrorCodes.TooManyRequests, "同步生图请求过多，请稍后重试");
@@ -375,6 +398,7 @@ public sealed class AiImageService(
         {
             var taskIds = await CreateTasksAsync(new CreateAiImageTaskRequest
             {
+                ExpectedUnitPoints = request.ExpectedUnitPoints,
                 IdempotencyKey = request.IdempotencyKey,
                 SourcePromptId = request.SourcePromptId,
                 Prompt = request.Prompt,
@@ -421,6 +445,9 @@ public sealed class AiImageService(
             return new GenerateAiImageResponse
             {
                 TaskId = firstTask.Id,
+                PricingTier = firstTask.PricingTier,
+                UnitPointCost = firstTask.UnitPointCost,
+                ListUnitPointCost = firstTask.ListUnitPointCost,
                 TaskIds = taskIds,
                 SourcePromptId = firstTask.SourcePromptId,
                 ModelName = firstTask.ModelName,
@@ -563,6 +590,43 @@ public sealed class AiImageService(
         };
     }
 
+    public async Task<(string Url, GifTaskResult Result)> GenerateGifFromTaskAsync(
+        AiImageTaskEntity task, IReadOnlyList<ResolvedAiImageModelConfig> routes, CancellationToken cancellationToken)
+    {
+        if (task.FrameCount is not int frames || task.FrameDurationMs is not int duration || routes.Count == 0)
+            throw new AppException(ErrorCodes.ServiceUnavailable, "GIF 任务缺少参数或可执行路由。");
+
+        var references = ValidateReferenceImageUrls(DeserializeImageUrls(task.ReferenceImageUrls));
+        EnsureOwnedPrivateMediaUrls(task.UserId, references, task.MaskImageUrl);
+        var parameters = new ResolveAiImageParametersResponse
+        {
+            Size = task.Size, ProviderQuality = task.Quality, AspectRatioCode = task.AspectRatioCode
+        };
+        httpClient.DefaultRequestHeaders.Authorization = null;
+        var generated = await GenerateImageWithFallbackAsync(routes, task.Prompt, parameters, references, task.MaskImageUrl,
+            task.UserId, cancellationToken, new GifOutput(task.Width, task.Height, frames, duration));
+        return (generated.SavedImage.Url, new GifTaskResult(generated.SavedImage.Width, generated.SavedImage.Height, generated.Usage));
+    }
+
+    private static GifTokenUsage? ReadGifTokenUsage(JsonElement root)
+    {
+        static int? ReadCount(JsonElement obj, string name)
+            => obj.ValueKind == JsonValueKind.Object && obj.TryGetProperty(name, out var value)
+               && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var count) && count >= 0 ? count : null;
+
+        if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("usage", out var usage)
+            || ReadCount(usage, "output_tokens") is not int output)
+            return null;
+
+        var total = ReadCount(usage, "input_tokens");
+        if (usage.TryGetProperty("input_tokens_details", out var details)
+            && ReadCount(details, "text_tokens") is int text && ReadCount(details, "image_tokens") is int image
+            && (long)text + image <= int.MaxValue && (!total.HasValue || total.Value == (long)text + image))
+            return new GifTokenUsage(text + image, text, image, output);
+
+        return total is int input ? new GifTokenUsage(input, null, null, output) : null;
+    }
+
     private async Task<GeneratedProviderImage> GenerateImageWithFallbackAsync(
         IReadOnlyList<ResolvedAiImageModelConfig> routes,
         string prompt,
@@ -570,7 +634,8 @@ public sealed class AiImageService(
         IReadOnlyList<string> referenceImageUrls,
         string? maskImageUrl,
         long ownerUserId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        GifOutput? gif = null)
     {
         var selectedRoute = routes[0];
         if (routes.Count > 1)
@@ -586,7 +651,8 @@ public sealed class AiImageService(
                     referenceImageUrls,
                     maskImageUrl,
                     ownerUserId,
-                    primaryTimeout.Token);
+                    primaryTimeout.Token,
+                    gif);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -613,7 +679,8 @@ public sealed class AiImageService(
             referenceImageUrls,
             maskImageUrl,
             ownerUserId,
-            cancellationToken);
+            cancellationToken,
+            gif);
     }
 
     private async Task<GeneratedProviderImage> GenerateImageForRouteAsync(
@@ -623,7 +690,8 @@ public sealed class AiImageService(
         IReadOnlyList<string> referenceImageUrls,
         string? maskImageUrl,
         long ownerUserId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        GifOutput? gif)
     {
         using var document = await SendImageRequestForRouteAsync(
             modelConfig,
@@ -631,17 +699,18 @@ public sealed class AiImageService(
             parameters,
             referenceImageUrls,
             maskImageUrl,
-            cancellationToken);
+            cancellationToken,
+            gif);
         var providerResult = ReadFirstOpenAiImage(document.RootElement);
         var savedImage = string.IsNullOrWhiteSpace(providerResult.Base64)
             ? await DownloadImageAsBase64Async(
                 providerResult.Url!,
-                modelConfig,
                 parameters.SizeContractVersion == AiImageCatalogService.SizeContractVersion,
                 ownerUserId,
-                cancellationToken)
-            : await SaveImageAsync(providerResult.Base64!, ownerUserId, cancellationToken);
-        return new GeneratedProviderImage(providerResult, savedImage, modelConfig);
+                cancellationToken, gif)
+            : await SaveImageAsync(providerResult.Base64!, ownerUserId, cancellationToken, gif);
+        var usage = gif is null ? null : ReadGifTokenUsage(document.RootElement);
+        return new GeneratedProviderImage(providerResult, savedImage, modelConfig, usage);
     }
 
     private async Task<JsonDocument> SendImageRequestForRouteAsync(
@@ -650,11 +719,12 @@ public sealed class AiImageService(
         ResolveAiImageParametersResponse parameters,
         IReadOnlyList<string> referenceImageUrls,
         string? maskImageUrl,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        GifOutput? gif)
     {
         var mode = referenceImageUrls.Count == 0 ? "generations" : "edits";
         var primaryImageFieldName = referenceImageUrls.Count == 0 ? null : "image[]";
-        var response = await SendImageRequestAsync(modelConfig, prompt, parameters, referenceImageUrls, maskImageUrl, primaryImageFieldName, cancellationToken);
+        var response = await SendImageRequestAsync(modelConfig, prompt, parameters, referenceImageUrls, maskImageUrl, primaryImageFieldName, cancellationToken, gif);
         if (response.IsSuccess && TryReadOpenAiImage(response.Document.RootElement, out _))
         {
             return response.Document;
@@ -669,7 +739,7 @@ public sealed class AiImageService(
                 response.StatusCode);
             response.Document.Dispose();
 
-            var retryResponse = await SendImageRequestAsync(modelConfig, prompt, parameters, referenceImageUrls, maskImageUrl, "image", cancellationToken);
+            var retryResponse = await SendImageRequestAsync(modelConfig, prompt, parameters, referenceImageUrls, maskImageUrl, "image", cancellationToken, gif);
             if (retryResponse.IsSuccess && TryReadOpenAiImage(retryResponse.Document.RootElement, out _))
             {
                 return retryResponse.Document;
@@ -692,11 +762,12 @@ public sealed class AiImageService(
         IReadOnlyList<string> referenceImageUrls,
         string? maskImageUrl,
         string? imageFieldName,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        GifOutput? gif)
     {
         using var httpRequest = referenceImageUrls.Count == 0
-            ? BuildGenerationRequest(modelConfig, prompt, parameters)
-            : BuildEditRequest(modelConfig, prompt, parameters, referenceImageUrls, maskImageUrl, imageFieldName ?? "image[]");
+            ? BuildGenerationRequest(modelConfig, prompt, parameters, gif)
+            : BuildEditRequest(modelConfig, prompt, parameters, referenceImageUrls, maskImageUrl, imageFieldName ?? "image[]", gif);
         httpRequest.Headers.Remove("Authorization");
         httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", modelConfig.ApiKey);
 
@@ -881,6 +952,9 @@ public sealed class AiImageService(
         return new GenerateAiImageResponse
         {
             TaskId = firstTask.Id,
+            PricingTier = firstTask.PricingTier,
+            UnitPointCost = firstTask.UnitPointCost,
+            ListUnitPointCost = firstTask.ListUnitPointCost,
             TaskIds = orderedIds,
             SourcePromptId = firstTask.SourcePromptId,
             ModelName = firstTask.ModelName ?? string.Empty,
@@ -920,34 +994,47 @@ public sealed class AiImageService(
         CreateAiImageTaskRequest request,
         CancellationToken cancellationToken)
     {
+        var gif = AiImageGifRequest.IsGif(request, allowGif: request.SizeMode is null && request.CatalogVersion is null);
         if (request.SizeMode is not null || request.CatalogVersion is not null)
         {
             var versioned = await CreateVersionedTasksAsync(request, cancellationToken);
-            return BuildCreateTasksResponse(
+            return await BuildCreateTasksResponseAsync(
                 versioned.TaskIds,
-                await GetRequestStateAsync(versioned.RequestId, cancellationToken));
+                await GetRequestStateAsync(versioned.RequestId, cancellationToken), cancellationToken);
         }
 
-        var taskIds = await CreateLegacyTasksAsync(request, cancellationToken);
-        return BuildCreateTasksResponse(taskIds, "active");
+        var taskIds = await CreateLegacyTasksAsync(request, gif, cancellationToken);
+        return await BuildCreateTasksResponseAsync(taskIds, "active", cancellationToken);
     }
 
     private async Task<IReadOnlyList<long>> CreateLegacyTasksAsync(
         CreateAiImageTaskRequest request,
+        bool gif,
         CancellationToken cancellationToken)
     {
-
         var prompt = AiImagePromptValidator.Validate(request.Prompt);
         var modelCode = ResolveRequestModelCode(request.ModelCode, request.ModelName, AiImageModelConfigService.DefaultGptModelCode);
         var imageCount = ValidateImageCount(request.ImageCount, modelCode);
-        var parameters = await ResolveParametersAsync(new ResolveAiImageParametersRequest
+        var userId = currentUser.UserId ?? throw new AppException(ErrorCodes.Unauthorized, "User is not authenticated");
+        var gifIdentity = gif ? AiImageGifRequest.Identify(request, modelCode, prompt) : null;
+        var rootKey = gifIdentity?.KeyHash ?? AiImageIdempotency.HashKey(request.IdempotencyKey);
+        var taskKeyHashes = Enumerable.Range(0, imageCount)
+            .Select(index => AiImageIdempotency.DeriveTaskKeyHash(rootKey, index)).ToArray();
+        if (gifIdentity is not null)
+        {
+            var replay = await FindIdempotentTasksAsync(userId, gifIdentity, taskKeyHashes, imageCount, cancellationToken);
+            if (replay.Count > 0) return replay.Select(task => task.Id).ToArray();
+        }
+        var parameters = gif ? AiImageGifRequest.ResolveParameters(request, _gif) : await ResolveParametersAsync(new ResolveAiImageParametersRequest
         {
             Resolution = request.Resolution,
             ResolutionCode = request.ResolutionCode,
             QualityCode = request.QualityCode,
             AspectRatioCode = request.AspectRatioCode
         }, cancellationToken);
-        var userId = currentUser.UserId ?? throw new AppException(ErrorCodes.Unauthorized, "User is not authenticated");
+        var modelConfig = gif
+            ? (await modelConfigService.ResolveGifRoutesAsync(modelCode, cancellationToken))[0]
+            : await modelConfigService.ResolveAsync(modelCode, parameters.ResolutionCode, cancellationToken);
         var resolvedReferenceUrls = await mediaAssetService.ResolveOwnedReferenceUrlsAsync(
             userId,
             currentUser.IsSuperAdmin,
@@ -972,16 +1059,6 @@ public sealed class AiImageService(
             _ = ResolveMaskImageFile(maskImageUrl);
         }
         var siteId = await ResolveAiImageSiteIdAsync(request.SiteId, cancellationToken);
-        var modelConfig = await modelConfigService.ResolveAsync(modelCode, parameters.ResolutionCode, cancellationToken);
-        var pointCostPerImage = await pointService.GetImageGenerateCostAsync(
-            modelConfig.ModelCode,
-            parameters.ResolutionCode ?? string.Empty,
-            parameters.QualityCode,
-            1,
-            cancellationToken);
-        var pointCost = checked(pointCostPerImage * imageCount);
-        await ExpireStaleTasksAsync(userId, cancellationToken);
-
         var negativePrompt = string.IsNullOrWhiteSpace(request.NegativePrompt) ? null : request.NegativePrompt.Trim();
         if (negativePrompt?.Length > 2000)
         {
@@ -1015,17 +1092,12 @@ public sealed class AiImageService(
                 ReferenceImageUrls = referenceImageUrls,
                 MaskImageUrl = maskImageUrl
             };
-        var identity = AiImageIdempotency.Create(request.IdempotencyKey, canonicalRequest);
-        var taskKeyHashes = Enumerable.Range(0, imageCount)
-            .Select(index => AiImageIdempotency.DeriveTaskKeyHash(identity.KeyHash, index))
-            .ToArray();
-        var existingTasks = await FindIdempotentTasksAsync(userId, identity, taskKeyHashes, imageCount, cancellationToken);
-        if (existingTasks.Count > 0)
+        var identity = gifIdentity ?? AiImageIdempotency.Create(request.IdempotencyKey, canonicalRequest);
+        if (!gif)
         {
-            return existingTasks.Select(task => task.Id).ToArray();
+            var existing = await FindIdempotentTasksAsync(userId, identity, taskKeyHashes, imageCount, cancellationToken);
+            if (existing.Count > 0) return existing.Select(task => task.Id).ToArray();
         }
-
-        await userConsentService.EnsureAiProcessingConsentAsync(userId, modelConfig.ConsentProviderCode, cancellationToken);
 
         var promptPolicyVersion = await promptFilter.EnsureAllAllowedAsync(
             [
@@ -1034,6 +1106,17 @@ public sealed class AiImageService(
             ],
             cancellationToken);
 
+        int? frameCount = gif ? request.FrameCount ?? _gif.DefaultFrameCount : null;
+        var pointCostPerImage = gif
+            ? AiImageGifBilling.CalculateReservePoints(_gif, parameters.QualityCode, frameCount!.Value, referenceImageUrls.Count)
+            : await pointService.GetImageGenerateCostAsync(
+            modelConfig.ModelCode,
+            parameters.ResolutionCode ?? string.Empty,
+            parameters.QualityCode,
+            1,
+            cancellationToken);
+        var pointCost = checked(pointCostPerImage * imageCount);
+        await ExpireStaleTasksAsync(userId, cancellationToken);
         var admission = await admissionService.ReserveAsync(
             userId,
             identity.KeyHash,
@@ -1070,6 +1153,12 @@ public sealed class AiImageService(
             RequestFingerprint = identity.RequestFingerprint,
             PointCost = pointCostPerImage,
             BillingStatus = 0,
+            OutputFormat = gif ? "gif" : "png",
+            FrameCount = frameCount,
+            FrameDurationMs = gif ? request.FrameDurationMs ?? _gif.DefaultFrameDurationMs : null,
+            RequestedWidth = gif ? parameters.Width : null,
+            RequestedHeight = gif ? parameters.Height : null,
+            RequestedSize = gif ? parameters.Size : null,
             ResolutionCode = parameters.ResolutionCode,
             QualityCode = parameters.QualityCode,
             AspectRatioCode = parameters.AspectRatioCode,
@@ -1093,7 +1182,10 @@ public sealed class AiImageService(
                 modelConfig.ModelCode,
                 parameters.ResolutionCode ?? string.Empty,
                 parameters.QualityCode,
-                cancellationToken);
+                cancellationToken, request.ExpectedUnitPoints, async cost =>
+                {
+                    admission = await admissionService.AdjustPointCostAsync(admission, cost, cancellationToken);
+                });
             persisted = reservation.Created;
             if (!reservation.Created)
             {
@@ -1134,6 +1226,13 @@ public sealed class AiImageService(
             }
             else
             {
+                if (entities.All(x => x.Id > 0))
+                {
+                    // A lost COMMIT reply can leave a durable batch even though the caller observed a failure.
+                    var committed = await FindIdempotentTasksAsync(userId, identity, taskKeyHashes, imageCount, CancellationToken.None);
+                    if (committed.Count == entities.Length && committed.Select(x => x.Id).SequenceEqual(entities.Select(x => x.Id)))
+                        return committed.Select(x => x.Id).ToArray();
+                }
                 await admissionService.CancelAsync(admission);
             }
 
@@ -1447,7 +1546,7 @@ public sealed class AiImageService(
         return sourcePromptId.Value;
     }
 
-    private async Task<SavedImage> SaveImageAsync(string base64, long ownerUserId, CancellationToken cancellationToken)
+    private async Task<SavedImage> SaveImageAsync(string base64, long ownerUserId, CancellationToken cancellationToken, GifOutput? gif)
     {
         byte[] bytes;
         try
@@ -1459,15 +1558,15 @@ public sealed class AiImageService(
             throw new AppException(ErrorCodes.BadRequest, "Image generation returned invalid base64 image data");
         }
 
-        return await SaveImageBytesAsync(bytes, ownerUserId, cancellationToken);
+        return await SaveImageBytesAsync(bytes, ownerUserId, cancellationToken, gif);
     }
 
     private async Task<SavedImage> DownloadImageAsBase64Async(
         string imageUrl,
-        ResolvedAiImageModelConfig route,
         bool versioned,
         long ownerUserId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        GifOutput? gif)
     {
         if (!Uri.TryCreate(imageUrl, UriKind.Absolute, out var uri)
             || uri.Scheme != Uri.UriSchemeHttps
@@ -1514,14 +1613,16 @@ public sealed class AiImageService(
             throw new AppException(ErrorCodes.BadRequest, "Image generation returned empty image data");
         }
 
-        return await SaveImageBytesAsync(buffer.ToArray(), ownerUserId, cancellationToken);
+        return await SaveImageBytesAsync(buffer.ToArray(), ownerUserId, cancellationToken, gif);
     }
 
     private static bool IsTaskActive(int status) => status is 0 or 3;
 
-    private async Task<SavedImage> SaveImageBytesAsync(byte[] bytes, long ownerUserId, CancellationToken cancellationToken)
+    private async Task<SavedImage> SaveImageBytesAsync(byte[] bytes, long ownerUserId, CancellationToken cancellationToken, GifOutput? gif)
     {
-        var image = await ImageUploadValidator.ValidateAsync(bytes, MaxGeneratedImageSizeBytes, cancellationToken);
+        var image = gif is null
+            ? await ImageUploadValidator.ValidateAsync(bytes, MaxGeneratedImageSizeBytes, cancellationToken)
+            : await ImageUploadValidator.ValidateGeneratedGifAsync(bytes, gif.Width, gif.Height, gif.FrameCount, gif.FrameDurationMs, cancellationToken);
         var storageKey = $"{ownerUserId}/{DateTime.UtcNow:yyyyMM}/{Guid.NewGuid():N}{image.Extension}";
         var savePath = mediaPathResolver.ResolveFilePath(storageKey);
 
@@ -1530,7 +1631,7 @@ public sealed class AiImageService(
 
         return new SavedImage(
             $"/api/media/ai/{storageKey.Replace('\\', '/')}",
-            Convert.ToBase64String(image.Content),
+            gif is null ? Convert.ToBase64String(image.Content) : string.Empty,
             image.MimeType,
             image.Width,
             image.Height);
@@ -1566,9 +1667,21 @@ public sealed class AiImageService(
             OutputHeight = entity.OutputHeight,
             OutputSize = entity.OutputSize,
             OutputMimeType = entity.OutputMimeType,
+            OutputFormat = entity.OutputFormat,
+            FrameCount = entity.FrameCount,
+            FrameDurationMs = entity.FrameDurationMs,
+            ChargedPoints = entity.ChargedPoints,
+            PlatformCostCny = entity.PlatformCostCny,
+            Usage = entity.UsageInputTokens.HasValue && entity.UsageOutputTokens.HasValue
+                ? new(entity.UsageInputTokens.Value, entity.UsageTextInputTokens, entity.UsageImageInputTokens,
+                    entity.UsageOutputTokens.Value, entity.UsageInputBreakdown!)
+                : null,
             ImageCount = entity.ImageCount,
             CompletedImageCount = entity.CompletedImageCount,
             PointCost = entity.PointCost,
+            PricingTier = entity.PricingTier,
+            UnitPointCost = entity.UnitPointCost,
+            ListUnitPointCost = entity.ListUnitPointCost,
             BillingStatus = entity.BillingStatus,
             RefundedPoints = entity.RefundedPoints,
             ResolutionCode = entity.ResolutionCode ?? string.Empty,
@@ -1620,16 +1733,22 @@ public sealed class AiImageService(
         return releases.ToDictionary(x => x.Id, x => x.CatalogVersion);
     }
 
-    private static CreateAiImageTasksResponse BuildCreateTasksResponse(
-        IReadOnlyList<long> taskIds,
-        string requestState) => new()
+    public async Task<CreateAiImageTasksResponse> BuildCreateTasksResponseAsync(
+        IReadOnlyList<long> taskIds, string state, CancellationToken cancellationToken)
     {
-        Id = taskIds[0],
-        TaskId = taskIds[0],
-        Ids = taskIds,
-        TaskIds = taskIds,
-        RequestState = requestState
-    };
+        var id = taskIds[0];
+        var owner = currentUser.UserId;
+        var snapshot = await db.Queryable<AiImageTaskEntity>()
+            .Where(x => x.Id == id && x.UserId == owner)
+            .Select(x => new { x.PricingTier, x.UnitPointCost, x.ListUnitPointCost })
+            .FirstAsync(cancellationToken);
+        return new CreateAiImageTasksResponse
+        {
+            Id = id, TaskId = id, Ids = taskIds, TaskIds = taskIds, RequestState = state,
+            PricingTier = snapshot?.PricingTier, UnitPointCost = snapshot?.UnitPointCost,
+            ListUnitPointCost = snapshot?.ListUnitPointCost
+        };
+    }
 
     private async Task<string> GetRequestStateAsync(long requestId, CancellationToken cancellationToken)
     {
@@ -1670,20 +1789,6 @@ public sealed class AiImageService(
             return await LoadVersionedBatchAsync(existingRequest, identity.RequestFingerprint, cancellationToken);
         }
 
-        var resolution = await catalogService.ResolveAsync(
-            new ResolveAiImageParametersRequest
-            {
-                ModelCode = intent.ModelCode,
-                SizeMode = intent.SizeMode,
-                CatalogVersion = request.CatalogVersion,
-                Resolution = request.Resolution,
-                ResolutionCode = request.ResolutionCode,
-                QualityCode = intent.QualityCode,
-                AspectRatioCode = request.AspectRatioCode
-            },
-            rolloutPolicy.GetClientContext(),
-            cancellationToken);
-
         var resolvedReferenceUrls = await mediaAssetService.ResolveOwnedReferenceUrlsAsync(
             userId,
             false,
@@ -1708,10 +1813,6 @@ public sealed class AiImageService(
             _ = ResolveMaskImageFile(maskImageUrl);
         }
 
-        foreach (var providerCode in resolution.ConsentProviderCodes)
-        {
-            await userConsentService.EnsureAiProcessingConsentAsync(userId, providerCode, cancellationToken);
-        }
         var promptPolicyVersion = await promptFilter.EnsureAllAllowedAsync(
             [
                 new AiPromptFilterText("prompt", intent.Prompt),
@@ -1721,7 +1822,28 @@ public sealed class AiImageService(
         var siteId = await ResolveAiImageSiteIdAsync(request.SiteId, cancellationToken);
         await ExpireStaleTasksAsync(userId, cancellationToken);
 
+        await new AiImagePriceResolver(db).RequireAccessAsync(userId, intent.ModelCode, null, cancellationToken);
+        var resolution = await catalogService.ResolveAsync(
+            new ResolveAiImageParametersRequest
+            {
+                ModelCode = intent.ModelCode,
+                SizeMode = intent.SizeMode,
+                CatalogVersion = request.CatalogVersion,
+                Resolution = request.Resolution,
+                ResolutionCode = request.ResolutionCode,
+                QualityCode = intent.QualityCode,
+                AspectRatioCode = request.AspectRatioCode
+            },
+            rolloutPolicy.GetClientContext(),
+            cancellationToken);
         var pointCost = checked(resolution.Price.Points * intent.ImageCount);
+        var createdAt = HongKongNow();
+        var taskInputs = await BuildVersionedTaskInputsAsync(
+            request,
+            userId,
+            intent.ImageCount,
+            createdAt,
+            cancellationToken);
         var admission = await admissionService.ReserveAsync(
             userId,
             identity.KeyHash,
@@ -1734,13 +1856,6 @@ public sealed class AiImageService(
             return await WaitForVersionedBatchAsync(userId, identity, cancellationToken);
         }
 
-        var createdAt = HongKongNow();
-        var taskInputs = await BuildVersionedTaskInputsAsync(
-            request,
-            userId,
-            intent.ImageCount,
-            createdAt,
-            cancellationToken);
         var requestEntity = new AiImageRequestEntity
         {
             UserId = userId,
@@ -1812,7 +1927,10 @@ public sealed class AiImageService(
                 entities,
                 taskInputs,
                 resolution.Price.Id,
-                cancellationToken);
+                cancellationToken, request.ExpectedUnitPoints, async cost =>
+                {
+                    admission = await admissionService.AdjustPointCostAsync(admission, cost, cancellationToken);
+                });
             if (!reservation.Created)
             {
                 await admissionService.CancelAsync(admission);
@@ -1852,9 +1970,10 @@ public sealed class AiImageService(
         }
         catch
         {
-            await admissionService.CancelAsync(admission);
             var winner = await db.Queryable<AiImageRequestEntity>()
                 .FirstAsync(x => x.UserId == userId && x.IdempotencyKeyHash == identity.KeyHash, CancellationToken.None);
+            if (winner?.AdmissionReservationId != admission.OwnerToken)
+                await admissionService.CancelAsync(admission);
             if (winner is not null)
             {
                 return await LoadVersionedBatchAsync(winner, identity.RequestFingerprint, CancellationToken.None);
@@ -2192,21 +2311,20 @@ public sealed class AiImageService(
         return new Uri($"{normalizedBaseUrl}{normalizedPath}", UriKind.Absolute);
     }
 
-    private static HttpRequestMessage BuildGenerationRequest(ResolvedAiImageModelConfig config, string prompt, ResolveAiImageParametersResponse parameters)
+    private static HttpRequestMessage BuildGenerationRequest(ResolvedAiImageModelConfig config, string prompt, ResolveAiImageParametersResponse parameters, GifOutput? gif)
     {
-        var request = new HttpRequestMessage(HttpMethod.Post, BuildEndpoint(config.BaseUrl, config.TextToImagePath))
+        var body = new Dictionary<string, object>
         {
-            Content = JsonContent.Create(new
-            {
-                model = config.ProviderModel,
-                prompt = BuildProviderPrompt(config, prompt, parameters),
-                size = parameters.Size,
-                quality = parameters.ProviderQuality,
-                n = 1
-            })
+            ["model"] = config.ProviderModel, ["prompt"] = BuildProviderPrompt(config, prompt, parameters),
+            ["size"] = parameters.Size, ["quality"] = parameters.ProviderQuality, ["n"] = 1
         };
-
-        return request;
+        if (gif is not null)
+        {
+            body["output_format"] = "gif";
+            body["frame_count"] = gif.FrameCount;
+            body["frame_duration_ms"] = gif.FrameDurationMs;
+        }
+        return new HttpRequestMessage(HttpMethod.Post, BuildEndpoint(config.BaseUrl, config.TextToImagePath)) { Content = JsonContent.Create(body) };
     }
 
     // prompt-aspect-ratio 中转只按提示词决定宽高比，追加的说明只发给供应商，不写回任务提示词。
@@ -2231,7 +2349,7 @@ public sealed class AiImageService(
         return $"{prompt}\n\nOutput image aspect ratio: {width}:{height} ({orientation}).";
     }
 
-    private HttpRequestMessage BuildEditRequest(ResolvedAiImageModelConfig config, string prompt, ResolveAiImageParametersResponse parameters, IReadOnlyList<string> referenceImageUrls, string? maskImageUrl, string imageFieldName)
+    private HttpRequestMessage BuildEditRequest(ResolvedAiImageModelConfig config, string prompt, ResolveAiImageParametersResponse parameters, IReadOnlyList<string> referenceImageUrls, string? maskImageUrl, string imageFieldName, GifOutput? gif)
     {
         var content = new MultipartFormDataContent
         {
@@ -2241,6 +2359,12 @@ public sealed class AiImageService(
             { new StringContent(parameters.ProviderQuality), "quality" },
             { new StringContent("1"), "n" }
         };
+        if (gif is not null)
+        {
+            content.Add(new StringContent("gif"), "output_format");
+            content.Add(new StringContent(gif.FrameCount.ToString(System.Globalization.CultureInfo.InvariantCulture)), "frame_count");
+            content.Add(new StringContent(gif.FrameDurationMs.ToString(System.Globalization.CultureInfo.InvariantCulture)), "frame_duration_ms");
+        }
 
         foreach (var referenceImageUrl in referenceImageUrls)
         {
@@ -2465,7 +2589,9 @@ public sealed class AiImageService(
 
     private sealed record OpenAiImageResult(string? Base64, string? Url, string? RevisedPrompt);
 
-    private sealed record GeneratedProviderImage(OpenAiImageResult ProviderResult, SavedImage SavedImage, ResolvedAiImageModelConfig Route);
+    private sealed record GeneratedProviderImage(OpenAiImageResult ProviderResult, SavedImage SavedImage, ResolvedAiImageModelConfig Route, GifTokenUsage? Usage);
+
+    private sealed record GifOutput(int Width, int Height, int FrameCount, int FrameDurationMs);
 
     private sealed record ImageProviderResponse(bool IsSuccess, HttpStatusCode StatusCode, string Endpoint, string Body, JsonDocument Document);
 

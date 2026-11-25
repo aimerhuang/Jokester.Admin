@@ -12,7 +12,6 @@ using System.Net;
 
 var rootDirectory = Directory.GetCurrentDirectory();
 var isAiMediaMigration = args.Contains("--migrate-ai-media", StringComparer.OrdinalIgnoreCase);
-var isLegalDocumentConfiguration = args.Contains("--configure-legal-documents", StringComparer.OrdinalIgnoreCase);
 var isAiImageCatalogConfiguration = args.Contains("--configure-ai-image-catalog", StringComparer.OrdinalIgnoreCase);
 // --seed-admin [user-name] [password]；省略时读取 BootstrapAdmin:UserName / BootstrapAdmin:Password。
 var seedAdminIndex = Array.FindIndex(args, x => string.Equals(x, "--seed-admin", StringComparison.OrdinalIgnoreCase));
@@ -20,13 +19,12 @@ var isSeedAdmin = seedAdminIndex >= 0;
 var seedAdminValues = isSeedAdmin
     ? args.Skip(seedAdminIndex + 1).TakeWhile(x => !x.StartsWith("--", StringComparison.Ordinal)).Take(2).ToArray()
     : [];
-if (new[] { isAiMediaMigration, isLegalDocumentConfiguration, isAiImageCatalogConfiguration, isSeedAdmin }.Count(x => x) > 1)
+if (new[] { isAiMediaMigration, isAiImageCatalogConfiguration, isSeedAdmin }.Count(x => x) > 1)
 {
     throw new InvalidOperationException("Only one maintenance command can run at a time.");
 }
 var applicationArgs = args
     .Where((x, index) => !isSeedAdmin || index < seedAdminIndex || index > seedAdminIndex + seedAdminValues.Length)
-    .Where(x => !string.Equals(x, "--configure-legal-documents", StringComparison.OrdinalIgnoreCase))
     .Where(x => !string.Equals(x, "--configure-ai-image-catalog", StringComparison.OrdinalIgnoreCase))
     .ToArray();
 DotEnvConfiguration.LoadToEnvironment(
@@ -52,7 +50,6 @@ builder.Logging.AddDebug();
 
 var securityOptions = builder.Configuration.GetSection(SecurityOptions.SectionName).Get<SecurityOptions>() ?? new SecurityOptions();
 if (!isAiMediaMigration
-    && !isLegalDocumentConfiguration
     && !isAiImageCatalogConfiguration
     && !isSeedAdmin
     && !builder.Environment.IsDevelopment()
@@ -151,22 +148,6 @@ if (isAiMediaMigration)
         $"AI media migration {(result.DryRun ? "dry run" : "completed")}: "
         + $"tasks={result.UpdatedTaskCount}, favorites={result.UpdatedFavoriteCount}, "
         + $"files={result.CopiedFileCount}, unreferencedLegacyFiles={result.OrphanLegacyFileCount}");
-    return;
-}
-
-if (isLegalDocumentConfiguration)
-{
-    var options = builder.Configuration
-        .GetSection(LegalDocumentConfigurationOptions.SectionName)
-        .Get<LegalDocumentConfigurationOptions>() ?? new LegalDocumentConfigurationOptions();
-    await using var scope = app.Services.CreateAsyncScope();
-    var db = scope.ServiceProvider.GetRequiredService<SqlSugar.ISqlSugarClient>();
-    var result = await LegalDocumentConfiguration.RunAsync(db, options);
-    Console.WriteLine(
-        $"Configured legal documents for {result.Platform}/{result.Locale}: "
-        + $"types={string.Join(',', result.DocumentTypes)}, "
-        + $"providers={string.Join(',', result.ProviderCodes)}, "
-        + $"effectiveAt={result.EffectiveAt:O}");
     return;
 }
 

@@ -5,7 +5,7 @@
 - 项目根目录：`D:\Project\jokester.admin`
 - 实际 Web API 项目目录：`D:\Project\jokester.admin\jokester.admin`
 - 根目录设计文档：`后台管理系统设计书.md`
-- 项目 docs：`docs/integration-guide.md`、`docs/architecture.md`、`docs/runbook.md`、`docs/point-recharge.md`、`docs/ai-prompt-filter.md`、`docs/ai-image-size-mode-prd.md`、`docs/ai-infinite-canvas-prd.md`、`docs/ai-model-config-status-prd.md`、`docs/user-admin-prd.md`
+- 项目 docs：`docs/integration-guide.md`、`docs/architecture.md`、`docs/runbook.md`、`docs/point-recharge.md`、`docs/ai-prompt-filter.md`、`docs/ai-image-size-mode-prd.md`、`docs/ai-infinite-canvas-prd.md`、`docs/ai-model-config-status-prd.md`、`docs/user-admin-prd.md`、`docs/ai-pricing-vip-prd.md`
 - 根目录数据库脚本：`jokester.admin.sql`
 
 ## Current Stack
@@ -116,7 +116,9 @@ POST /api/dev/bootstrap/super-admin
 - 充值套餐由 `GET /api/points/recharge/packages` 动态提供；Web/Android 固定只允许 `monthly`、`trial`、`basic`、`value` 四档且缺档时失败。`monthly` 必须到账 5000 积分，自核销或 Apple 履约到账起 30 天有效，其余三档永久有效。
 - 月卡 VIP 以 `sys_user_membership_entitlement` 独立来源账本为准，不能从积分余额或积分批次推断；有效期内积分耗尽仍是 VIP，多笔有效权益取最晚到期时间，Apple 退款只撤销对应交易权益。
 - 生图扣分顺序固定为限时套餐积分、签到积分、永久积分；同优先级按最早到期批次。失败退款必须回原扣款批次并保留原到期时间。
-- legacy 生图创建任务前按 `ai_image_point_price` 查价：GPT Image2 使用 `modelCode + resolutionCode + qualityCode`，Nano Banana2 只使用 `modelCode + resolutionCode`；扣除 `points * imageCount`。
+- legacy 预留事务锁用户、模型策略及价格，依数据库当前月卡权益和超管状态判定。VIP 专属模型仅允许有效 VIP 或超管使用；VIP 超管按 VIP 价，非 VIP 超管按标准价。GPT 按模型、分辨率、画质取价，Nano 按模型和分辨率取价。实付为 `effectivePoints × imageCount`，事务内同时核对客户端上限并校准 Redis 配额。已预留任务按原快照结算；撤销权益不追收差价。
+- 标准价独立保存。跟随档按模型折扣或默认折扣向上取整，初始 80%，结果等于标准价时 `vip_points=NULL`。手动档支持固定优惠价。后台写入、审计和全局 `pricing_revision` 增量同事务提交；默认折扣 `revision` 独立。生图预留不能锁全局设置行。
+- 定价一期先执行 `docs/migrations/20261124-add-ai-pricing-admin-and-vip-models.sql`，再部署 API，最后发布 Web。API 切换即开始 legacy VIP 优惠。须先完成二期发布价 VIP 支持，再在生产开启 `AiImageSizeMode.Enabled`。
 - `size-mode-v1` 必须在创建事务内锁定客户端提交的 current `modelCode + catalogVersion` 对应 release 价格；explicit 按 `sizeMode + resolutionCode + qualityCode`，auto 按 `sizeMode + qualityCode` 且 `resolutionCode=NULL`。不得回退到 legacy 价格或按最终输出尺寸改价。
 - 任务失败或超时时，`AiImageTaskProcessor` 会调用积分服务写入 `source=image_refund` 的返还流水。
 - Apple 退款遇到尚未结算的月卡生图预留时，必须在 `sys_user_point_bucket_usage` 标记延后追扣：失败不恢复已撤销额度，成功才追扣余额/记 debt；存在未结算延后追扣时拒绝新生图。
@@ -144,12 +146,11 @@ POST /api/dev/bootstrap/super-admin
 
 ## Mobile And iOS API Contract
 
-- 移动端响应中的时间统一为带 `Z`/UTC offset 的 ISO 8601；历史积分、充值表仍按现有本地时间写库，只在 API DTO 边界转换为 UTC，新 Apple/法律/授权/账号删除/Asset 表直接存 UTC。
+- 移动端响应中的时间统一为带 `Z`/UTC offset 的 ISO 8601；历史积分、充值表仍按现有本地时间写库，只在 API DTO 边界转换为 UTC，新 Apple/账号删除/Asset 表直接存 UTC。
 - Apple IAP Product ID 只能来自 `apple_iap_product` 的服务端映射，客户端不得提交积分或价格；Apple Bundle ID、Issuer ID、Key ID 和私钥必须由部署配置/Secret Manager 注入，仓库中不得保存真实值，多行 PEM 不通过 `.env` 文件注入。
 - iOS 套餐查询不返回外部购买链接；交易履约、积分入账和流水必须同事务，App Store Server Notification 必须验签并按 notification UUID 幂等处理。
-- `GET /api/legal/documents/current` 必须解析当前隐私政策和服务条款，任一缺失都返回 503；该法律文档系统与注册解耦，注册不提交或校验法律版本。AI processing 告知可暂不启用，此时响应 `aiProcessingNotice=null`。
-- 所有第三方 AI 生成入口必须校验 AI processing 告知和 consent：未配置已审批告知时 fail-closed 返回 `503 SERVICE_UNAVAILABLE`；已有告知但用户缺少当前 Provider 授权时返回 `412 AI_CONSENT_REQUIRED`。不得因为 TestFlight 或小范围使用绕过。
-- 部署专属法律版本和 URL 不进迁移或仓库配置；拿到审批值后用 `--configure-legal-documents` 幂等维护命令配置。暂不启用 AI 告知时显式设置 `AiProcessing.Enabled=false`；启用时 `providerCodes` 必须覆盖当前启用模型路由映射出的 `openai` / `google`。
+- 2026-11-24 起已移除法律文档系统和第三方 AI 数据处理授权：不再有 `GET /api/legal/documents/current`、`/api/users/me/consents`、`--configure-legal-documents` 和 Docker `legal` 命令，`GET /api/mobile/config` 也不再返回 `legalDocumentVersions`。AI 生成入口不做告知/consent 校验，不再返回 `412 AI_CONSENT_REQUIRED`。不要重新加回这些门槛，除非产品明确要求。
+- 现有库中的 `legal_document`、`user_consent` 表与数据保持不动（无删除迁移）；账号删除仍清理该用户的 `user_consent` 行。
 - 移动端新调用统一走 `POST /api/ai/images`，按服务端模型能力路由；旧 GPT/Nano 专用入口只用于 Web/Android 兼容，不作为新客户端契约。
 - 新移动端图片输入使用当前用户拥有的 `assetIds`；上传、读取、引用和删除均校验 `media_asset.owner_user_id`，不得重新允许任意远程 URL。旧 `referenceImageUrls`/`imageUrls` 仅保留后端同源私有媒体兼容路径。
 - `DELETE /api/assets/{assetId}` 只允许 Asset 所有者调用，跨用户与不存在统一返回 404；删除任务只软删除任务记录，不级联删除 Asset 或生成文件，账户删除流程负责清理用户全部私有媒体。
@@ -185,6 +186,12 @@ POST /api/dev/bootstrap/super-admin
 - migration 为 `docs/migrations/20260821-add-ai-image-size-mode-v1.sql`，并已同步 `jokester.admin.sql`。它不发布 auto 路由/价格/URL/Secret；仓库默认关闭 `AiImageSizeMode.Enabled/AutoEnabled`。
 - release 只能通过 `--configure-ai-image-catalog` 受控发布：`Approved=true`、auto 三条操作路径验证、独立审批价格和 endpoint/result allowlist 缺一不可。已发布 `CatalogVersion` 不可改写；`EnsureGptImage2TwoK=true` 会补齐并固定 `1k/2k/4k` 参数顺序，复制路由前必须确认 Provider 模型不按分辨率使用不同别名。
 
+## AI GIF Output Contract
+
+- 首页按 `capabilities.gif` 开放 legacy 排队动图。任一 OpenAI Images 模型只要有一条启用、有 Key、`gif_provider_model` 非空的路由即支持 GIF；该字段由超管在模型配置页（`/api/ai/model-routes` 的 `gifProviderModel`）维护，不在代码里写死模型。编辑时 `gifProviderModel` 省略=保持、空字符串=关闭；它不受 size-mode 发布冻结，Gemini 路由拒绝该字段。`gif_provider_model` 只用于 GIF；PNG 沿用原指纹、路由模型和定价。
+- GIF 按固定价收费（`basePoints + perFramePoints[quality] × 帧数 + perReferencePoints × 参考图数`，默认 2 / low4·med9·high12 / 6，`pricing_tier=gif_fixed`），创建时扣除，成功不退差，失败或超时全额退回原批次。中转站对 native GIF 的实收与其返回的 `usage` 不成比例，不要改回按 Token 实扣。`usage` 与 `platform_cost_cny` 只做对账参考。结果、扣分与状态同事务提交，重放依任务指纹识别。
+- 发布先执行 `docs/migrations/20261125-add-ai-image-gif-output.sql`，升级所有消费者后开放新建。降版先停新建，让新版 Worker 结清 GIF 预扣。接口见 `docs/integration-guide.md`，路由配置见 `docs/runbook.md`。
+
 ## AI Infinite Canvas Contract
 
 - 画布接口位于 `/api/ai/canvases`，只要求登录，不新增菜单权限；按 `owner_user_id` 隔离，跨用户与不存在统一 404。完整说明见 `docs/ai-infinite-canvas-prd.md` 与 `docs/integration-guide.md`。
@@ -201,6 +208,8 @@ POST /api/dev/bootstrap/super-admin
 
 - `GET /api/ai/images/model-status` 只要求登录，不新增菜单权限；只返回模型展示名、`state`（`normal`/`degraded`/`down`/`unknown`）、可用性、最快/最慢成功秒数和近期成败序列，不得暴露地址、Key、供应商模型、路由角色、错误信息、用户或任务标识。完整说明见 `docs/ai-model-config-status-prd.md`。
 - 状态样本只来自任务结算时写入的 `ai_image_task.health_model_code` / `health_sample`，取近 24 小时最近 60 条，包含用户软删除任务。新增结算路径必须正确归类：准入失败、未开始即过期、提示词拦截、授权缺失、素材无效不计入；versioned 只有 `failure_stage=provider/output` 计入。`IPointService.SettleImageTaskAsync` 的 `modelSideFailure` 默认 `true`，用户侧或平台侧失败要显式传 `false`。
+- `POST /api/ai/model-routes` 可新建模型：模型编码须为 2–100 位小写字母/数字/`.`/`_`/`-`，首条路由必须是 `primary` 且必须提供 `modelName`；新模型在 `ai_image_point_price` 有启用价格之前不会出现在用户模型列表。
+- `model_name` 是模型级展示名（编辑任一路由会同步到同模型全部路由），不要再带分辨率后缀；分辨率是路由属性。历史 `GPT Image 2 1K/2K/4K` 由 `docs/migrations/20261124-unify-ai-image-model-names.sql` 统一，已同步 `jokester.admin.sql`。
 - 状态接口只读 `IAiImageModelStatusService` 单例快照（Worker 约 30 秒刷新，Redis 共享），fail-open；不要在请求路径上直接查询 `ai_image_task`。
 - `/api/ai/model-routes` 只允许超级管理员，写操作在事务内锁定并复核当前用户；直接读写 `ai_image_model_config`，不另建配置表。不要把该前缀挪到 `/api/ai/images` 下（POST 会命中生图创建限流）。
 - API Key 只写不读：任何响应、日志、审计都不得包含明文，只返回 `apiKeySet` / `apiKeyMask`；编辑时空 Key 表示不修改。所有写操作同事务写 `ai_image_model_config_audit`，并用 `revision` 乐观并发。
@@ -218,6 +227,7 @@ POST /api/dev/bootstrap/super-admin
 - Empty/missing `imageAssetIds` and `imageUrls` means text-to-image; either non-empty input means image-to-image.
 - `imageAssetIds` must belong to the current user and not be deleted. Legacy `imageUrls` must be authenticated `/api/media/ai/...` URLs accessible to the current user. The combined input limit is 6 images.
 - Nano Banana2 has no separate `NanoBanana2` configuration section and does not use the GPT primary/fallback route. It always resolves the currently enabled channel from `ai_image_model_config`; provider secrets must be maintained in that database configuration and never committed to the repository.
+- Gemini routes pick the wire protocol from the configured path: a path containing `{model}` or `:generateContent` sends the Gemini-native `generateContent` body; any other path (e.g. base `.../v1` + `/images/generations`, `/images/edits`) sends the OpenAI Images body (`model`, `prompt`, `n=1`, `size=WxH|auto`, multipart `image[]`) and accepts `b64_json` or an HTTPS result `url`. The dawclaudecode relay only works with the OpenAI Images style (`gemini-3-pro-image`, `gemini-3.1-flash-image`). The Nano HttpClient uses the guarded handler, so result URLs are re-checked at connect time and the only private-network exception is `AiImageModelAdmin.AllowPrivateNetworkHosts`.
 
 ## AI Prompt Filter Contract
 

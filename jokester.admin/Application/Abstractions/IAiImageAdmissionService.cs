@@ -12,6 +12,8 @@ public interface IAiImageAdmissionService
         int pointCost,
         CancellationToken cancellationToken);
 
+    Task<AiImageAdmissionReservation> AdjustPointCostAsync(AiImageAdmissionReservation reservation, int pointCost, CancellationToken cancellationToken);
+
     Task BindTaskAsync(AiImageAdmissionReservation reservation, long taskId, CancellationToken cancellationToken);
 
     Task BindBatchAsync(

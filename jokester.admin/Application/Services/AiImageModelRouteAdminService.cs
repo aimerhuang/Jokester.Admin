@@ -122,6 +122,7 @@ public sealed class AiImageModelRouteAdminService(
         var provider = RequireText(request.Provider, "provider", 50).ToLowerInvariant();
         var protocol = ResolveProtocolOrThrow(provider);
         var providerModel = RequireText(request.ProviderModel, "providerModel", MaxProviderModelLength);
+        var gifProviderModel = NormalizeGifProviderModel(request.GifProviderModel, protocol);
         var baseUrl = await NormalizeAndCheckBaseUrlAsync(request.BaseUrl, cancellationToken);
         var apiKey = RequireApiKey(request.ApiKey);
         var textPath = AiImageRouteEndpointPolicy.NormalizePath(request.TextToImagePath, DefaultTextToImagePath);
@@ -152,9 +153,19 @@ public sealed class AiImageModelRouteAdminService(
                 .Where(x => AiImageModelConfigService.NormalizeModelCode(x.ModelCode) == modelCode)
                 .ToArray();
             var liveRoutes = modelRoutes.Where(x => !x.IsDeleted).ToArray();
-            if (liveRoutes.Length == 0)
+            var isNewModel = liveRoutes.Length == 0;
+            if (isNewModel)
             {
-                throw Validation("modelCode must be an existing model. Creating a new model is not supported yet.");
+                // A new model starts with its primary route and an explicit display name; it stays invisible to users
+                // until legacy prices exist for it, because the model list only offers priced resolutions.
+                if (routeRole != AiImageModelConfigService.PrimaryRouteRole)
+                {
+                    throw Validation("The first route of a new model must be a primary route.");
+                }
+                if (string.IsNullOrWhiteSpace(request.ModelName))
+                {
+                    throw Validation("modelName is required when creating a new model.");
+                }
             }
             if (liveRoutes.Any(x => TryResolveProtocol(x.Provider) is { } existing && existing != protocol))
             {
@@ -167,9 +178,8 @@ public sealed class AiImageModelRouteAdminService(
                 throw new AppException(ErrorCodes.Conflict, MachineErrorCodes.Conflict, "A route with this model, resolution and role already exists.");
             }
 
-            var currentName = liveRoutes.OrderBy(x => RouteOrder(x.RouteRole)).ThenBy(x => x.Sort).ThenBy(x => x.Id).First().ModelName;
             var modelName = string.IsNullOrWhiteSpace(request.ModelName)
-                ? currentName
+                ? liveRoutes.OrderBy(x => RouteOrder(x.RouteRole)).ThenBy(x => x.Sort).ThenBy(x => x.Id).First().ModelName
                 : RequireText(request.ModelName, "modelName", MaxModelNameLength);
             var now = DateTime.Now;
             var entity = new AiImageModelConfigEntity
@@ -178,6 +188,7 @@ public sealed class AiImageModelRouteAdminService(
                 ModelName = modelName,
                 Provider = provider,
                 ProviderModel = providerModel,
+                GifProviderModel = gifProviderModel,
                 ResolutionCode = resolutionCode,
                 RouteRole = routeRole,
                 BaseUrl = baseUrl,
@@ -232,6 +243,9 @@ public sealed class AiImageModelRouteAdminService(
             await RequireActiveSuperAdminAsync(operatorId, cancellationToken);
             var config = await LockRouteAsync(id, request.Revision, cancellationToken);
             var before = Snapshot(config);
+            var gifProviderModel = request.GifProviderModel is null
+                ? config.GifProviderModel
+                : NormalizeGifProviderModel(request.GifProviderModel, TryResolveProtocol(config.Provider));
             var changed = new List<string>();
             var baseUrlChanged = !string.Equals(CanonicalStoredUrl(config.BaseUrl), requestedBaseUrl, StringComparison.Ordinal);
             if (baseUrlChanged)
@@ -245,6 +259,8 @@ public sealed class AiImageModelRouteAdminService(
             if (!string.Equals(config.ImageToImagePath, imagePath, StringComparison.Ordinal)) changed.Add("imageToImagePath");
             var frozenChanged = changed.ToArray();
             if (!string.Equals(config.RequestFormat, requestFormat, StringComparison.Ordinal)) changed.Add("requestFormat");
+            // GIF runs only on the legacy queue, so a size-mode release never freezes this field.
+            if (!string.Equals(config.GifProviderModel, gifProviderModel, StringComparison.Ordinal)) changed.Add("gifProviderModel");
             if (config.Sort != request.Sort) changed.Add("sort");
             var modelNameChanged = !string.Equals(config.ModelName, modelName, StringComparison.Ordinal);
             if (modelNameChanged) changed.Add("modelName");
@@ -270,6 +286,7 @@ public sealed class AiImageModelRouteAdminService(
             var newRevision = config.Revision + 1;
             config.ModelName = modelName;
             config.ProviderModel = providerModel;
+            config.GifProviderModel = gifProviderModel;
             config.BaseUrl = baseUrlChanged ? requestedBaseUrl : config.BaseUrl;
             config.TextToImagePath = textPath;
             config.ImageToImagePath = imagePath;
@@ -285,6 +302,7 @@ public sealed class AiImageModelRouteAdminService(
                 {
                     ModelName = config.ModelName,
                     ProviderModel = config.ProviderModel,
+                    GifProviderModel = config.GifProviderModel,
                     BaseUrl = config.BaseUrl,
                     ApiKey = config.ApiKey,
                     ApiKeyUpdatedAt = config.ApiKeyUpdatedAt,
@@ -734,6 +752,7 @@ public sealed class AiImageModelRouteAdminService(
         config.ModelName,
         config.Provider,
         config.ProviderModel,
+        config.GifProviderModel,
         ResolutionCode = NormalizeResolution(config.ResolutionCode),
         RouteRole = NormalizeRouteRole(config.RouteRole),
         config.BaseUrl,
@@ -766,6 +785,7 @@ public sealed class AiImageModelRouteAdminService(
         Provider = config.Provider,
         ProviderProtocol = TryResolveProtocol(config.Provider),
         ProviderModel = config.ProviderModel,
+        GifProviderModel = string.IsNullOrWhiteSpace(config.GifProviderModel) ? null : config.GifProviderModel,
         BaseUrl = config.BaseUrl,
         ApiKeySet = !string.IsNullOrWhiteSpace(config.ApiKey),
         ApiKeyMask = string.IsNullOrWhiteSpace(config.ApiKey) ? null : MaskApiKey(config.ApiKey),
@@ -813,8 +833,17 @@ public sealed class AiImageModelRouteAdminService(
     private static string RequireModelCode(string? value)
     {
         var text = RequireText(value, "modelCode", 100);
-        return AiImageModelConfigService.NormalizeModelCode(text);
+        var code = AiImageModelConfigService.NormalizeModelCode(text);
+        // Model codes appear in URLs (/models/{modelCode}/...), Redis keys and audit filters.
+        if (!ModelCodePattern.IsMatch(code))
+        {
+            throw Validation("modelCode must be 2-100 lowercase letters, digits, '.', '_' or '-', starting with a letter or digit.");
+        }
+        return code;
     }
+
+    private static readonly System.Text.RegularExpressions.Regex ModelCodePattern =
+        new("^[a-z0-9][a-z0-9._-]{1,99}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
     private static string RequireText(string? value, string field, int maxLength)
     {
@@ -835,6 +864,20 @@ public sealed class AiImageModelRouteAdminService(
             throw Validation("apiKey is required, must be at most 500 characters and must not contain whitespace.");
         }
         return key;
+    }
+
+    private static string? NormalizeGifProviderModel(string? value, string? protocol)
+    {
+        var normalized = value?.Trim();
+        if (string.IsNullOrEmpty(normalized))
+        {
+            return null;
+        }
+        if (protocol != AiImageModelConfigService.OpenAiImageProtocol)
+        {
+            throw Validation("gifProviderModel is only supported on OpenAI Images routes.");
+        }
+        return RequireText(normalized, "gifProviderModel", MaxProviderModelLength);
     }
 
     private static string NormalizeRequestFormat(string? value)

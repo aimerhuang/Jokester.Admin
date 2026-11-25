@@ -70,6 +70,16 @@ public sealed class AiResultAssetRegistrationTests : IDisposable
     }
 
     [Fact]
+    public async Task GifResultIsRejectedBeforeThumbnailOrAssetCreation()
+    {
+        InsertTask(12, 1, status: 1, resultUrls: """["/api/media/ai/1/result.gif"]""");
+        _db.Ado.ExecuteCommand("UPDATE ai_image_task SET output_format='gif' WHERE id=12");
+        var error = await Assert.ThrowsAsync<AppException>(() => _service.RegisterAiResultAsync(1, 12, 0, default));
+        Assert.Equal("UNSUPPORTED_MEDIA_TYPE", error.MachineCode);
+        Assert.Empty(_db.Queryable<MediaAssetEntity>().ToList());
+    }
+
+    [Fact]
     public async Task LegacyResultUrls_AreResolvedByOrdinal()
     {
         var firstUrl = await WriteResultImageAsync(1, "legacy-0.png", 8, 8);

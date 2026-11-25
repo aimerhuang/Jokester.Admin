@@ -87,9 +87,11 @@ public sealed class MediaAssetService(ISqlSugarClient db, IAiMediaPathResolver m
 
         var task = await db.Queryable<AiImageTaskEntity>()
             .Where(x => x.Id == taskId && x.UserId == ownerUserId && !x.IsDeleted && x.Status == 1)
-            .Select(x => new AiImageTaskEntity { Id = x.Id, ResultUrls = x.ResultUrls })
+            .Select(x => new AiImageTaskEntity { Id = x.Id, ResultUrls = x.ResultUrls, OutputFormat = x.OutputFormat })
             .FirstAsync(cancellationToken);
         if (task is null) throw HiddenAssetNotFound();
+        if (task.OutputFormat == "gif")
+            throw new AppException(ErrorCodes.BadRequest, "UNSUPPORTED_MEDIA_TYPE", "GIF 动图暂不支持登记为素材。");
         var storageKey = await ResolveAiResultStorageKeyAsync(task, resultOrdinal, ownerUserId, cancellationToken);
         var storagePath = ResolveStoredFilePath(storageKey);
         if (!File.Exists(storagePath)) throw HiddenAssetNotFound();

@@ -153,7 +153,6 @@ public sealed class AiImageParameterResolutionTests
                 Options.Create(new PromptLibraryOptions()),
                 Mock.Of<IAiMediaPathResolver>(),
                 Mock.Of<IAiPromptFilter>(),
-                Mock.Of<IUserConsentService>(),
                 Mock.Of<IMediaAssetService>(),
                 Mock.Of<IAiImageCatalogService>(),
                 Mock.Of<IAiSizeModeRolloutPolicy>(),

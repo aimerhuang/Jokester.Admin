@@ -1,5 +1,6 @@
 using jokester.admin.Common;
 using jokester.admin.Common.Exceptions;
+using MySqlConnector;
 
 namespace jokester.admin.Middleware;
 
@@ -57,10 +58,25 @@ public sealed class GlobalExceptionMiddleware(RequestDelegate next, ILogger<Glob
         }
         catch (Exception ex)
         {
-            logger.LogError(
-                "Unhandled exception. FailureType={FailureType}, TraceId={TraceId}",
-                ex.GetType().Name,
-                context.TraceIdentifier);
+            // The exception message is deliberately not logged (it can carry prompts, keys or row
+            // data). For database failures, the MySQL error number and SQLSTATE are safe to log and
+            // tell a missing migration (1146) apart from lock waits, deadlocks or constraint errors.
+            if (FindMySqlException(ex) is { } dbException)
+            {
+                logger.LogError(
+                    "Unhandled exception. FailureType={FailureType}, DbErrorNumber={DbErrorNumber}, SqlState={SqlState}, TraceId={TraceId}",
+                    ex.GetType().Name,
+                    dbException.Number,
+                    dbException.SqlState,
+                    context.TraceIdentifier);
+            }
+            else
+            {
+                logger.LogError(
+                    "Unhandled exception. FailureType={FailureType}, TraceId={TraceId}",
+                    ex.GetType().Name,
+                    context.TraceIdentifier);
+            }
 
             if (!context.Response.HasStarted)
             {
@@ -73,6 +89,19 @@ public sealed class GlobalExceptionMiddleware(RequestDelegate next, ILogger<Glob
                     context.TraceIdentifier));
             }
         }
+    }
+
+    private static MySqlException? FindMySqlException(Exception exception)
+    {
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is MySqlException mySqlException)
+            {
+                return mySqlException;
+            }
+        }
+
+        return null;
     }
 
     private static int MapHttpStatusCode(int code) => code switch

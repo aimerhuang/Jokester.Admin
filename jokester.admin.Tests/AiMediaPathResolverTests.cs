@@ -120,8 +120,10 @@ public sealed class AiMediaPathResolverTests
         }
     }
 
-    [Fact]
-    public async Task PrivateMediaController_ReadsFromConfiguredRoot()
+    [Theory]
+    [InlineData("42/202608/image.png", "image/png")]
+    [InlineData("42/202611/image.gif", "image/gif")]
+    public async Task PrivateMediaController_ReadsFromConfiguredRoot(string relativePath, string contentType)
     {
         var testRoot = CreateTestRoot();
         try
@@ -130,7 +132,6 @@ public sealed class AiMediaPathResolverTests
             var mediaRoot = Path.Combine(testRoot, "persistent-data", "ai");
             Directory.CreateDirectory(contentRoot);
             var resolver = CreateResolver(contentRoot, mediaRoot);
-            const string relativePath = "42/202608/image.png";
             var filePath = resolver.ResolveFilePath(relativePath);
             Directory.CreateDirectory(Path.GetDirectoryName(filePath)!);
             await File.WriteAllBytesAsync(filePath, [1, 2, 3]);
@@ -146,7 +147,7 @@ public sealed class AiMediaPathResolverTests
 
             var physicalFile = Assert.IsType<PhysicalFileResult>(result);
             Assert.Equal(filePath, physicalFile.FileName);
-            Assert.Equal("image/png", physicalFile.ContentType);
+            Assert.Equal(contentType, physicalFile.ContentType);
         }
         finally
         {

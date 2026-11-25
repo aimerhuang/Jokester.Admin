@@ -24,7 +24,6 @@ public sealed class AiImageTaskProcessor(
     IAiPromptFilter promptFilter,
     IAiImageModelConfigService modelConfigService,
     IAiImageCatalogService catalogService,
-    IUserConsentService userConsentService,
     IOptions<AiImageSizeModeOptions> sizeModeOptions,
     ILogger<AiImageTaskProcessor> logger) : IAiImageTaskProcessor
 {
@@ -96,8 +95,27 @@ public sealed class AiImageTaskProcessor(
                 .ExecuteCommandAsync(taskToken);
 
             var modelCode = AiImageModelConfigService.NormalizeModelCode(task.ModelName);
+            if (task.OutputFormat == "gif")
+            {
+                var routes = await modelConfigService.ResolveGifRoutesAsync(modelCode, taskToken);
+                using var scope = scopeFactory.CreateScope();
+                var service = scope.ServiceProvider.GetRequiredService<IAiImageService>();
+                var generated = await WithProviderLeaseAsync(async lease =>
+                {
+                    using var linked = CancellationTokenSource.CreateLinkedTokenSource(taskToken, lease.LeaseLostToken);
+                    lease.ThrowIfLost();
+                    var result = await service.GenerateGifFromTaskAsync(task, routes, linked.Token);
+                    lease.ThrowIfLost();
+                    return result;
+                }, taskToken);
+                // GIF has one result. Persist the URL and its usage only inside the final settlement transaction.
+                var gifSettlement = await pointService.SettleImageTaskAsync(task.Id, 1, JsonSerializer.Serialize(new[] { generated.Url }),
+                    null, 1, CancellationToken.None, gifResult: generated.Result);
+                if (gifSettlement.Transitioned)
+                    await admissionService.CompleteAsync(task, gifSettlement.CompletedImageCount, gifSettlement.RefundedPoints);
+                return;
+            }
             var modelConfig = await modelConfigService.ResolveAsync(modelCode, task.ResolutionCode, taskToken);
-            await userConsentService.EnsureAiProcessingConsentAsync(task.UserId, modelConfig.ConsentProviderCode, taskToken);
             if (AiImageModelConfigService.UsesGeminiImageProtocol(modelConfig))
             {
                 var imageUrls = DeserializeReferenceImageUrls(task.ReferenceImageUrls);
@@ -221,22 +239,6 @@ public sealed class AiImageTaskProcessor(
                     ex);
             }
 
-            foreach (var providerCode in routes.Select(x => x.ConsentProviderCode).Distinct(StringComparer.OrdinalIgnoreCase))
-            {
-                try
-                {
-                    await userConsentService.EnsureAiProcessingConsentAsync(task.UserId, providerCode, taskToken);
-                }
-                catch (AppException ex) when (ex.MachineCode == MachineErrorCodes.AiConsentRequired)
-                {
-                    throw new VersionedPreflightException(
-                        MachineErrorCodes.AiConsentRequired,
-                        "AI 数据处理授权已失效。",
-                        false,
-                        ex);
-                }
-            }
-
             var now = HongKongNow();
             attempt = new AiImageProviderAttemptEntity
             {
@@ -258,10 +260,6 @@ public sealed class AiImageTaskProcessor(
             await using var providerLease = await providerGate.AcquireAsync(taskToken);
             providerLease.ThrowIfLost();
             await EnsureClaimAsync(task.Id, task.ClaimEpoch, claimTokenHash, taskToken);
-            foreach (var providerCode in routes.Select(x => x.ConsentProviderCode).Distinct(StringComparer.OrdinalIgnoreCase))
-            {
-                await userConsentService.EnsureAiProcessingConsentAsync(task.UserId, providerCode, taskToken);
-            }
             var inflight = await db.Updateable<AiImageProviderAttemptEntity>()
                 .SetColumns(x => new AiImageProviderAttemptEntity { State = "inflight" })
                 .Where(x => x.Id == attempt.Id && x.State == "prepared" && x.ClaimEpoch == task.ClaimEpoch)
@@ -641,26 +639,31 @@ public sealed class AiImageTaskProcessor(
         await semaphore.WaitAsync(cancellationToken);
         try
         {
-            await using var providerLease = await providerGate.AcquireAsync(cancellationToken);
-            try
-            {
-                var result = await generateImageAsync(cancellationToken);
-                await providerGate.ReportSuccessAsync();
-                return result;
-            }
-            catch (Exception ex) when (ex is AiPromptRejectedException or AiPromptFilterUnavailableException)
-            {
-                throw;
-            }
-            catch
-            {
-                await providerGate.ReportFailureAsync();
-                throw;
-            }
+            return await WithProviderLeaseAsync(_ => generateImageAsync(cancellationToken), cancellationToken);
         }
         finally
         {
             semaphore.Release();
+        }
+    }
+
+    private async Task<T> WithProviderLeaseAsync<T>(Func<IAiImageProviderLease, Task<T>> generate, CancellationToken cancellationToken)
+    {
+        await using var lease = await providerGate.AcquireAsync(cancellationToken);
+        try
+        {
+            var result = await generate(lease);
+            await providerGate.ReportSuccessAsync();
+            return result;
+        }
+        catch (Exception ex) when (ex is AiPromptRejectedException or AiPromptFilterUnavailableException)
+        {
+            throw;
+        }
+        catch
+        {
+            await providerGate.ReportFailureAsync();
+            throw;
         }
     }
 

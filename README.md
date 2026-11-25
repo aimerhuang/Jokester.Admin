@@ -174,7 +174,6 @@ X-Bootstrap-Secret: <BootstrapAdmin.Secret>
 - 后端按规范化邮箱 `@` 前的账号部分生成 `userName` 和 `nickName`，用户名冲突时自动消歧
 - 注册时后端会用同一个 `email` 去 Redis 查验证码；验证成功后创建用户并删除验证码键
 - 注册成功后可以直接使用邮箱和密码登录
-- 隐私政策、服务条款和 AI 数据处理授权继续由独立法律文档与授权流程维护；其中当前 AI processing 授权仍是第三方 AI 生图的前置条件
 
 登录成功返回：
 
@@ -203,10 +202,9 @@ Refresh Token 单次轮换并只按 SHA-256 哈希定位。旧 Token 在 10 秒�
 
 公开移动端元数据接口：
 
-- `GET /api/legal/documents/current`
 - `GET /api/mobile/config`
 
-登录用户可通过 `GET /api/users/me/consents` 和 `PUT /api/users/me/consents/ai-processing` 管理第三方 AI 数据处理授权。缺少当前模型 Provider 所需授权时，生图入口返回 HTTP 412 和 `AI_CONSENT_REQUIRED`。
+法律文档接口与第三方 AI 数据处理授权已移除，生图不需要用户点击同意。
 
 ## 用户管理接口
 
@@ -319,7 +317,9 @@ Refresh Token 单次轮换并只按 SHA-256 哈希定位。旧 Token 在 10 秒�
 - `DELETE /api/ai/images/{id}`：软删除 AI 生图任务记录，不级联删除上传 Asset 或生成文件
 - `size-mode-v1` 客户端通过 capability/platform/version/build Header 获取模型级 `catalogVersion` 与 `sizeModes`；v2 pricing、resolve、create 和 generate 使用同一不可变 catalog
 - 新协议支持 `sizeMode=explicit|auto`、durable 幂等批次、逐图结果、请求/输出尺寸分离和稳定失败字段；auto 只有在路由验证、独立价格、服务端 cohort 与配置全部就绪时才开放
-- schema 迁移不会发布模型目录；审批完成后由 `dotnet run --project .\jokester.admin -- --configure-ai-image-catalog` 在单事务中补齐受控参数/路由/价格、发布 immutable release 并切换 current pointer，完整配置和回滚顺序见 [runbook](./docs/runbook.md#ai-尺寸模式升级与回滚)
+- schema 迁移不会发布模型目录；审批完成后由 `dotnet run --project .\jokester.admin -- --configure-ai-image-catalog` 在单事务中补齐受控参数、路由与缺失的 2K 价格档（保留已有运营定价和启停状态）、发布 immutable release 并切换 current pointer，完整配置和回滚顺序见 [runbook](./docs/runbook.md#ai-尺寸模式升级与回滚)
+
+超管在 Web `/admin/pricing` 管理标准价、VIP 折扣、专属模型和审计。部署顺序、计费指标与月卡转化统计见 [生图定价运维](docs/runbook.md#生图定价发布与运营)。
 
 ## 提示词库接口约定
 
@@ -372,9 +372,9 @@ Refresh Token 单次轮换并只按 SHA-256 哈希定位。旧 Token 在 10 秒�
 - 注册成功自动赠送 50 积分。
 - Web/Android 充值套餐固定为 `monthly`、`trial`、`basic`、`value`；`monthly` 到账 5000 积分并在 30 天后到期，其余三档积分永久有效。
 - 到期批次会在积分查询、登录/刷新/资料、签到或生图扣分事务内先结算；生图依次消费限时套餐积分、签到积分和永久积分。
-- legacy 生图按 `ai_image_point_price` 扣分：GPT Image2 使用 `modelCode + resolutionCode + qualityCode`，Nano Banana2 只使用 `modelCode + resolutionCode`；总额为 `points * imageCount`。
+- legacy 生图按 `ai_image_point_price` 扣分：GPT Image2 使用 `modelCode + resolutionCode + qualityCode`，Nano Banana2 只使用 `modelCode + resolutionCode`；有效月卡按已配置 VIP 单价扣费，总额为 `effectivePoints × imageCount`。历史任务与退款读取预留快照。
 - `size-mode-v1` 在创建事务内锁定 `modelCode + catalogVersion` 的不可变 release 价格：explicit 包含分辨率，auto 的 `resolutionCode` 为 `null`，两者都不会按最终输出尺寸补扣或退款。
-- `GET /api/ai/images/pricing-options` 对 legacy 返回扁平列表；声明新能力的客户端必须带 `modelCode + catalogVersion`，返回 `{ modelCode, catalogVersion, items }`。
+- `GET /api/ai/images/pricing-options` 对 legacy 返回扁平列表；声明新能力的客户端必须带 `modelCode + catalogVersion`，返回 `{ modelCode, catalogVersion, pricingRevision, items }`。
 - 生图任务失败或超时时，会写入 `source=image_refund` 流水并按原扣款批次、原到期时间返还积分。
 
 ## 当前完成范围

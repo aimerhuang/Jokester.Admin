@@ -1,4 +1,5 @@
 using jokester.admin.Application.Services;
+using jokester.admin.Common.Exceptions;
 using jokester.admin.Domain.Entities;
 using SqlSugar;
 
@@ -227,6 +228,45 @@ public sealed class AiImageModelConfigServiceTests
         }
     }
 
+    [Fact]
+    public async Task GifCapabilitiesAndWorkerRoutesFollowConfiguredNativeRoutes()
+    {
+        using var context = new TestContext();
+        const string flare = "gpt-image-2.6-flare";
+        const string sunburst = "gpt-image-2.6-sunburst";
+        var primary = CreateConfig(1, "primary", "regular-primary", "https://primary.example", resolutionCode: "4k", modelCode: flare);
+        var fallback = CreateConfig(2, "fallback", "regular-fallback", "https://fallback.example", modelCode: flare);
+        var unconfigured = CreateConfig(3, "primary", "regular", "https://primary.example", modelCode: sunburst);
+        var configuredOther = CreateConfig(4, "primary", "regular", "https://primary.example", modelCode: "gpt-image-2");
+        var disabled = CreateConfig(5, "primary", "regular", "https://primary.example", status: 0, modelCode: "gpt-image-2.5-flare");
+        var gemini = CreateConfig(6, "primary", "nano", "https://primary.example", modelCode: "nano-banana-2",
+            provider: AiImageModelConfigService.GeminiImageProtocol);
+        primary.GifProviderModel = "native-primary";
+        fallback.GifProviderModel = "native-backup";
+        configuredOther.GifProviderModel = "native-other";
+        disabled.GifProviderModel = "native-disabled";
+        gemini.GifProviderModel = "native-gemini";
+        context.Seed(primary, fallback, unconfigured, configuredOther, disabled, gemini);
+
+        // Any OpenAI Images model is GIF-capable once a super admin gives an enabled route a native GIF model.
+        var models = await context.Service.GetEnabledModelsAsync(default);
+        Assert.Equal(9, models.Single(m => m.Code == flare).Capabilities.Gif!.DefaultFrameCount);
+        Assert.NotNull(models.Single(m => m.Code == "gpt-image-2").Capabilities.Gif);
+        Assert.All(models.Where(m => m.Code is not (flare or "gpt-image-2")), m => Assert.Null(m.Capabilities.Gif));
+        var routes = await context.Service.ResolveGifRoutesAsync(flare, default);
+        Assert.Equal(["native-primary", "native-backup"], routes.Select(r => r.ProviderModel));
+        Assert.Equal("regular-primary", (await context.Service.ResolveAsync(flare, "4k", default)).ProviderModel);
+        Assert.Equal(["native-other"], (await context.Service.ResolveGifRoutesAsync("gpt-image-2", default)).Select(r => r.ProviderModel));
+        await Assert.ThrowsAsync<AppException>(() => context.Service.ResolveGifRoutesAsync(sunburst, default));
+        await Assert.ThrowsAsync<AppException>(() => context.Service.ResolveGifRoutesAsync("gpt-image-2.5-flare", default));
+        await Assert.ThrowsAsync<AppException>(() => context.Service.ResolveGifRoutesAsync("nano-banana-2", default));
+
+        var draining = new AiImageModelConfigService(context.Db, Microsoft.Extensions.Options.Options.Create(
+            new jokester.admin.Infrastructure.AiImageGifOptions { AcceptNewTasks = false }));
+        Assert.All(await draining.GetEnabledModelsAsync(default), m => Assert.Null(m.Capabilities.Gif));
+        Assert.Equal(2, (await draining.ResolveGifRoutesAsync(flare, default)).Count);
+    }
+
     private static AiImageModelConfigEntity CreateConfig(
         long id,
         string routeRole,
@@ -298,6 +338,7 @@ public sealed class AiImageModelConfigServiceTests
             });
             Db.Ado.ExecuteCommand("""
                 CREATE TABLE ai_image_model_config (
+                    gif_provider_model TEXT NULL,
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     model_code TEXT NOT NULL,
                     model_name TEXT NOT NULL,
@@ -334,6 +375,7 @@ public sealed class AiImageModelConfigServiceTests
                     is_deleted INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE ai_image_point_price (
+                    vip_points INTEGER NULL, vip_price_mode TEXT DEFAULT 'follow', revision INTEGER DEFAULT 0, updated_by INTEGER NULL,
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     model_code TEXT NOT NULL,
                     resolution_code TEXT NOT NULL,

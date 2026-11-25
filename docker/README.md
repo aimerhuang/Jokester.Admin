@@ -58,7 +58,6 @@ MySQL / Redis / Node / .NET：
 | `.env.example` → `.env` | 编排变量：域名、端口、子网、镜像、MySQL/Redis 密码 | 否 |
 | `api.env.example` → `api.env` | API 业务配置：JWT、SMTP、AI、积分、提示词库等 | 否 |
 | `.env.production.example` / `api.env.production.example` | 生产模板（`./jokester.sh init production`） | 否（生成的文件） |
-| `legal.env.example` → `legal.env` | 法律文档版本与 URL，仅 `legal` 命令使用 | 否 |
 
 连接串、`AllowedHosts`、CORS 主来源、可信代理 IP、媒体目录由 `compose.yaml` 根据 `.env` 生成，
 不要在 `api.env` 中重复配置。修改 `api.env` 后执行 `.\jokester.ps1 up` 即可重建 API 容器。
@@ -93,10 +92,7 @@ MySQL / Redis / Node / .NET：
 
 ## AI 生图前置条件
 
-空库中 Provider 密钥为空，并且法律文档/AI 告知未配置时，生图接口会按设计 fail-closed（503）：
-
-1. 在 `ai_image_model_config` 中填入测试用的 Provider URL 与 Key（`.\jokester.ps1 mysql`）。
-2. 复制 `legal.env.example` 为 `legal.env`，填入已审批的 HTTPS 版本与 URL，执行 `.\jokester.ps1 legal`。
+空库中 Provider 密钥为空，生图接口无法调用：在 `ai_image_model_config` 中填入测试用的 Provider URL 与 Key（后台“模型配置”页或 `.\jokester.ps1 mysql`）。生图不再依赖法律文档或 AI 授权同意。
 
 ## 网络受限时
 

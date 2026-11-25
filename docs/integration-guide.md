@@ -87,19 +87,17 @@ Content-Type: application/json
 
 仅当月卡权益已开始、未撤销且尚未到期时返回该对象，否则 `membership=null`。客户端不得从积分余额或签到/积分批次推断 VIP；月卡积分耗尽不影响权益在到期前继续显示。多笔有效月卡同时存在时，`expiresAt` 返回其中最晚的到期时间。
 
-### 法律文档、AI 授权和账户删除
+### 账户删除
+
+法律文档接口和第三方 AI 数据处理授权已移除，生图前不需要用户同意，也不会返回 `412 AI_CONSENT_REQUIRED`。
 
 ```http
-GET /api/legal/documents/current?platform=ios&locale=zh-CN
-GET /api/users/me/consents
-PUT /api/users/me/consents/ai-processing
 POST /api/auth/account-deletion/requests
 GET /api/auth/account-deletion/requests/current
 DELETE /api/auth/account-deletion/requests/{requestId}
 ```
 
-- 法律文档与移动端配置接口公开，其余接口需要 Bearer Token。Web 使用同一路由并传 `platform=web`。
-- AI 授权请求传 `accepted`、当前 `documentVersion`、所选模型实际使用的 `providerCodes` 和真实 `clientPlatform`，不能固定传 `ios`。授权写入后，后续生图按该用户最新 AI 授权记录的平台解析对应平台或 `all` 告知。AI 处理告知未启用时，客户端不显示对应授权提示，所有第三方 AI 生图在 Provider 调用、Redis 准入和积分预留前返回 HTTP 503、`SERVICE_UNAVAILABLE`；告知已启用但缺少当前 Provider 授权时返回 HTTP 412、`AI_CONSENT_REQUIRED`，并在 `details` 返回文档版本和 URL。
+- 以上接口需要 Bearer Token。
 - 删除申请传 `currentPassword`、`confirmation="DELETE"`、UUID `clientRequestId` 和可选 `reason`。创建后立即撤销 Refresh Token 会话；重复同 key/同 payload 返回原申请，同 key/不同 payload 返回 409。
 - 删除任务按计划在后台执行并可重试；私有 AI 文件和用户数据删除，必须保留的 Apple/积分财务记录匿名化，完成邮件发送失败也进入重试。
 
@@ -336,7 +334,7 @@ legacy 请求从 `ai_image_point_price` 查询积分价格；`size-mode-v1` 请�
 - legacy GPT Image2 使用 `modelCode + resolutionCode + qualityCode`。
 - legacy Nano Banana2 官方无 `quality` 参数，只按 `modelCode + resolutionCode` 匹配，`quality` 与画幅比例都不参与积分价格匹配。
 - `size-mode-v1` 在任务创建事务内锁定 current `modelCode + catalogVersion`：explicit 价格包含 `resolutionCode + qualityCode`，auto 价格只包含 `sizeMode=auto + qualityCode`，API 中 `resolutionCode=null`，不得回退 legacy 价格。
-- 扣分数量为价格表 `points * imageCount`。
+- 扣分数量为预留事务确认的实付单价 `effectivePoints × imageCount`。
 - `imageCount` 为单次生成的图片数量，按各供应商官方限制校验：GPT Image2 支持 `1-10`，Nano Banana2 支持 `1-4`；超出范围后端拒绝请求。
 - 积分不足或价格组合未配置时，后端拒绝创建任务，不调用上游生图服务。
 - 四个生成/创建接口都必须传 `idempotencyKey`（8-128 个非控制字符）。同一用户使用相同 key 和相同请求时返回原任务（多图 GPT 请求返回原任务集合）且不重复扣分；同 key 不同请求返回 HTTP 409。
@@ -352,7 +350,40 @@ POST /api/ai/images/parameters/resolve
 Authorization: Bearer <accessToken>
 ```
 
-`GET /api/ai/images/parameters` 会同时返回启用的分辨率、画质、画幅比例选项和 legacy `pointPrices`。未声明新能力时，`GET /api/ai/images/pricing-options` 返回扁平定价列表，每项包含 `modelCode`、`resolutionCode`、`qualityCode`、`points`、`priceAmount`、`priceMinorUnits`、`currency` 和 `sort`；`points` 表示该选项单张图片消耗的积分。`resolutionCode` 支持 `1k`、`2k`、`4k`，按长边 `1024`、`2048`、`3840` 计算；`qualityCode` 支持 `low`、`med`、`high`。新协议的 envelope 见下节。
+`GET /api/ai/images/parameters` 会同时返回启用的分辨率、画质、画幅比例选项和 legacy `pointPrices`。未声明新能力时，`GET /api/ai/images/pricing-options` 返回扁平定价列表，每项包含 `modelCode`、`resolutionCode`、`qualityCode`、`points`、`priceAmount`、`priceMinorUnits`、`currency` 和 `sort`；`points` 表示单图标准积分。`resolutionCode` 支持 `1k`、`2k`、`4k`，按长边 `1024`、`2048`、`3840` 计算；`qualityCode` 支持 `low`、`med`、`high`。新协议的 envelope 见下节。
+
+### 首页 GIF 动图
+
+首页读取模型的 `capabilities.gif`。任一 OpenAI Images 模型只要有一条启用、已配置 Key 且 `gifProviderModel` 非空的路由就会下发该能力；超管在模型配置页维护（当前用于 GPT Image 2.6 Flare / Sunburst 的中转站 `-native` 型号）。`GET /api/ai/images/models` 针对当前用户发布 `size-mode-v1` 的模型会隐藏 GIF。VIP 专属模型仍要求有效权益或超管身份。
+
+通过 `POST /api/ai/images` 排队。参考图复用 `referenceAssetIds`，最多六张。每份结果独立建任务；`expectedUnitPoints` 为每份结果的固定价。以下请求默认配置下扣 38 分。
+
+```json
+{
+  "modelCode": "gpt-image-2.6-flare", "idempotencyKey": "example-gif-001",
+  "prompt": "蓝色小球沿地平线缓缓滚动", "outputFormat": "gif", "qualityCode": "low",
+  "aspectRatioCode": "16:9", "frameCount": 9, "frameDurationMs": 200,
+  "imageCount": 1, "expectedUnitPoints": 38
+}
+```
+
+帧数、时长、默认值和价格规则（`capabilities.gif.reserve`）取自模型能力。画幅需显式指定，分辨率由服务端按画幅换算。同步生成、Nano 专用接口和带 `sizeMode` 或 `catalogVersion` 的请求提交 GIF 会收到 HTTP 400 `GIF_NOT_SUPPORTED`。原请求重放使用原 key，同 key 更改帧数或时长会返回 409。
+
+GIF 按固定价收费：每份 = `basePoints + perFramePoints[qualityCode] × frameCount + perReferencePoints × referenceCount`，默认基础 2 分、每帧 low 4 / med 9 / high 12 分、每张参考图 6 分。创建时扣除，成功后不按用量退差（2026-11-25 起；原因是中转站对 native GIF 的实收与其返回的 `usage` 不成比例），失败或超时全额退回原批次。`pricingTier=gif_fixed`，成功任务 `chargedPoints = pointCost`、`billingStatus=1`。`platformCostCny` 只是按上游 `usage` 与 `capabilities.gif.tokenPricing` 估算的参考成本，供对账，不影响扣分。
+
+详情的 `usage` 仅用于对账：`inputBreakdown` 为 `split` 时返回文本和参考图明细；为 `unsplit` 时只有 `inputTokens` 总数，参考成本把全部输入按文本价估算。上游无用量时没有相应用量或参考成本。Web 不向用户展示用量。结果按原始 `.gif` 保存，通过原有鉴权媒体接口预览及下载。GIF 作品不支持登记为画布素材。
+
+### VIP 报价与提交
+
+`models` 中每个模型都有 `access`。`level=vip_only` 时仍展示；`available=false` 时显示月卡引导。有效月卡和超管的 `basis` 分别为 `vip`、`super_admin`，全员模型为 `null`。模型状态接口的 `vipOnly` 表示模型策略。
+
+`models`、`parameters`、`pricing-options` 响应使用 `Cache-Control: private, no-store`。价格保留标准 `points`，同时返回 `vipPoints`（无折扣为 `null`）、`effectivePoints` 和 `pricingTier`。legacy 的 `pricing-options` 保留 `data` 数组，`pricingRevision` 与 `data` 同级；`parameters` 和版本化报价将 `pricingRevision` 放在 `data` 内。版本化价格一期始终为 release 标准价，专属模型准入同时生效。
+
+进入页面、回到窗口、切换模型、权益到账及提交前刷新。提交时用用户看见的单图积分传 `expectedUnitPoints`。下降按较低价创建；上涨返回 HTTP 409 `PRICE_CHANGED`，`details` 提供 `effectivePoints`、`pricingTier`，刷新报价并等待用户再次确认。HTTP 403 `VIP_REQUIRED` 时更新模型并显示开通引导。点击购买可发送认证 `POST /api/ai/model-pricing-events/vip-guide/{modelCode}`，接受的点击返回 204。
+
+四个创建或直接生成入口均接受可选上限。旧客户端可省略。同 key 的成功任务按原价重放，拒绝后的 key 可重试。创建、列表和详情中的 `pricingTier`、`unitPointCost`、`listUnitPointCost` 来自原任务快照；旧任务可能没有这些值。
+
+后台路径前缀 `/api/ai/model-pricing` 仅供有效超管。`GET` 读取矩阵；`POST prices` 新增价格；`PUT prices/batch` 带各行 `revision` 和 `reason` 整批保存。`POST discount/preview` 获取 `previewToken` 后，通过 `PUT discount` 或 `PUT models/{modelCode}/discount` 确认。`PUT models/{modelCode}/access` 修改策略，`GET audits` 按模型、操作者、时间或变更类型分页查询。`PRICE_REVISION_CONFLICT` 需刷新或重新预览；`PRICE_CHANGE_TOO_LARGE`、`PRICE_LAST_ENABLED` 分别对应显式确认大幅变化和禁用最后可用档。后台可在 Swagger 中查看每个请求体。
 
 GPT Image2 的上游 `size` 必须同时满足：宽高均为 `16px` 倍数且单边不超过 `3840`，长短边比例不超过 `3:1`，总像素在 `655,360` 到 `8,294,400` 之间。服务端会在保持所选画幅比例的前提下调整到合法尺寸，常用结果如下：
 
@@ -547,7 +578,7 @@ Authorization: Bearer <accessToken>
 - 文档按字段白名单校验，出现未知字段、未知节点类型、重复 ID、悬空/成环/类型不允许的连线时返回 HTTP 400、`VALIDATION_ERROR`，`message` 指出字段路径。节点类型只有 `image`、`text`、`generate`，节点可带可选 `groupId`（标识符，相同值的节点属于同一组）；连线只允许 `image → generate`、`generate → generate`，以及表示派生来源的 `image → image`、`generate → image`；每个生图节点最多 6 条输入，每个图片节点最多 1 条输入。
 - 图片节点只能用 `assetId` 引用图片，文档中没有任何图片 URL 字段。所有 `assetId` 和 `sourceTaskId` / `primaryResult.taskId` 必须属于当前用户，否则返回 404；已删除的自有 Asset 允许保留在文档中，但不计入体积、不作为封面。
 - 默认上限：300 个节点、600 条连线、文档 1 MB（`AiCanvas` 配置节），超限返回 HTTP 422、`CANVAS_LIMIT_EXCEEDED` 或 `CANVAS_DOCUMENT_TOO_LARGE`。
-- 文档里的提示词和文本保存时不做敏感词过滤；真正生成仍走 `POST /api/ai/images`，由现有提示词过滤、AI consent、幂等和积分链路处理。生成前应把新 `idempotencyKey` 写入节点 `pendingIdempotencyKey` 并保存，刷新后重试复用同一 key。
+- 文档里的提示词和文本保存时不做敏感词过滤；真正生成仍走 `POST /api/ai/images`，由现有提示词过滤、幂等和积分链路处理。生成前应把新 `idempotencyKey` 写入节点 `pendingIdempotencyKey` 并保存，刷新后重试复用同一 key。
 - `storageBytes` = 文档字节数 + 引用的未删除上传素材（`asset_type=reference`）字节数；生成结果不计入画布体积。`totalStorageBytes` 对用户全部未删除画布引用的上传素材去重求和。
 - 画布写接口按用户限流 120 次/分钟，Redis 不可用时与其它限流接口一样返回 503。
 
@@ -623,10 +654,10 @@ Authorization: Bearer <accessToken>
 - 全部要求超级管理员；写操作在事务内复核当前用户仍为启用、未删除的超级管理员，否则 403。前端用登录资料的 `isSuperAdmin` 控制入口显示。
 - **API Key 只写不读**：响应只有 `apiKeySet`、`apiKeyMask`（如 `••••a1B2`）和 `apiKeyUpdatedAt`。新增时 `apiKey` 必填；编辑时留空表示不修改。提交后应清空输入框。
 - 列表返回按模型分组的 `[{ modelCode, modelName, state, missingPrimaryRoute, routes[] }]`；每条路由带 `revision`、`publishedCatalogVersions` 等字段。
-- 新增请求：`modelCode`（必须是已有模型）、`modelName`（可选，修改会同步到该模型所有路由）、`resolutionCode`（空为通用或已启用分辨率）、`routeRole`（`primary`/`fallback`）、`provider`（协议须与该模型已有路由一致）、`providerModel`、`baseUrl`、`apiKey`、`textToImagePath`、`imageToImagePath`、`requestFormat`、`sort`、`status`。`modelCode + resolutionCode + routeRole` 已存在（含已删除行）返回 409 `CONFLICT`。
-- 编辑请求：`revision`、`modelName`、`providerModel`、`baseUrl`、`apiKey`、两个路径、`requestFormat`、`sort`。`revision` 过期返回 409 `MODEL_ROUTE_REVISION_CONFLICT`。保存后对新的 Provider 调用（含已排队任务）立即生效。
+- 新增请求：`modelCode`（必须是已有模型）、`modelName`（可选，修改会同步到该模型所有路由）、`resolutionCode`（空为通用或已启用分辨率）、`routeRole`（`primary`/`fallback`）、`provider`（协议须与该模型已有路由一致）、`providerModel`、`gifProviderModel`（可选，原生 GIF 用的供应商模型，仅 OpenAI Images 协议）、`baseUrl`、`apiKey`、`textToImagePath`、`imageToImagePath`、`requestFormat`、`sort`、`status`。`modelCode + resolutionCode + routeRole` 已存在（含已删除行）返回 409 `CONFLICT`。
+- 编辑请求：`revision`、`modelName`、`providerModel`、`gifProviderModel`（省略=保持，空字符串=关闭 GIF）、`baseUrl`、`apiKey`、两个路径、`requestFormat`、`sort`。`revision` 过期返回 409 `MODEL_ROUTE_REVISION_CONFLICT`。保存后对新的 Provider 调用（含已排队任务）立即生效。
 - 启停请求：`{ "revision": 3, "status": 0, "confirmOffline": false }`。禁用会让某个有价格的分辨率失去所有启用路由时返回 409 `MODEL_ROUTE_OFFLINE_CONFIRM_REQUIRED`（`details.resolutionCodes`），带 `confirmOffline=true` 重试即可。
-- 被已发布 `size-mode-v1` 发布引用的路由（`publishedCatalogVersions` 非空）：允许更换 Key（后端同事务同步发布快照的密钥哈希）、修改请求格式/排序/展示名；修改地址、路径、供应商模型或禁用返回 409 `MODEL_ROUTE_LOCKED_BY_RELEASE`。
+- 被已发布 `size-mode-v1` 发布引用的路由（`publishedCatalogVersions` 非空）：允许更换 Key（后端同事务同步发布快照的密钥哈希）、修改请求格式/排序/展示名/GIF 供应商模型；修改地址、路径、供应商模型或禁用返回 409 `MODEL_ROUTE_LOCKED_BY_RELEASE`。
 - `baseUrl` 必须是不带凭据、查询串和片段的 https 绝对地址，且解析结果不能是回环、私网、链路本地等地址；违反返回 400 `VALIDATION_ERROR`。部署可配置 `AiImageModelAdmin.AllowedHosts`（白名单）和 `AllowPrivateNetworkHosts`（允许 http 与内网的主机）。路径必须以 `/` 开头，不得含 `..`、`//`、`?`、`#`。
 - 测试连接 `POST /{id}/test` 请求 `GET {baseUrl}/models`（Bearer Key，10 秒超时，不跟随重定向），返回 `{ result, httpStatus, elapsedMilliseconds }`，`result` 为 `passed` / `auth_failed` / `unreachable`。不出图、不扣积分、不计入模型状态；部分中转站不实现该端点，`unreachable` 不等于不可用。
 - 限流：写接口每用户、每 IP 各 20 次/分钟；测试连接各 10 次/分钟。

@@ -17,6 +17,9 @@ public sealed class AiImageModelStatusResponse
 
 public sealed class AiImageModelStatusItemDto
 {
+    /// <summary>模型是否仅供会员使用。</summary>
+    public bool VipOnly { get; init; }
+
     public string ModelCode { get; init; } = string.Empty;
 
     public string ModelName { get; init; } = string.Empty;
@@ -87,6 +90,9 @@ public sealed class AiImageModelRouteDto
 
     public string ProviderModel { get; init; } = string.Empty;
 
+    /// <summary>Provider model used for native GIF output; null means this route cannot produce GIFs.</summary>
+    public string? GifProviderModel { get; init; }
+
     public string BaseUrl { get; init; } = string.Empty;
 
     public bool ApiKeySet { get; init; }
@@ -134,6 +140,9 @@ public sealed class CreateAiImageModelRouteRequest
 
     public string ProviderModel { get; init; } = string.Empty;
 
+    /// <summary>Optional native GIF provider model. Empty means the route does not offer GIF output.</summary>
+    public string? GifProviderModel { get; init; }
+
     public string BaseUrl { get; init; } = string.Empty;
 
     public string ApiKey { get; init; } = string.Empty;
@@ -158,6 +167,9 @@ public sealed class UpdateAiImageModelRouteRequest
     public string ModelName { get; init; } = string.Empty;
 
     public string ProviderModel { get; init; } = string.Empty;
+
+    /// <summary>Native GIF provider model. Null keeps the current value; an empty string turns GIF output off.</summary>
+    public string? GifProviderModel { get; init; }
 
     public string BaseUrl { get; init; } = string.Empty;
 

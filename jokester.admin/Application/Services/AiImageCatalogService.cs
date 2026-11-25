@@ -32,6 +32,23 @@ public sealed class AiImageCatalogService(
         CancellationToken cancellationToken)
     {
         var legacyModels = await legacyModelConfigService.GetEnabledModelsAsync(cancellationToken);
+        if (legacyModels.Count > 0)
+        {
+            var restricted = await db.Queryable<AiImageModelPolicyEntity>()
+                .Where(x => x.AccessLevel == "vip_only").Select(x => x.ModelCode).ToListAsync(cancellationToken);
+            if (restricted.Count > 0)
+            {
+                var vip = client.UserId is long id && await new MembershipEntitlementLedger(db).GetActiveAsync(id, DateTime.Now, cancellationToken) is not null;
+                var admin = client.UserId.HasValue && await db.Queryable<SysUserEntity>().AnyAsync(
+                    x => x.Id == client.UserId && x.IsSuperAdmin && !x.IsDeleted && x.Status == 1, cancellationToken);
+                var codes = restricted.ToHashSet(StringComparer.OrdinalIgnoreCase);
+                foreach (var model in legacyModels.Where(model => codes.Contains(model.Code)))
+                {
+                    var basis = AiImagePriceResolver.GetAccessBasis("vip_only", vip, admin);
+                    model.Access = new("vip_only", basis is not null, basis is null ? "VIP_REQUIRED" : null, basis);
+                }
+            }
+        }
         if (!rolloutPolicy.CanUseVersionedContract(client))
         {
             return legacyModels;
@@ -94,6 +111,7 @@ public sealed class AiImageCatalogService(
             return new AiImageModelOptionDto
             {
                 Code = model.Code,
+                Access = model.Access,
                 Name = release.ModelName,
                 Provider = model.Provider,
                 ProviderCode = model.ProviderCode,
@@ -127,6 +145,7 @@ public sealed class AiImageCatalogService(
     {
         EnsureVersionedClient(client);
         var release = await RequireCurrentReleaseAsync(modelCode, catalogVersion, cancellationToken);
+        var revision = (await db.Queryable<AiImagePricingSettingEntity>().FirstAsync(x => x.Id == 1, cancellationToken)).PricingRevision;
         var releaseRoutes = await GetReleaseRoutesAsync(release.Id, cancellationToken);
         var allowAuto = rolloutPolicy.CanUseAuto(client, release.ModelCode, release.CatalogVersion)
             && HasVerifiedAutoRoute(releaseRoutes);
@@ -146,6 +165,7 @@ public sealed class AiImageCatalogService(
                 ResolutionCode = x.PricingMode == AutoPricingMode ? null : x.ResolutionCode,
                 QualityCode = x.QualityCode,
                 Points = x.Points,
+                EffectivePoints = x.Points,
                 PriceAmount = x.PriceAmount,
                 PriceMinorUnits = Money.ToMinorUnits(x.PriceAmount),
                 Currency = x.Currency,
@@ -156,6 +176,7 @@ public sealed class AiImageCatalogService(
         {
             ModelCode = release.ModelCode,
             CatalogVersion = release.CatalogVersion,
+            PricingRevision = revision,
             Items = items
         };
     }
@@ -232,6 +253,7 @@ public sealed class AiImageCatalogService(
                 cancellationToken);
         if (price is null || price.Points <= 0)
         {
+            AiImagePriceResolver.CountMissingPrice(release.ModelCode);
             throw new AppException(
                 ErrorCodes.BadRequest,
                 MachineErrorCodes.ImagePriceNotConfigured,
@@ -512,6 +534,7 @@ file static class AiImageModelOptionExtensions
     {
         Code = model.Code,
         Name = model.Name,
+        Access = model.Access,
         Provider = model.Provider,
         ProviderCode = model.ProviderCode,
         SizeContractVersion = contract,

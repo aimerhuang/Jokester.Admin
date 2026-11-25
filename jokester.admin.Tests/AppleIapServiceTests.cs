@@ -800,6 +800,17 @@ public sealed class AppleIapServiceTests
                     updated_at TEXT NULL
                 );
                 CREATE TABLE ai_image_task (
+                    output_format TEXT NOT NULL DEFAULT 'png',
+                    frame_count INTEGER NULL,
+                    frame_duration_ms INTEGER NULL,
+                    gif_rate_snapshot TEXT NULL,
+                    usage_input_tokens INTEGER NULL,
+                    usage_text_input_tokens INTEGER NULL,
+                    usage_image_input_tokens INTEGER NULL,
+                    usage_output_tokens INTEGER NULL,
+                    usage_input_breakdown TEXT NULL,
+                    charged_points INTEGER NULL,
+                    platform_cost_cny NUMERIC NULL,
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     site_id INTEGER NOT NULL,
                     user_id INTEGER NOT NULL,
@@ -823,6 +834,9 @@ public sealed class AppleIapServiceTests
                     price_id INTEGER NULL,
                     price_release_id INTEGER NULL,
                     unit_point_cost INTEGER NULL,
+                    list_unit_point_cost INTEGER NULL,
+                    pricing_tier TEXT NULL,
+                    access_basis TEXT NULL,
                     image_count INTEGER NOT NULL,
                     completed_image_count INTEGER NOT NULL DEFAULT 0,
                     idempotency_key TEXT NOT NULL,

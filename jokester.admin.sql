@@ -49,6 +49,9 @@ DROP TABLE IF EXISTS `ai_image_model_release_route`;
 DROP TABLE IF EXISTS `ai_image_model_current_release`;
 DROP TABLE IF EXISTS `ai_image_model_release`;
 DROP TABLE IF EXISTS `ai_image_model_config`;
+DROP TABLE IF EXISTS `ai_image_pricing_audit`;
+DROP TABLE IF EXISTS `ai_image_model_policy`;
+DROP TABLE IF EXISTS `ai_image_pricing_setting`;
 DROP TABLE IF EXISTS `ai_image_point_price`;
 DROP TABLE IF EXISTS `ai_image_parameter`;
 DROP TABLE IF EXISTS `blog_comment`;
@@ -489,10 +492,63 @@ CREATE TABLE `ai_image_point_price` (
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   `updated_at` DATETIME DEFAULT NULL COMMENT '更新时间',
   `is_deleted` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '逻辑删除：1已删除 0未删除',
+  `vip_points` INT DEFAULT NULL COMMENT 'VIP单图积分；无优惠时为空',
+  `vip_price_mode` VARCHAR(16) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL DEFAULT 'follow' COMMENT 'VIP价模式：follow或manual',
+  `revision` INT NOT NULL DEFAULT 0 COMMENT '价格档乐观并发版本',
+  `updated_by` BIGINT DEFAULT NULL COMMENT '最近修改人；0为系统迁移',
+  CONSTRAINT `chk_ai_image_point_price_vip_points` CHECK (`vip_points` IS NULL OR (`vip_points` > 0 AND `vip_points` < `points`)),
+  CONSTRAINT `chk_ai_image_point_price_vip_mode` CHECK (`vip_price_mode` IN ('follow', 'manual')),
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_ai_image_point_price_model_resolution_quality` (`model_code`, `resolution_code`, `quality_code`),
   KEY `idx_ai_image_point_price_model_status_sort` (`model_code`, `status`, `sort`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI生图积分价格表';
+
+CREATE TABLE `ai_image_pricing_setting` (
+  `id` TINYINT NOT NULL,
+  `default_vip_discount_percent` TINYINT NOT NULL DEFAULT 80,
+  `revision` INT NOT NULL DEFAULT 0 COMMENT '默认折扣乐观并发版本',
+  `pricing_revision` BIGINT NOT NULL DEFAULT 1 COMMENT '全局定价配置版本',
+  `updated_by` BIGINT DEFAULT NULL,
+  `updated_at` DATETIME DEFAULT NULL COMMENT 'UTC',
+  PRIMARY KEY (`id`),
+  CONSTRAINT `chk_ai_image_pricing_setting_id` CHECK (`id` = 1),
+  CONSTRAINT `chk_ai_image_pricing_setting_discount` CHECK (`default_vip_discount_percent` BETWEEN 1 AND 100)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI生图默认VIP折扣与全局版本';
+
+CREATE TABLE `ai_image_model_policy` (
+  `model_code` VARCHAR(100) NOT NULL,
+  `access_level` VARCHAR(16) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL DEFAULT 'all',
+  `required_tier_code` VARCHAR(32) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL DEFAULT 'monthly_vip',
+  `vip_discount_percent` TINYINT DEFAULT NULL,
+  `revision` INT NOT NULL DEFAULT 0,
+  `updated_by` BIGINT DEFAULT NULL,
+  `updated_at` DATETIME DEFAULT NULL COMMENT 'UTC',
+  PRIMARY KEY (`model_code`),
+  CONSTRAINT `chk_ai_image_model_policy_access` CHECK (`access_level` IN ('all', 'vip_only')),
+  CONSTRAINT `chk_ai_image_model_policy_discount` CHECK (`vip_discount_percent` IS NULL OR `vip_discount_percent` BETWEEN 1 AND 100)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI生图模型访问策略与VIP折扣';
+
+CREATE TABLE `ai_image_pricing_audit` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `batch_id` CHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `target_type` VARCHAR(16) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `target_id` VARCHAR(100) NOT NULL,
+  `model_code` VARCHAR(100) DEFAULT NULL,
+  `resolution_code` VARCHAR(50) DEFAULT NULL,
+  `quality_code` VARCHAR(50) DEFAULT NULL,
+  `action` VARCHAR(24) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL,
+  `before_json` TEXT DEFAULT NULL,
+  `after_json` TEXT DEFAULT NULL,
+  `reason` VARCHAR(200) NOT NULL,
+  `operator_user_id` BIGINT NOT NULL,
+  `operator_ip` VARCHAR(50) DEFAULT NULL,
+  `created_at` DATETIME NOT NULL COMMENT 'UTC',
+  PRIMARY KEY (`id`),
+  KEY `idx_ai_image_pricing_audit_model` (`model_code`, `id`),
+  KEY `idx_ai_image_pricing_audit_operator` (`operator_user_id`, `id`),
+  KEY `idx_ai_image_pricing_audit_created` (`created_at`, `id`),
+  KEY `idx_ai_image_pricing_audit_batch` (`batch_id`, `id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI生图定价与访问策略审计';
 
 -- =====================================================
 -- 11. AI生图模型配置表
@@ -502,6 +558,7 @@ CREATE TABLE `ai_image_model_config` (
   `model_code` VARCHAR(100) NOT NULL COMMENT '前端/业务模型编码',
   `model_name` VARCHAR(100) NOT NULL COMMENT '模型展示名',
   `provider` VARCHAR(50) NOT NULL COMMENT '供应商/调用协议',
+  `gif_provider_model` VARCHAR(100) DEFAULT NULL COMMENT '原生GIF供应商模型别名',
   `provider_model` VARCHAR(100) NOT NULL COMMENT '供应商真实模型ID',
   `resolution_code` VARCHAR(50) NOT NULL DEFAULT '' COMMENT '分辨率档位编码，空字符串表示不区分分辨率',
   `route_role` VARCHAR(16) CHARACTER SET ascii COLLATE ascii_general_ci NOT NULL DEFAULT 'primary' COMMENT '路由角色：primary主路由 fallback备用路由',
@@ -772,6 +829,17 @@ CREATE TABLE `ai_image_task` (
   `output_width` INT DEFAULT NULL COMMENT '真实输出宽度',
   `output_height` INT DEFAULT NULL COMMENT '真实输出高度',
   `output_size` VARCHAR(50) DEFAULT NULL COMMENT '真实输出尺寸',
+  `output_format` VARCHAR(10) NOT NULL DEFAULT 'png' COMMENT '输出格式 png/gif',
+  `frame_count` SMALLINT DEFAULT NULL COMMENT 'GIF请求帧数',
+  `frame_duration_ms` INT DEFAULT NULL COMMENT 'GIF每帧时长毫秒',
+  `gif_rate_snapshot` TEXT DEFAULT NULL COMMENT '预扣时锁定的GIF单价快照(JSON)',
+  `usage_input_tokens` INT DEFAULT NULL COMMENT '输入Token总数',
+  `usage_text_input_tokens` INT DEFAULT NULL COMMENT '文本输入Token，未拆分时为空',
+  `usage_image_input_tokens` INT DEFAULT NULL COMMENT '参考图输入Token，未拆分时为空',
+  `usage_output_tokens` INT DEFAULT NULL COMMENT '图片输出Token',
+  `usage_input_breakdown` VARCHAR(10) DEFAULT NULL COMMENT '输入明细 split/unsplit，无用量时为空',
+  `charged_points` INT DEFAULT NULL COMMENT '实际扣除积分',
+  `platform_cost_cny` DECIMAL(24,12) DEFAULT NULL COMMENT '按上游用量计算的未封顶平台费用（人民币）',
   `output_mime_type` VARCHAR(100) DEFAULT NULL COMMENT '真实输出MIME',
   `model_release_id` BIGINT DEFAULT NULL COMMENT '不可变模型发布ID',
   `price_id` BIGINT DEFAULT NULL COMMENT '发布价格ID',
@@ -810,6 +878,9 @@ CREATE TABLE `ai_image_task` (
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   `updated_at` DATETIME DEFAULT NULL COMMENT '更新时间',
   `is_deleted` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '逻辑删除：1已删除 0未删除',
+  `pricing_tier` VARCHAR(16) CHARACTER SET ascii COLLATE ascii_general_ci DEFAULT NULL COMMENT '计价档：standard或vip',
+  `list_unit_point_cost` INT DEFAULT NULL COMMENT '标准单图积分快照',
+  `access_basis` VARCHAR(16) CHARACTER SET ascii COLLATE ascii_general_ci DEFAULT NULL COMMENT '专属模型准入依据：vip或super_admin',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_ai_image_task_user_idempotency` (`user_id`, `idempotency_key`),
   KEY `idx_ai_image_task_site_status` (`site_id`, `status`),
@@ -1976,13 +2047,13 @@ INSERT INTO `ai_image_point_price` (`id`, `model_code`, `resolution_code`, `qual
 (12, 'nano-banana-pro', '4k', '', 80, 0.80, 'CNY', 12, 1, '2026-06-11 00:00:00', NULL, 0);
 
 INSERT INTO `ai_image_model_config` (`id`, `model_code`, `model_name`, `provider`, `provider_model`, `resolution_code`, `route_role`, `base_url`, `api_key`, `text_to_image_path`, `image_to_image_path`, `sort`, `status`, `created_at`, `updated_at`, `is_deleted`) VALUES
-(1, 'gpt-image-2', 'GPT Image 2 1K', 'openai-image', 'gpt-image-2-1k', '1k', 'fallback', 'https://api.dawclaudecode.com/v1', '', '/images/generations', '/images/edits', 1, 1, '2026-06-10 00:00:00', NULL, 0),
-(2, 'gpt-image-2', 'GPT Image 2 4K', 'openai-image', 'gpt-image-2-4k', '4k', 'fallback', 'https://api.dawclaudecode.com/v1', '', '/images/generations', '/images/edits', 2, 1, '2026-06-10 00:00:00', NULL, 0),
+(1, 'gpt-image-2', 'GPT Image 2', 'openai-image', 'gpt-image-2-1k', '1k', 'fallback', 'https://api.dawclaudecode.com/v1', '', '/images/generations', '/images/edits', 1, 1, '2026-06-10 00:00:00', NULL, 0),
+(2, 'gpt-image-2', 'GPT Image 2', 'openai-image', 'gpt-image-2-4k', '4k', 'fallback', 'https://api.dawclaudecode.com/v1', '', '/images/generations', '/images/edits', 2, 1, '2026-06-10 00:00:00', NULL, 0),
 (3, 'nano-banana-pro', 'Nano Banana Pro', 'gemini-image', 'gemini-3-pro-image-preview', '', 'primary', 'https://api.dawclaudecode.com', '', '/v1/models/{model}:generateContent', '/v1/models/{model}:generateContent', 3, 1, '2026-06-10 00:00:00', NULL, 0),
 (4, 'nano-banana-2', 'Nano Banana 2', 'gemini-image', 'gemini-3.1-flash-image-preview', '', 'primary', 'https://api.dawclaudecode.com', '', '/v1/models/{model}:generateContent', '/v1/models/{model}:generateContent', 4, 1, '2026-06-10 00:00:00', NULL, 0),
-(5, 'gpt-image-2', 'GPT Image 2 1K', 'openai-image', 'gpt-image-2', '1k', 'primary', '', '', '/images/generations', '/images/edits', 1, 0, '2026-08-11 00:00:00', NULL, 0),
-(7, 'gpt-image-2', 'GPT Image 2 2K', 'openai-image', 'gpt-image-2', '2k', 'primary', '', '', '/images/generations', '/images/edits', 2, 0, '2026-08-21 00:00:00', NULL, 0),
-(6, 'gpt-image-2', 'GPT Image 2 4K', 'openai-image', 'gpt-image-2', '4k', 'primary', '', '', '/images/generations', '/images/edits', 3, 0, '2026-08-11 00:00:00', NULL, 0);
+(5, 'gpt-image-2', 'GPT Image 2', 'openai-image', 'gpt-image-2', '1k', 'primary', '', '', '/images/generations', '/images/edits', 1, 0, '2026-08-11 00:00:00', NULL, 0),
+(7, 'gpt-image-2', 'GPT Image 2', 'openai-image', 'gpt-image-2', '2k', 'primary', '', '', '/images/generations', '/images/edits', 2, 0, '2026-08-21 00:00:00', NULL, 0),
+(6, 'gpt-image-2', 'GPT Image 2', 'openai-image', 'gpt-image-2', '4k', 'primary', '', '', '/images/generations', '/images/edits', 3, 0, '2026-08-11 00:00:00', NULL, 0);
 
 
 
@@ -2101,6 +2172,32 @@ INNER JOIN (
 ) AS target ON target.`source_model_code` = src.`model_code`
 WHERE src.`is_deleted` = 0
 ON DUPLICATE KEY UPDATE `id` = `ai_image_point_price`.`id`;
+
+COMMIT;
+
+-- 设置行与首次回填同事务提交。重跑只检查已有设置行，保留后续运营调价及其审计。
+START TRANSACTION;
+
+INSERT IGNORE INTO `ai_image_pricing_setting`
+  (`id`, `default_vip_discount_percent`, `revision`, `pricing_revision`, `updated_by`, `updated_at`)
+VALUES (1, 80, 0, 1, 0, UTC_TIMESTAMP());
+SET @initialize_vip_prices = ROW_COUNT();
+SET @pricing_init_batch = REPLACE(UUID(), '-', '');
+
+UPDATE `ai_image_point_price`
+SET `vip_points` = NULLIF(CEIL(`points` * 0.80), `points`),
+    `vip_price_mode` = 'follow',
+    `updated_by` = 0
+WHERE @initialize_vip_prices = 1 AND `is_deleted` = 0;
+
+INSERT INTO `ai_image_pricing_audit`
+  (`batch_id`, `target_type`, `target_id`, `model_code`, `resolution_code`, `quality_code`,
+   `action`, `before_json`, `after_json`, `reason`, `operator_user_id`, `created_at`)
+SELECT @pricing_init_batch, 'price', CAST(`id` AS CHAR), `model_code`, `resolution_code`, `quality_code`,
+       'system_init', NULL, JSON_OBJECT('points', `points`, 'vipPoints', `vip_points`, 'vipPriceMode', `vip_price_mode`),
+       '上线初始化 VIP 默认 8 折', 0, UTC_TIMESTAMP()
+FROM `ai_image_point_price`
+WHERE @initialize_vip_prices = 1 AND `is_deleted` = 0;
 
 COMMIT;
 

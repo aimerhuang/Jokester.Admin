@@ -24,8 +24,9 @@ public sealed class NanoBananaImageService(
     IOptions<PromptLibraryOptions> promptLibraryOptions,
     IAiMediaPathResolver mediaPathResolver,
     IAiPromptFilter promptFilter,
-    IUserConsentService userConsentService,
-    IMediaAssetService mediaAssetService) : INanoBananaImageService
+    IMediaAssetService mediaAssetService,
+    IOptions<AiImageSizeModeOptions> sizeModeOptions,
+    ILogger<NanoBananaImageService> logger) : INanoBananaImageService
 {
     private const string MimeType = "image/png";
     private const int MaxInputImageCount = 6;
@@ -41,10 +42,12 @@ public sealed class NanoBananaImageService(
 
     public async Task<GenerateNanoBananaImageResponse> GenerateAsync(GenerateNanoBananaImageRequest request, CancellationToken cancellationToken)
     {
+        AiImageGifRequest.IsGif(request, allowGif: false);
         var taskId = await CreateAsync(new CreateNanoBananaImageTaskRequest
         {
             SizeMode = request.SizeMode,
             CatalogVersion = request.CatalogVersion,
+            ExpectedUnitPoints = request.ExpectedUnitPoints,
             IdempotencyKey = request.IdempotencyKey,
             SourcePromptId = request.SourcePromptId,
             Prompt = request.Prompt,
@@ -73,6 +76,9 @@ public sealed class NanoBananaImageService(
         return new GenerateNanoBananaImageResponse
         {
             TaskId = task.Id,
+            PricingTier = task.PricingTier,
+            UnitPointCost = task.UnitPointCost,
+            ListUnitPointCost = task.ListUnitPointCost,
             SourcePromptId = task.SourcePromptId,
             ModelName = modelConfig.ModelName,
             ModelCode = modelConfig.ModelCode,
@@ -101,24 +107,62 @@ public sealed class NanoBananaImageService(
 
         httpClient.DefaultRequestHeaders.Authorization = null;
 
-        using var httpRequest = imageUrls.Count == 0
-            ? BuildTextToImageRequest(modelConfig, normalizedPrompt, parameters.AspectRatioCode)
-            : BuildImageToImageRequest(modelConfig, normalizedPrompt, parameters.AspectRatioCode, imageUrls);
+        // 路由路径决定协议：含 {model} 或 :generateContent 走 Gemini 原生 generateContent；
+        // 其余（如 /images/generations、/images/edits）走 OpenAI Images 兼容接口，适配只开放 OpenAI 协议的中转。
+        var endpointPath = imageUrls.Count == 0 ? modelConfig.TextToImagePath : modelConfig.ImageToImagePath;
+        var geminiNative = UsesGeminiNativeEndpoint(endpointPath);
+        var mode = imageUrls.Count == 0 ? "generations" : "edits";
+        using var httpRequest = (geminiNative, imageUrls.Count == 0) switch
+        {
+            (true, true) => BuildTextToImageRequest(modelConfig, normalizedPrompt, parameters.AspectRatioCode),
+            (true, false) => BuildImageToImageRequest(modelConfig, normalizedPrompt, parameters.AspectRatioCode, imageUrls),
+            (false, true) => BuildOpenAiGenerationRequest(modelConfig, normalizedPrompt, parameters.Size),
+            (false, false) => BuildOpenAiEditRequest(modelConfig, normalizedPrompt, parameters.Size, imageUrls)
+        };
         httpRequest.Headers.Remove("Authorization");
         httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", modelConfig.ApiKey);
 
-        using var response = await httpClient.SendAsync(httpRequest, cancellationToken);
-        await using var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken);
-        using var document = await JsonDocument.ParseAsync(responseStream, cancellationToken: cancellationToken);
+        logger.LogInformation(
+            "Sending Nano Banana image request. Mode={Mode}, Protocol={Protocol}, ModelCode={ModelCode}, RouteConfigId={RouteConfigId}, ProviderModel={ProviderModel}, Endpoint={Endpoint}, Size={Size}, AspectRatio={AspectRatio}, ReferenceImageCount={ReferenceImageCount}",
+            mode,
+            geminiNative ? "gemini-native" : "openai-images",
+            modelConfig.ModelCode,
+            modelConfig.Id,
+            modelConfig.ProviderModel,
+            httpRequest.RequestUri,
+            parameters.Size,
+            parameters.AspectRatioCode,
+            imageUrls.Count);
 
-        if (!response.IsSuccessStatusCode)
+        using var response = await httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        using var document = await ReadProviderJsonAsync(response, cancellationToken);
+
+        if (!response.IsSuccessStatusCode || document is null)
         {
+            logger.LogWarning(
+                "Nano Banana image request failed. Mode={Mode}, ModelCode={ModelCode}, RouteConfigId={RouteConfigId}, ProviderModel={ProviderModel}, StatusCode={StatusCode}, ErrorCode={ErrorCode}",
+                mode,
+                modelConfig.ModelCode,
+                modelConfig.Id,
+                modelConfig.ProviderModel,
+                (int)response.StatusCode,
+                document is null ? "invalid_json" : ReadProviderErrorCode(document.RootElement));
             throw new AppException(ErrorCodes.BadRequest, "Nano Banana2 image generation service temporarily failed. Please try again later.");
         }
 
-        var image = ReadFirstImage(document.RootElement);
-        var base64 = image.Base64;
-        var savedImage = await SaveImageAsync(base64, ownerUserId, cancellationToken);
+        SavedImage savedImage;
+        if (geminiNative)
+        {
+            savedImage = await SaveImageAsync(ReadFirstImage(document.RootElement).Base64, ownerUserId, cancellationToken);
+        }
+        else
+        {
+            var openAiImage = ReadFirstOpenAiImage(document.RootElement);
+            savedImage = string.IsNullOrWhiteSpace(openAiImage.Base64)
+                ? await DownloadImageAsync(openAiImage.Url!, ownerUserId, cancellationToken)
+                : await SaveImageAsync(openAiImage.Base64, ownerUserId, cancellationToken);
+        }
+
         return new GenerateNanoBananaImageResponse
         {
             ModelName = modelConfig.ModelName,
@@ -140,6 +184,7 @@ public sealed class NanoBananaImageService(
 
     public async Task<long> CreateAsync(CreateNanoBananaImageTaskRequest request, CancellationToken cancellationToken)
     {
+        AiImageGifRequest.IsGif(request, allowGif: false);
         if (request.SizeMode is not null || request.CatalogVersion is not null)
         {
             throw new AppException(
@@ -166,7 +211,6 @@ public sealed class NanoBananaImageService(
             _ = ResolveInputImageFile(imageUrl);
         }
         var siteId = await ResolveAiImageSiteIdAsync(cancellationToken);
-        var pointCost = await GetNanoBananaImageCostAsync(modelConfig.ModelCode, parameters, imageCount, cancellationToken);
         object canonicalRequest = sourcePromptId.HasValue
             ? new
             {
@@ -198,10 +242,9 @@ public sealed class NanoBananaImageService(
             return existingTask.Id;
         }
 
-        await userConsentService.EnsureAiProcessingConsentAsync(userId, modelConfig.ConsentProviderCode, cancellationToken);
-
         var promptPolicy = await promptFilter.EnsureAllowedAsync(normalizedPrompt, "prompt", cancellationToken);
 
+        var pointCost = await GetNanoBananaImageCostAsync(modelConfig.ModelCode, parameters, imageCount, cancellationToken);
         var admission = await admissionService.ReserveAsync(
             userId,
             identity.KeyHash,
@@ -252,7 +295,10 @@ public sealed class NanoBananaImageService(
                 modelConfig.ModelCode,
                 pointCost.ResolutionCode,
                 string.Empty,
-                cancellationToken);
+                cancellationToken, request.ExpectedUnitPoints, async cost =>
+                {
+                    admission = await admissionService.AdjustPointCostAsync(admission, cost, cancellationToken);
+                });
             entity.Id = reservation.TaskId;
             persisted = reservation.Created;
             if (!reservation.Created)
@@ -288,6 +334,11 @@ public sealed class NanoBananaImageService(
             }
             else
             {
+                if (entity.Id > 0)
+                {
+                    var committed = await FindIdempotentTaskAsync(userId, identity, CancellationToken.None);
+                    if (committed?.Id == entity.Id) return committed.Id;
+                }
                 await admissionService.CancelAsync(admission);
             }
 
@@ -715,6 +766,136 @@ public sealed class NanoBananaImageService(
         };
     }
 
+    private static bool UsesGeminiNativeEndpoint(string? path)
+    {
+        return !string.IsNullOrWhiteSpace(path)
+            && (path.Contains("{model}", StringComparison.OrdinalIgnoreCase)
+                || path.Contains(":generateContent", StringComparison.OrdinalIgnoreCase));
+    }
+
+    // OpenAI Images 兼容接口：size 传 WxH（中转按宽高映射 Gemini 的 aspectRatio 与 1K/2K/4K 档位），auto 原样透传。
+    private static HttpRequestMessage BuildOpenAiGenerationRequest(ResolvedAiImageModelConfig config, string prompt, string size)
+    {
+        return new HttpRequestMessage(HttpMethod.Post, BuildEndpoint(config.BaseUrl, config.TextToImagePath, config.ProviderModel))
+        {
+            Content = JsonContent.Create(new
+            {
+                model = config.ProviderModel,
+                prompt,
+                n = 1,
+                size
+            })
+        };
+    }
+
+    private HttpRequestMessage BuildOpenAiEditRequest(ResolvedAiImageModelConfig config, string prompt, string size, IReadOnlyList<string> imageUrls)
+    {
+        var content = new MultipartFormDataContent
+        {
+            { new StringContent(config.ProviderModel), "model" },
+            { new StringContent(prompt), "prompt" },
+            { new StringContent("1"), "n" },
+            { new StringContent(size), "size" }
+        };
+        foreach (var imageUrl in imageUrls)
+        {
+            var file = ResolveInputImageFile(imageUrl);
+            var fileContent = new ByteArrayContent(File.ReadAllBytes(file.Path));
+            fileContent.Headers.ContentType = new MediaTypeHeaderValue(file.MimeType);
+            content.Add(fileContent, "image[]", file.FileName);
+        }
+
+        return new HttpRequestMessage(HttpMethod.Post, BuildEndpoint(config.BaseUrl, config.ImageToImagePath, config.ProviderModel))
+        {
+            Content = content
+        };
+    }
+
+    private async Task<JsonDocument?> ReadProviderJsonAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+    {
+        var maxBytes = MaxGeneratedImageSizeBytes * 4 / 3 + 1_048_576;
+        if (response.Content.Headers.ContentLength is > 0 && response.Content.Headers.ContentLength > maxBytes)
+        {
+            return null;
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        var bytes = await ReadLimitedAsync(stream, maxBytes, cancellationToken);
+        if (bytes is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return JsonDocument.Parse(bytes);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private async Task<SavedImage> DownloadImageAsync(string imageUrl, long ownerUserId, CancellationToken cancellationToken)
+    {
+        if (!Uri.TryCreate(imageUrl, UriKind.Absolute, out var uri)
+            || uri.Scheme != Uri.UriSchemeHttps
+            || !string.IsNullOrEmpty(uri.UserInfo))
+        {
+            throw new AppException(ErrorCodes.BadRequest, MachineErrorCodes.ProviderOutputInvalid, "Nano Banana2 image generation returned an invalid result URL");
+        }
+        var allowedHosts = sizeModeOptions.Value.ResultAllowedHosts;
+        if (allowedHosts.Length > 0 && !allowedHosts.Contains(uri.IdnHost, StringComparer.OrdinalIgnoreCase))
+        {
+            throw new AppException(ErrorCodes.BadRequest, MachineErrorCodes.ProviderOutputInvalid, "Nano Banana2 image result URL is not approved");
+        }
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+        using var response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            logger.LogWarning(
+                "Nano Banana result image download failed. Host={Host}, StatusCode={StatusCode}",
+                uri.IdnHost,
+                (int)response.StatusCode);
+            throw new AppException(ErrorCodes.BadRequest, "Nano Banana2 image generation returned an image URL that could not be downloaded");
+        }
+        if (response.Content.Headers.ContentLength is > 0 && response.Content.Headers.ContentLength > MaxGeneratedImageSizeBytes)
+        {
+            throw new AppException(ErrorCodes.BadRequest, MachineErrorCodes.ProviderOutputInvalid, "Nano Banana2 image result exceeded the allowed size");
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        var bytes = await ReadLimitedAsync(stream, MaxGeneratedImageSizeBytes, cancellationToken)
+            ?? throw new AppException(ErrorCodes.BadRequest, MachineErrorCodes.ProviderOutputInvalid, "Nano Banana2 image result exceeded the allowed size");
+        if (bytes.Length == 0)
+        {
+            throw new AppException(ErrorCodes.BadRequest, "Nano Banana2 image generation returned empty image data");
+        }
+
+        return await SaveImageBytesAsync(bytes, ownerUserId, cancellationToken);
+    }
+
+    private static async Task<byte[]?> ReadLimitedAsync(Stream source, long maxBytes, CancellationToken cancellationToken)
+    {
+        await using var buffer = new MemoryStream();
+        var chunk = new byte[81920];
+        while (true)
+        {
+            var read = await source.ReadAsync(chunk, cancellationToken);
+            if (read == 0)
+            {
+                return buffer.ToArray();
+            }
+            if (buffer.Length + read > maxBytes)
+            {
+                return null;
+            }
+
+            await buffer.WriteAsync(chunk.AsMemory(0, read), cancellationToken);
+        }
+    }
+
     // Gemini 图片模型要求 responseModalities 同时包含 TEXT 与 IMAGE，仅传 IMAGE 会请求失败。
     private static object BuildGenerationConfig(string aspectRatioCode)
     {
@@ -753,6 +934,11 @@ public sealed class NanoBananaImageService(
             throw new AppException(ErrorCodes.BadRequest, "Nano Banana2 image generation returned invalid base64 image data");
         }
 
+        return await SaveImageBytesAsync(bytes, ownerUserId, cancellationToken);
+    }
+
+    private async Task<SavedImage> SaveImageBytesAsync(byte[] bytes, long ownerUserId, CancellationToken cancellationToken)
+    {
         var image = await ImageUploadValidator.ValidateAsync(bytes, MaxGeneratedImageSizeBytes, cancellationToken);
         var storageKey = $"{ownerUserId}/{DateTime.UtcNow:yyyyMM}/{Guid.NewGuid():N}{image.Extension}";
         var savePath = mediaPathResolver.ResolveFilePath(storageKey);
@@ -1076,19 +1262,47 @@ public sealed class NanoBananaImageService(
         throw new AppException(ErrorCodes.BadRequest, "Nano Banana2 image generation response did not contain base64 image data");
     }
 
-    private static string ReadProviderError(JsonElement root)
+    // 解析 OpenAI Images 响应：data[].b64_json 或 data[].url（中转通常返回可下载的结果 URL）。
+    private static (string? Base64, string? Url) ReadFirstOpenAiImage(JsonElement root)
     {
-        if (root.TryGetProperty("error", out var error))
+        if (root.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array)
         {
-            if (TryGetString(error, "message") is { } message)
+            foreach (var item in data.EnumerateArray())
             {
-                return message;
-            }
+                if (item.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
 
-            return error.ToString();
+                var base64 = TryGetString(item, "b64_json");
+                var url = TryGetString(item, "url");
+                if (string.IsNullOrWhiteSpace(base64) && url?.StartsWith("data:", StringComparison.OrdinalIgnoreCase) == true)
+                {
+                    var markerIndex = url.IndexOf(";base64,", StringComparison.OrdinalIgnoreCase);
+                    base64 = markerIndex < 0 ? null : url[(markerIndex + ";base64,".Length)..];
+                    url = null;
+                }
+                if (!string.IsNullOrWhiteSpace(base64) || !string.IsNullOrWhiteSpace(url))
+                {
+                    return (base64, url);
+                }
+            }
         }
 
-        return root.ToString();
+        throw new AppException(ErrorCodes.BadRequest, "Nano Banana2 image generation response did not contain image data");
+    }
+
+    private static string ReadProviderErrorCode(JsonElement root)
+    {
+        if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.Object)
+        {
+            return TryGetString(error, "code")
+                ?? TryGetString(error, "status")
+                ?? TryGetString(error, "type")
+                ?? (error.TryGetProperty("code", out var numeric) && numeric.ValueKind == JsonValueKind.Number ? numeric.ToString() : "unknown");
+        }
+
+        return "unknown";
     }
 
     private static string? TryGetString(JsonElement element, string propertyName)

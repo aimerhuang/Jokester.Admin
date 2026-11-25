@@ -262,18 +262,96 @@ public sealed class AiImageModelRouteAdminServiceTests
     }
 
     [Fact]
-    public async Task Create_RejectsUnknownModelAndProtocolMismatch()
+    public async Task Create_NewModelNeedsPrimaryRouteNameAndValidCode()
     {
         using var context = new TestContext();
         context.SeedRoute("gpt-image-2", "1k", "primary");
 
-        var unknown = await Assert.ThrowsAsync<AppException>(() => context.Service.CreateAsync(NewRoute("brand-new-model", "primary"), default));
+        var fallbackFirst = await Assert.ThrowsAsync<AppException>(() => context.Service.CreateAsync(
+            NewRoute("brand-new-model", "fallback", modelName: "Brand New"), default));
+        var unnamed = await Assert.ThrowsAsync<AppException>(() => context.Service.CreateAsync(NewRoute("brand-new-model", "primary"), default));
+        var badCode = await Assert.ThrowsAsync<AppException>(() => context.Service.CreateAsync(
+            NewRoute("brand new/model", "primary", modelName: "Brand New"), default));
+        Assert.All([fallbackFirst, unnamed, badCode], ex => Assert.Equal(MachineErrorCodes.ValidationError, ex.MachineCode));
+
+        var created = await context.Service.CreateAsync(
+            NewRoute("Brand-New-Model", "primary", provider: "gemini-image", modelName: "Brand New", resolutionCode: ""),
+            default);
+
+        Assert.Equal("brand-new-model", created.ModelCode);
+        Assert.Equal("Brand New", created.ModelName);
+        Assert.Equal("primary", created.RouteRole);
+        var groups = await context.Service.GetListAsync(new AiImageModelRouteQuery(), default);
+        Assert.Equal("Brand New", groups.Single(x => x.ModelCode == "brand-new-model").ModelName);
+        Assert.Equal("create", context.Db.Queryable<AiImageModelConfigAuditEntity>().Single().Action);
+
+        // Later routes of the new model may be fallbacks, and keep the model's name when none is sent.
+        var fallback = await context.Service.CreateAsync(NewRoute("brand-new-model", "fallback", provider: "gemini-image", resolutionCode: ""), default);
+        Assert.Equal("Brand New", fallback.ModelName);
+    }
+
+    [Fact]
+    public async Task Create_RejectsProtocolMismatch()
+    {
+        using var context = new TestContext();
+        context.SeedRoute("gpt-image-2", "1k", "primary");
+
         var mismatch = await Assert.ThrowsAsync<AppException>(() => context.Service.CreateAsync(
             NewRoute("gpt-image-2", "fallback", provider: "gemini-image"),
             default));
 
-        Assert.Equal(MachineErrorCodes.ValidationError, unknown.MachineCode);
         Assert.Equal(MachineErrorCodes.ValidationError, mismatch.MachineCode);
+    }
+
+    [Fact]
+    public async Task GifProviderModel_IsConfigurableAuditedAndNotFrozenByReleases()
+    {
+        using var context = new TestContext();
+        var route = context.SeedRoute("gpt-image-2", "1k", "primary");
+        var published = context.SeedRelease(route.Id, "published", revoked: false);
+
+        var enabled = await context.Service.UpdateAsync(route.Id, UpdateFrom(route, gifProviderModel: "  gpt-image-2-native  "), default);
+        Assert.Equal("gpt-image-2-native", enabled.GifProviderModel);
+        Assert.Equal("gpt-image-2-native", context.GetRoute(route.Id).GifProviderModel);
+
+        // Omitting the field (older admin clients) keeps the GIF model; an empty string switches GIF off.
+        var renamed = await context.Service.UpdateAsync(route.Id, UpdateFrom(context.GetRoute(route.Id), sort: 7), default);
+        Assert.Equal("gpt-image-2-native", renamed.GifProviderModel);
+        var cleared = await context.Service.UpdateAsync(route.Id, UpdateFrom(context.GetRoute(route.Id), gifProviderModel: ""), default);
+        Assert.Null(cleared.GifProviderModel);
+        Assert.Null(context.GetRoute(route.Id).GifProviderModel);
+
+        var audits = context.Db.Queryable<AiImageModelConfigAuditEntity>().OrderBy(x => x.Id).ToList();
+        Assert.Equal(["gifProviderModel", "sort", "gifProviderModel"], audits.Select(x => x.ChangedFields));
+        Assert.Contains("gpt-image-2-native", audits[0].AfterJson);
+        Assert.NotNull(published);
+    }
+
+    [Fact]
+    public async Task Create_AcceptsGifProviderModelOnlyForOpenAiRoutes()
+    {
+        using var context = new TestContext();
+        context.SeedRoute("gpt-image-2", "1k", "primary");
+        var request = NewRoute("gpt-image-2", "fallback");
+        var created = await context.Service.CreateAsync(new CreateAiImageModelRouteRequest
+        {
+            ModelCode = request.ModelCode, ModelName = request.ModelName, ResolutionCode = request.ResolutionCode,
+            RouteRole = request.RouteRole, Provider = request.Provider, ProviderModel = request.ProviderModel,
+            BaseUrl = request.BaseUrl, ApiKey = request.ApiKey, GifProviderModel = "gpt-image-2-native"
+        }, default);
+        Assert.Equal("gpt-image-2-native", created.GifProviderModel);
+
+        // A brand-new Gemini model would otherwise be created; the GIF field alone makes it invalid.
+        var gemini = NewRoute("nano-gif-test", "primary", provider: "gemini-image", modelName: "Nano GIF Test");
+        var rejected = await Assert.ThrowsAsync<AppException>(() => context.Service.CreateAsync(new CreateAiImageModelRouteRequest
+        {
+            ModelCode = gemini.ModelCode, ModelName = gemini.ModelName, ResolutionCode = gemini.ResolutionCode,
+            RouteRole = gemini.RouteRole, Provider = gemini.Provider, ProviderModel = gemini.ProviderModel,
+            BaseUrl = gemini.BaseUrl, ApiKey = gemini.ApiKey, GifProviderModel = "gemini-native"
+        }, default));
+        Assert.Contains("gifProviderModel", rejected.Message);
+        Assert.Empty(context.Db.Queryable<AiImageModelConfigEntity>().Where(x => x.ModelCode == "nano-gif-test").ToList());
+        Assert.Equal(MachineErrorCodes.ValidationError, rejected.MachineCode);
     }
 
     [Theory]
@@ -316,11 +394,13 @@ public sealed class AiImageModelRouteAdminServiceTests
         string? providerModel = null,
         string? baseUrl = null,
         string? requestFormat = null,
-        int? sort = null) => new()
+        int? sort = null,
+        string? gifProviderModel = null) => new()
     {
         Revision = route.Revision,
         ModelName = route.ModelName,
         ProviderModel = providerModel ?? route.ProviderModel,
+        GifProviderModel = gifProviderModel,
         BaseUrl = baseUrl ?? route.BaseUrl,
         ApiKey = apiKey,
         TextToImagePath = route.TextToImagePath,
@@ -329,10 +409,12 @@ public sealed class AiImageModelRouteAdminServiceTests
         Sort = sort ?? route.Sort
     };
 
-    private static CreateAiImageModelRouteRequest NewRoute(string modelCode, string role, string provider = "openai") => new()
+    private static CreateAiImageModelRouteRequest NewRoute(
+        string modelCode, string role, string provider = "openai", string? modelName = null, string resolutionCode = "1k") => new()
     {
         ModelCode = modelCode,
-        ResolutionCode = "1k",
+        ModelName = modelName ?? string.Empty,
+        ResolutionCode = resolutionCode,
         RouteRole = role,
         Provider = provider,
         ProviderModel = modelCode,
@@ -368,6 +450,7 @@ public sealed class AiImageModelRouteAdminServiceTests
                     last_login_time TEXT NULL, last_login_ip TEXT NULL, remark TEXT NULL,
                     created_at TEXT NOT NULL, updated_at TEXT NULL, is_deleted INTEGER NOT NULL DEFAULT 0);
                 CREATE TABLE ai_image_model_config (
+                    gif_provider_model TEXT NULL,
                     id INTEGER PRIMARY KEY AUTOINCREMENT, model_code TEXT NOT NULL, model_name TEXT NOT NULL,
                     provider TEXT NOT NULL, provider_model TEXT NOT NULL, resolution_code TEXT NOT NULL,
                     route_role TEXT NOT NULL, base_url TEXT NOT NULL, api_key TEXT NOT NULL,
@@ -401,6 +484,7 @@ public sealed class AiImageModelRouteAdminServiceTests
                     value_int_2 INTEGER NULL, sort INTEGER NOT NULL, status INTEGER NOT NULL,
                     created_at TEXT NOT NULL, updated_at TEXT NULL, is_deleted INTEGER NOT NULL DEFAULT 0);
                 CREATE TABLE ai_image_point_price (
+                    vip_points INTEGER NULL, vip_price_mode TEXT DEFAULT 'follow', revision INTEGER DEFAULT 0, updated_by INTEGER NULL,
                     id INTEGER PRIMARY KEY AUTOINCREMENT, model_code TEXT NOT NULL, resolution_code TEXT NOT NULL,
                     quality_code TEXT NOT NULL, points INTEGER NOT NULL, price_amount NUMERIC NOT NULL,
                     currency TEXT NOT NULL, sort INTEGER NOT NULL, status INTEGER NOT NULL,

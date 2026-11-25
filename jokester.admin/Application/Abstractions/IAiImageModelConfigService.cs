@@ -9,6 +9,9 @@ public interface IAiImageModelConfigService
     Task<ResolvedAiImageModelConfig> ResolveAsync(string? modelCode, string? resolutionCode, CancellationToken cancellationToken);
 
     Task<IReadOnlyList<ResolvedAiImageModelConfig>> ResolveRoutesAsync(string? modelCode, string? resolutionCode, CancellationToken cancellationToken);
+
+    /// <summary>按主备顺序返回业务模型可用的原生 GIF 路由。</summary>
+    Task<IReadOnlyList<ResolvedAiImageModelConfig>> ResolveGifRoutesAsync(string modelCode, CancellationToken cancellationToken);
 }
 
 public sealed class ResolvedAiImageModelConfig
