@@ -77,8 +77,8 @@ if (-not (Test-Path -LiteralPath $archivePath -PathType Leaf)) {
     throw "Required deployment file is missing: $archivePath"
 }
 
-# The deploy bundle is the docker/ directory (production files only) plus the schema used
-# to initialize an empty MySQL volume. It is extracted into DEPLOY_ROOT on every release;
+# The deploy bundle includes production Docker files, the empty-volume schema, and
+# the release SQL files for existing databases. It is extracted into DEPLOY_ROOT on every release;
 # .env, api.env, certs and data are never part of it.
 $bundleName = 'jokester-docker-bundle.tar'
 $bundleFiles = @(
@@ -87,7 +87,6 @@ $bundleFiles = @(
     'jokester.sh',
     '.env.production.example',
     'api.env.production.example',
-    'legal.env.example',
     'README.md',
     'mysql/initdb/10-jokester-init.sh',
     'mysql/import/README.md'
@@ -101,7 +100,9 @@ foreach ($file in $bundleFiles) {
 Push-Location $checkoutDirectory
 try {
     # Relative paths only: GNU tar would read a drive letter as a remote host name.
-    Invoke-NativeCommand tar (@('-cf', "artifacts/$bundleName", '-C', 'docker') + $bundleFiles + @('-C', '..', 'jokester.admin.sql'))
+    $releaseSql = Get-Content -LiteralPath 'deploy/api-sql-files.txt'
+    $env:COPYFILE_DISABLE = '1' # Keep macOS extended attributes out of the Linux bundle.
+    Invoke-NativeCommand tar (@('-cf', "artifacts/$bundleName", '-C', 'docker') + $bundleFiles + @('-C', '..', 'jokester.admin.sql') + $releaseSql)
 }
 finally {
     Pop-Location

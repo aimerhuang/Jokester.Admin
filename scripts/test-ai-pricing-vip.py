@@ -122,9 +122,15 @@ def verify_upgrade(baseline_schema):
     for query in (sql, upgraded):
         assert query(check) == '0', 'incorrect initial VIP price or missing per-row system audit'
         assert query('SELECT revision,pricing_revision,default_vip_discount_percent FROM ai_image_pricing_setting') == '0\t1\t80'
-    for table in ('ai_image_point_price', 'ai_image_task', 'ai_image_pricing_setting', 'ai_image_model_policy', 'ai_image_pricing_audit'):
+    for table in ('ai_image_point_price', 'ai_image_pricing_setting', 'ai_image_model_policy', 'ai_image_pricing_audit'):
         ddl = 'SHOW CREATE TABLE ' + table
         assert re.sub(r'AUTO_INCREMENT=\d+ ', '', sql(ddl)) == re.sub(r'AUTO_INCREMENT=\d+ ', '', upgraded(ddl)), table
+    # Other migrations also extend the task table. Compare the columns owned by this migration.
+    task_columns = """SELECT column_name, column_type, collation_name, is_nullable, column_default, extra, column_comment
+        FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='ai_image_task'
+        AND column_name IN ('pricing_tier', 'list_unit_point_cost', 'access_basis') ORDER BY column_name"""
+    fresh_columns = sql(task_columns).splitlines()
+    assert len(fresh_columns) == 3 and fresh_columns == upgraded(task_columns).splitlines(), 'ai_image_task pricing columns'
     upgraded("""UPDATE ai_image_point_price SET vip_price_mode='manual',vip_points=2,revision=3 WHERE model_code='round';
         UPDATE ai_image_pricing_setting SET revision=1,pricing_revision=3,default_vip_discount_percent=70;""")
     audits = upgraded('SELECT COUNT(*) FROM ai_image_pricing_audit')
@@ -133,7 +139,7 @@ def verify_upgrade(baseline_schema):
     assert upgraded("SELECT vip_price_mode,vip_points,revision FROM ai_image_point_price WHERE model_code='round'") == 'manual\t2\t3'
     assert upgraded('SELECT revision,pricing_revision,default_vip_discount_percent FROM ai_image_pricing_setting') == '1\t3\t70'
     assert upgraded("SELECT vip_points,updated_by FROM ai_image_point_price WHERE model_code='deleted'") == 'NULL\tNULL'
-    print('PASS standard prices, VIP rounding, per-price audit, five table definitions, migration rerun:', upgrade, flush=True)
+    print('PASS standard prices, VIP rounding, per-price audit, pricing schema, migration rerun:', upgrade, flush=True)
 
 
 def prepare(baseline_schema=None):
