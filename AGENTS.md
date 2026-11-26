@@ -5,7 +5,7 @@
 - 项目根目录：`D:\Project\jokester.admin`
 - 实际 Web API 项目目录：`D:\Project\jokester.admin\jokester.admin`
 - 根目录设计文档：`后台管理系统设计书.md`
-- 项目 docs：`docs/integration-guide.md`、`docs/architecture.md`、`docs/runbook.md`、`docs/point-recharge.md`、`docs/ai-prompt-filter.md`、`docs/ai-image-size-mode-prd.md`、`docs/ai-infinite-canvas-prd.md`、`docs/ai-model-config-status-prd.md`、`docs/user-admin-prd.md`、`docs/ai-pricing-vip-prd.md`
+- 项目 docs：`docs/integration-guide.md`、`docs/architecture.md`、`docs/runbook.md`、`docs/point-recharge.md`、`docs/ai-prompt-filter.md`、`docs/ai-image-size-mode-prd.md`、`docs/ai-infinite-canvas-prd.md`、`docs/ai-model-config-status-prd.md`、`docs/user-admin-prd.md`、`docs/ai-pricing-vip-prd.md`、`docs/site-announcement-qq-group-prd.md`
 - 根目录数据库脚本：`jokester.admin.sql`
 
 ## Current Stack
@@ -106,6 +106,14 @@ POST /api/dev/bootstrap/super-admin
 - 文章列表和详情返回 `coverUrl` 与 `thumbnailUrl`
 - `thumbnailUrl` 优先使用 `coverUrl`，其次取 `blog_article_media` 关联到的第一张 `blog_media.url`，最后从正文第一张 `<img src="...">` 兜底提取
 - 创建/更新文章时会解析正文中的 `<img src="...">`，用匹配到的 `blog_media.url` 同步维护 `blog_article_media`
+
+## Site Announcement And Community Contract
+
+- `/api/announcements` 和 `/api/community/qq-group` 只要求登录。对应的 `/api/admin/` 接口要求超级管理员，写操作在事务中锁定并复核操作者、校验 `revision`。封面上传在写文件前复核操作者。
+- 用户侧列表仅包含已发布且未删除的公告，已发布置顶最多三条。首次发布时间按 UTC 保存，编辑、下线后重新发布均沿用它。列表和群配置的实例内缓存为 60 秒，后台事务提交后立即失效。
+- 公告和群文案按纯文本渲染。公告按钮只接受站内路径或 HTTPS，加群链接限 QQ 官方白名单。封面必须通过本站解码重编码的上传接口写入 `/site-media/announcement/`。
+- 浏览器按用户 ID 保存已读时间和提醒选择。配置关闭时用户接口只返回 `enabled=false`。提醒间隔范围为 1–30 天，`promptVersion` 改变后重新判断。
+- 先执行 `docs/migrations/20261126-add-site-announcement.sql`，再部署 API、Web。生产需持久化 `./data/site-media`。产品契约见 `docs/site-announcement-qq-group-prd.md`。
 
 ## Points And AI Image Billing
 

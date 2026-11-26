@@ -19,6 +19,7 @@ artifacts
 .codex-build
 private-media
 wwwroot
+**/wwwroot/site-media
 publish
 publish-next
 publish-backup-*

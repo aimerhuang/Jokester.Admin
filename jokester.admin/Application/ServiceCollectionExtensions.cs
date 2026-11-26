@@ -21,6 +21,11 @@ public static class ServiceCollectionExtensions
         services.AddHostedService<AccountDeletionWorker>();
         services.AddHttpClient<IEmailValidationService, EmailValidationService>();
         services.AddScoped<UserStatusTransition>();
+        services.AddSingleton(TimeProvider.System);
+        services.AddSingleton<SiteNoticeCache>();
+        services.AddScoped<IAnnouncementService, AnnouncementService>();
+        services.AddScoped<IAnnouncementAdminService, AnnouncementAdminService>();
+        services.AddScoped<ICommunitySettingService, CommunitySettingService>();
         services.AddScoped<IUserAdminService, UserAdminService>();
         services.AddScoped<IUserService, UserService>();
         services.AddScoped<IRoleService, RoleService>();

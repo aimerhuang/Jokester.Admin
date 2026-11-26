@@ -132,10 +132,12 @@ builder.Services
 var app = builder.Build();
 var publicMediaRoot = app.Environment.WebRootPath ?? Path.Combine(app.Environment.ContentRootPath, "wwwroot");
 var publicBlogRoot = Path.Combine(publicMediaRoot, "blog");
+var publicSiteMediaRoot = Path.Combine(publicMediaRoot, "site-media");
 var publicAvatarRoot = Path.Combine(publicMediaRoot, "avatar");
 var promptLibraryOptions = app.Services.GetRequiredService<IOptions<PromptLibraryOptions>>().Value;
 Directory.CreateDirectory(publicBlogRoot);
 Directory.CreateDirectory(publicAvatarRoot);
+Directory.CreateDirectory(publicSiteMediaRoot);
 
 if (isAiMediaMigration)
 {
@@ -197,6 +199,12 @@ app.UseMiddleware<SecurityHeadersMiddleware>();
 app.UseHttpsRedirection();
 app.UseStaticFiles(new StaticFileOptions { RequestPath = "/blog", FileProvider = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(publicBlogRoot) });
 app.UseStaticFiles(new StaticFileOptions { RequestPath = "/avatar", FileProvider = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(publicAvatarRoot) });
+app.UseStaticFiles(new StaticFileOptions
+{
+    RequestPath = "/site-media",
+    FileProvider = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(publicSiteMediaRoot),
+    OnPrepareResponse = context => context.Context.Response.Headers.CacheControl = "public, max-age=604800, immutable"
+});
 if (!string.IsNullOrWhiteSpace(promptLibraryOptions.ImageRoot))
 {
     var promptImageRoot = Path.GetFullPath(promptLibraryOptions.ImageRoot);

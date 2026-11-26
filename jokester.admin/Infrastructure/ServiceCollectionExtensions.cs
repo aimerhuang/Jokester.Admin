@@ -237,6 +237,7 @@ public static class ServiceCollectionExtensions
             });
         services.AddAuthorization(options =>
         {
+            options.AddPolicy(SiteNoticeAdmin.Policy, policy => policy.RequireAuthenticatedUser().RequireClaim("is_super_admin", "true"));
             options.FallbackPolicy = new Microsoft.AspNetCore.Authorization.AuthorizationPolicyBuilder()
                 .RequireAuthenticatedUser()
                 .Build();

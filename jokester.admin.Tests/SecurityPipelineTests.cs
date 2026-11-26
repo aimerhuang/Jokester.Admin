@@ -1,4 +1,7 @@
 using System.Net;
+using System.Net.Http.Headers;
+using jokester.admin.Application.Abstractions;
+using Microsoft.Extensions.DependencyInjection;
 using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -28,11 +31,61 @@ public sealed class SecurityPipelineTests
     [InlineData("GET", "/api/admin/users/1/point-details")]
     [InlineData("GET", "/api/admin/users/1/status-audits")]
     [InlineData("PUT", "/api/admin/users/1/status")]
-    public async Task AdminUsers_AnonymousRequestsRequireAuthentication(string method, string path)
+    [InlineData("GET", "/api/announcements")]
+    [InlineData("GET", "/api/announcements/1")]
+    [InlineData("GET", "/api/community/qq-group")]
+    [InlineData("GET", "/api/admin/announcements")]
+    [InlineData("GET", "/api/admin/announcements/1")]
+    [InlineData("POST", "/api/admin/announcements")]
+    [InlineData("PUT", "/api/admin/announcements/1")]
+    [InlineData("PUT", "/api/admin/announcements/1/status")]
+    [InlineData("DELETE", "/api/admin/announcements/1")]
+    [InlineData("POST", "/api/admin/announcements/images")]
+    [InlineData("GET", "/api/admin/community/qq-group")]
+    [InlineData("PUT", "/api/admin/community/qq-group")]
+    public async Task ProtectedRoutes_AnonymousRequestsRequireAuthentication(string method, string path)
     {
         using var request = new HttpRequestMessage(new HttpMethod(method), path);
         using var response = await _client.SendAsync(request);
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("GET", "/api/admin/announcements")]
+    [InlineData("POST", "/api/admin/announcements/images")]
+    [InlineData("PUT", "/api/admin/community/qq-group")]
+    public async Task NoticeAdmin_RejectsOrdinaryUsersBeforeLoadingOrValidatingBody(string method, string path)
+    {
+        using var scope = _factory.Services.CreateScope();
+        var token = scope.ServiceProvider.GetRequiredService<ITokenService>().CreateAccessToken(2, "reader", false, "test");
+        using var request = new HttpRequestMessage(new HttpMethod(method), path);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        using var response = await _client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Equal("RESOURCE_FORBIDDEN", body.RootElement.GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task AnnouncementCover_IsPublicAndCacheable()
+    {
+        var env = _factory.Services.GetRequiredService<IWebHostEnvironment>();
+        var root = env.WebRootPath ?? Path.Combine(env.ContentRootPath, "wwwroot");
+        var relative = $"site-media/announcement/202611/{Guid.NewGuid():N}.png";
+        var path = Path.Combine(root, relative);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        try
+        {
+            byte[] content = [137, 80, 78, 71];
+            await File.WriteAllBytesAsync(path, content);
+            using var response = await _client.GetAsync("/" + relative);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.Equal("image/png", response.Content.Headers.ContentType?.MediaType);
+            Assert.True(response.Headers.CacheControl?.Public);
+            Assert.Equal(TimeSpan.FromDays(7), response.Headers.CacheControl?.MaxAge);
+            Assert.Equal(content, await response.Content.ReadAsByteArrayAsync());
+        }
+        finally { File.Delete(path); }
     }
 
     [Fact]

@@ -34,6 +34,8 @@ public static class MachineErrorCodes
     public const string SessionRevoked = "SESSION_REVOKED";
     public const string ResourceForbidden = "RESOURCE_FORBIDDEN";
     public const string ResourceNotFound = "RESOURCE_NOT_FOUND";
+    public const string AnnouncementRevisionConflict = "ANNOUNCEMENT_REVISION_CONFLICT";
+    public const string CommunitySettingRevisionConflict = "COMMUNITY_SETTING_REVISION_CONFLICT";
     public const string UserStatusProtected = "USER_STATUS_PROTECTED";
     public const string UserDeletionInProgress = "USER_DELETION_IN_PROGRESS";
     public const string Conflict = "CONFLICT";

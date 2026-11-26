@@ -207,6 +207,33 @@ public sealed class SecurityRateLimitMiddlewareTests
         }
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task NoticeWritesSharePerUserAndIpQuotaAcrossBothRoutes(bool sameUser)
+    {
+        var redis = CreateCountingDatabase(new());
+        var connection = new Mock<IConnectionMultiplexer>();
+        connection.Setup(x => x.GetDatabase(It.IsAny<int>(), It.IsAny<object>())).Returns(redis.Object);
+        var middleware = new SecurityRateLimitMiddleware(_ => Task.CompletedTask, NullLogger<SecurityRateLimitMiddleware>.Instance);
+        for (var i = 1; i <= 31; i++)
+        {
+            var path = i % 2 == 1 ? "/api/admin/community/qq-group" : "/api/admin/announcements/42/status";
+            var user = sameUser ? 1 : i;
+            var ip = IPAddress.Parse(sameUser ? $"192.0.2.{i}" : "192.0.2.1");
+            var read = CreateUploadContext(path, user, 0);
+            read.Connection.RemoteIpAddress = ip;
+            read.Request.Method = HttpMethods.Get;
+            await middleware.InvokeAsync(read, connection.Object);
+            Assert.Equal(200, read.Response.StatusCode);
+            var write = CreateUploadContext(path, user, 10);
+            write.Connection.RemoteIpAddress = ip;
+            write.Request.Method = HttpMethods.Put;
+            await middleware.InvokeAsync(write, connection.Object);
+            Assert.Equal(i <= 30 ? 200 : 429, write.Response.StatusCode);
+        }
+    }
+
     private static DefaultHttpContext CreateEmailCodeContext(
         string propertyName,
         string email,

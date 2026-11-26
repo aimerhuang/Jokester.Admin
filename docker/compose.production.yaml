@@ -7,6 +7,7 @@ services:
     volumes:
       - ./data:/data
       - ./data/blog:/app/wwwroot/blog
+      - ./data/site-media:/app/wwwroot/site-media
       - ./data/avatar:/app/wwwroot/avatar
       - ./data/data-protection:/home/app/.aspnet/DataProtection-Keys
 

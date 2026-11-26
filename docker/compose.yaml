@@ -92,6 +92,7 @@ services:
     volumes:
       - api-data:/data
       - api-blog:/app/wwwroot/blog
+      - api-site-media:/app/wwwroot/site-media
       - api-avatar:/app/wwwroot/avatar
       - api-keys:/home/app/.aspnet/DataProtection-Keys
     security_opt:
@@ -135,4 +136,5 @@ volumes:
   api-data:
   api-blog:
   api-avatar:
+  api-site-media:
   api-keys:
