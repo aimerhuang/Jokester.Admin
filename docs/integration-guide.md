@@ -673,3 +673,31 @@ Authorization: Bearer <accessToken>
 - `GET /api/admin/users/{id}/status-audits` 返回状态变更记录。账户注销完成时会清空该用户审计原因和积分流水备注中的个人信息。
 
 生图任务的禁用结算差异如下。`size-mode-v1` 任务在 Worker 预检阶段以 `ACCOUNT_UNAVAILABLE` 失败并退款，不计入模型状态样本。legacy 任务保持现有 Worker 流程，已进入 Provider 的任务按 Provider 结果结算，失败时退款。
+
+## 站内公告与 QQ 群
+
+登录用户可调用下列读接口。响应沿用成功信封的 `data` 字段，时间使用 UTC，未设置的可选字段会省略。
+
+| 方法和路径 | 请求和响应 |
+| --- | --- |
+| `GET /api/announcements` | `pageIndex` 从 1 开始，`pageSize` 默认 20，范围 1–50。返回 `items`、`total`、`pageIndex`、`pageSize`、`hasMore` 和全部已发布公告的 `latestPublishedAt`。空列表省略该时间。置顶在前，同组按首次发布时间、ID 倒序。 |
+| `GET /api/announcements/{id}` | 列表项有 `id`、`title`、`summary`、`category`、`isPinned`、`isImportant`、`hasDetail`、`publishedAt` 和可选的 `coverUrl`、`versionLabel`。详情另外提供可选的 `content`、`linkUrl`、`linkText`。下线、草稿、删除和不存在均返回 404。 |
+| `GET /api/community/qq-group` | 关闭时仅返回 `enabled=false`。开启时提供 `title`、`description`、`groupName`、`groupNumber`、可选 `joinUrl`、`remindIntervalDays`、`promptVersion`。 |
+
+打开公告栏时记录服务端 `latestPublishedAt`。相同账号的 QQ 提醒选择与公告已读时间分别保存在浏览器 `community.qqPrompt.<userId>` 和 `announcements.lastSeenAt.<userId>`。纯文本正文保留换行。配置的文案在两种界面语言中原样展示。
+
+| 超管接口 | 契约 |
+| --- | --- |
+| `GET /api/admin/announcements` | 支持 `status`（0 草稿、1 已发布、2 已下线）、`keyword`（标题字面匹配，最多 80 字）、`pageIndex`、`pageSize`（默认 20、上限 100）。 |
+| `GET /api/admin/announcements/{id}` | 详情含 `revision`、状态、创建与修改的 UTC 时间、操作人 ID 与姓名。 |
+| `POST /api/admin/announcements` | 提交 `title`、`summary`、`category`、`status`（0 或 1）。可带 `content`、`coverUrl`、`versionLabel`、`isImportant`、`isPinned` 和成对的 `linkText`、`linkUrl`。返回新详情。 |
+| `PUT /api/admin/announcements/{id}` | 提交完整内容与 `revision`，返回更新后详情。编辑以及再次发布均保留首次发布时间。 |
+| `PUT /api/admin/announcements/{id}/status` | 提交 `status` 和 `revision`。首次发布、下线、再次发布分别为 0→1、1→2、2→1。同状态和当前修订重复提交成功。 |
+| `DELETE /api/admin/announcements/{id}?revision=…` | 仅草稿和已下线可删除。 |
+| `POST /api/admin/announcements/images` | `multipart/form-data` 的 `file` 上限 2 MiB。按实际解码结果接受 PNG、JPEG、WebP，返回 `url`。封面路径位于 `/site-media/announcement/`。 |
+| `GET /api/admin/community/qq-group` | 包含完整表单字段、`revision`、`promptVersion`，以及可选的 `updatedAt`、`updatedBy`、`updatedByName`。 |
+| `PUT /api/admin/community/qq-group` | 提交 `enabled`、`groupName`、`groupNumber`、可选 `joinUrl`、`title`、`description`、`remindIntervalDays`、`revision`。`bumpPromptVersion=true` 会触发新一轮提醒，返回保存后配置。 |
+
+分类取 `feature`、`activity`、`maintenance`、`notice`。跳转按钮支持单 `/` 开头的站内路径或 HTTPS 链接。加群链接需使用 `qm.qq.com`、`qun.qq.com`、`jq.qq.com` 的标准 HTTPS 端口。群号须为 5–12 位、首位非零的数字，再次提醒间隔为 1–30 天。
+
+两个后台前缀共享用户和 IP 各每分钟 30 次的写入配额。非超管返回 403，写操作还会复核数据库中的操作者。第四条已发布置顶公告或删除已发布公告返回 `409 CONFLICT`。修订冲突分别返回 `409 ANNOUNCEMENT_REVISION_CONFLICT` 或 `409 COMMUNITY_SETTING_REVISION_CONFLICT`，客户端应重新读取再编辑。

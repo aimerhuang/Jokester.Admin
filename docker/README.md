@@ -5,7 +5,7 @@ MySQL / Redis / Node / .NET：
 
 ```
 浏览器 ──► web (nginx + 前端 dist)  :8080
-             ├─ /api/*、/avatar/*、/blog/*、/prompt-images/*、/swagger ──► api:8080
+             ├─ /api/*、/avatar/*、/blog/*、/site-media/*、/prompt-images/*、/swagger ──► api:8080
              └─ 其余路径 ──► SPA index.html
            api ──► mysql:3306、redis:6379、mailpit:1025(本地)
 ```
@@ -85,7 +85,7 @@ MySQL / Redis / Node / .NET：
 | --- | --- |
 | `mysql-data` / `redis-data` | 数据库、Redis AOF |
 | `api-data` | `/data/private-media/ai` 私有 AI 图片、`/data/prompt-images` |
-| `api-blog` / `api-avatar` | 博客媒体、头像 |
+| `api-blog` / `api-avatar` / `api-site-media` | 博客媒体、头像、公告封面 |
 | `api-keys` | ASP.NET DataProtection Keys |
 
 `down` 保留数据；`reset` 删除全部卷（需输入 `RESET` 确认）。
@@ -121,4 +121,4 @@ MySQL / Redis / Node / .NET：
 `CF-Connecting-IP`；不经 Cloudflare 时改为 `none`。
 
 生产数据目录：MySQL / Redis 使用命名卷 `jokester-admin_mysql-data`、`jokester-admin_redis-data`；
-上传文件与 DataProtection Keys 在 `./data/`（`private-media`、`prompt-images`、`blog`、`avatar`、`data-protection`）。
+上传文件与 DataProtection Keys 在 `./data/`（`private-media`、`prompt-images`、`blog`、`avatar`、`site-media`、`data-protection`）。

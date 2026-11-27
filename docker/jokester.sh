@@ -81,7 +81,7 @@ prepare_data_directories() {
   is_production || return 0
   local directory cert_dir
   install -d -m 0755 data
-  for directory in private-media/ai prompt-images blog avatar data-protection; do
+  for directory in private-media/ai prompt-images blog avatar site-media data-protection; do
     install -d -m 0750 "data/$directory"
   done
   chown -R "$app_uid:$app_uid" data 2>/dev/null || echo "warning: could not chown ./data to $app_uid (run as root)." >&2

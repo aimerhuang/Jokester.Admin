@@ -33,6 +33,7 @@ RUN mkdir -p \
         /data/private-media/ai \
         /data/prompt-images \
         /app/wwwroot/blog \
+        /app/wwwroot/site-media \
         /app/wwwroot/avatar \
         /home/app/.aspnet/DataProtection-Keys \
     && chown -R app:app /data /app/wwwroot /home/app/.aspnet

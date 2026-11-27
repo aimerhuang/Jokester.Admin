@@ -272,3 +272,11 @@ Provider 租约前按最新快照复检。MySQL 保存权威规则，进程内�
 - `POST/GET/DELETE /api/auth/account-deletion/requests`
 - `GET/DELETE /api/logs/login`
 - `GET/DELETE /api/logs/operation`
+
+## 站内公告与社群配置
+
+`site_announcement` 保存公告内容、状态、首次发布时间、操作人和修订号。`published_at` 保留 UTC 微秒，Web 用它作为已读时间。新增已发布置顶时，事务先锁住 `site_community_setting` 的固定行，再统计已发布置顶数，使多个超管并发发布时也能守住三条上限。只编辑已置顶公告的正文不会占用新的置顶名额。
+
+`site_community_setting` 的 `id=1` 保存群配置、提醒版本与修订号。后台写入沿用操作日志。`SiteNoticeCache` 在每个 API 实例提供两份 60 秒快照，分别服务已发布公告列表和用户可见群配置。事务提交后本实例立即失效，新请求会重新加载。公告详情每次按 ID、发布状态和删除标志查库。不同账号的已读和提醒选择由 Web 按用户 ID 存在本地。
+
+封面由 `ImageUploadValidator` 解码并重新编码后写入公开媒体目录 `wwwroot/site-media/announcement`。API 通过 `/site-media` 提供文件，Vite 开发代理和生产 nginx 都将相同前缀转发到 API。随机文件名支持七天不可变缓存。

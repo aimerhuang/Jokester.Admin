@@ -604,3 +604,11 @@ FROM ai_image_task WHERE output_format = 'gif' AND billing_status = 0;
 2. 部署 API，然后部署 Web。`ai_operator` 权限回收按上文“用户接口鉴权收紧上线检查”单独执行。
 3. 用普通用户调用 `/api/admin/users` 确认返回 `403 RESOURCE_FORBIDDEN`，用超级管理员验证列表、状态审计和积分详情。
 4. 禁用测试账号后确认 Refresh Token 立即撤销，`size-mode-v1` 排队任务以 `ACCOUNT_UNAVAILABLE` 失败并退款，legacy 任务按 Provider 结果结算。
+
+## 发布站内公告与 QQ 群弹窗
+
+1. 现有库先执行 `docs/migrations/20261126-add-site-announcement.sql`，再发布 API，最后发布 Web。新库随 `jokester.admin.sql` 初始化。初始公告列表为空，弹窗关闭，提醒间隔 3 天。
+2. 生产部署目录使用 `./data/site-media` 持久化封面，与 `./data/avatar` 属主相同。`docker/jokester.sh` 的部署流程会准备目录。手工部署时可在 Linux 部署目录执行 `install -d -m 0750 -o 1654 -g 1654 ./data/site-media`，核对 Compose 将其挂到 API 的 `/app/wwwroot/site-media`。
+3. 超管进入 `/admin/announcements`，上传封面并发布，用普通账号打开铃铛查看。直接请求封面应返回图片及 `Cache-Control: public, max-age=604800, immutable`。若返回 HTML，请核对 Web 镜像的 nginx `/site-media/` 代理。上传出现文件权限错误时核对绑定目录属主和权限。
+4. 在「QQ 群弹窗」页签填写真实群名、群号和可选的 QQ 官方邀请链接后启用。换群时勾选「重新提醒所有用户」，已选择不再提醒的浏览器在下次加载时可看到新版本。跨 API 实例最长等待 60 秒。
+5. 回滚前可关闭弹窗并下线公告。先回退 Web，再回退 API，两张表和封面目录应保留，以便再次发布。
