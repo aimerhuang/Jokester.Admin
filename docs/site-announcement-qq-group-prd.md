@@ -488,4 +488,4 @@ DTO 中的时间为带 `Z` 的 ISO 8601。发布日期由前端按浏览器本�
 
 ## 16. 本地验证记录
 
-2026-11-26，后端构建及 77 项定向测试通过，前端构建及 16 项定向 Playwright 测试通过。另用独立 MySQL、Redis、API 和 Web 对接真实浏览器验证了发布、上传封面、红点与 QQ 提醒。新库与升级库的两张表结构一致，重复迁移保留配置，容器重建后封面仍可读取。[逐项验收记录](../.trellis/tasks/11-26-site-announcement-qq-group/acceptance.md)
+2026-11-26，后端构建及 77 项定向测试通过，前端构建及 16 项定向 Playwright 测试通过。另用独立 MySQL、Redis、API 和 Web 对接真实浏览器验证了发布、上传封面、红点与 QQ 提醒。新库与升级库的两张表结构一致，重复迁移保留配置，容器重建后封面仍可读取。[逐项验收记录](../.trellis/tasks/archive/2026-11/11-26-site-announcement-qq-group/acceptance.md)
